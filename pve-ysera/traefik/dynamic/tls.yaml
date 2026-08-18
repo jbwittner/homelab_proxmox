@@ -1,0 +1,10 @@
+tls:
+  stores:
+    default:
+      defaultGeneratedCert:
+        resolver: cloudflare
+        domain:
+          main: "wittner.tech"
+          sans:
+            - "*.wittner.tech"
+            - "*.lan.wittner.tech"

@@ -1,0 +1,18 @@
+http:
+  routers:
+    authentik:
+      rule: "Host(`authentik.wittner.tech`)"
+      entryPoints: ["websecure"]
+      service: authentik
+      tls:
+        certResolver: cloudflare
+  services:
+    authentik:
+      loadBalancer:
+        servers:
+          - url: "https://192.168.1.80"
+        passHostHeader: true
+        serversTransport: gw-transport
+  serversTransports:
+    gw-transport:
+      serverName: "authentik.wittner.tech"

@@ -1,0 +1,22 @@
+http:
+  routers:
+    openbao:
+      rule: "Host(`openbao.lan.wittner.tech`)"
+      entryPoints:
+        - websecure
+      service: openbao
+      tls: {}
+
+  services:
+    openbao:
+      loadBalancer:
+        servers:
+          - url: "https://192.168.1.80"
+        passHostHeader: true
+        serversTransport: openbao-transport
+
+  serversTransports:
+    # serverName obligatoire : le backend est une IP, donc sans lui Traefik
+    # n'envoie aucun SNI et le Gateway Cilium ne trouve aucun listener.
+    openbao-transport:
+      serverName: "openbao.lan.wittner.tech"

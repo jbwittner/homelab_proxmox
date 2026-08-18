@@ -1,0 +1,15 @@
+http:
+  routers:
+    gethomepage:
+      rule: "Host(`home.wittner.tech`)"
+      entryPoints:
+        - websecure
+      service: gethomepage
+      tls: {}
+
+  services:
+    gethomepage:
+      loadBalancer:
+        servers:
+          - url: "http://192.168.1.54:3000"
+        passHostHeader: true

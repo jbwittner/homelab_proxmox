@@ -1,0 +1,10 @@
+---
+# For configuration options and examples, please see:
+# https://gethomepage.dev/configs/settings/
+
+target: _blank
+
+providers:
+  openweathermap: openweathermapapikey
+  weatherapi: weatherapiapikey
+logpath: /opt/homepage

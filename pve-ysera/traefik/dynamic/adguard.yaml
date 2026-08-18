@@ -1,0 +1,15 @@
+http:
+  routers:
+    adguard:
+      rule: "Host(`adguard.lan.wittner.tech`)"
+      entryPoints:
+        - websecure
+      service: adguard
+      tls: {}
+
+  services:
+    adguard:
+      loadBalancer:
+        servers:
+          - url: "http://192.168.1.2:80"
+        passHostHeader: true

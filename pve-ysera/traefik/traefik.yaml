@@ -1,0 +1,27 @@
+entryPoints:
+  web:
+    address: ":80"
+  websecure:
+    address: ":443"
+
+api:
+  dashboard: true
+
+providers:
+  file:
+    directory: /etc/traefik-git/dynamic
+    watch: true
+certificatesResolvers:
+  cloudflare:
+    acme:
+      email: jeanbaptiste.wittner@outlook.com
+      storage: /etc/traefik/acme/acme.json
+      # Décommente le staging pour tester d'abord (voir §5)
+      # caServer: https://acme-staging-v02.api.letsencrypt.org/directory
+      dnsChallenge:
+        provider: cloudflare
+        resolvers:
+          - "1.1.1.1:53"
+log:
+  level: INFO
+accessLog: {}

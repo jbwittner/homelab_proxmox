@@ -1,0 +1,22 @@
+http:
+  routers:
+    argocd:
+      rule: "Host(`argocd.lan.wittner.tech`)"
+      entryPoints:
+        - websecure
+      service: argocd
+      tls: {}
+
+  services:
+    argocd:
+      loadBalancer:
+        servers:
+          - url: "https://192.168.1.80"
+        passHostHeader: true
+        serversTransport: argocd-transport
+
+  serversTransports:
+    # serverName obligatoire : le backend est une IP, donc sans lui Traefik
+    # n'envoie aucun SNI et le Gateway Cilium ne trouve aucun listener.
+    argocd-transport:
+      serverName: "argocd.lan.wittner.tech"

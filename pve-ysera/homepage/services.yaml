@@ -1,0 +1,50 @@
+---
+- Socle (vert-ysera):
+    - AdGuard Home:
+        href: https://adguard.lan.wittner.tech/
+        description: DNS + DHCP · LAN
+        icon: adguard-home.png
+    - Traefik:
+        href: https://traefik.lan.wittner.tech/dashboard/
+        description: Reverse proxy · LAN
+        icon: traefik.png
+    - Homepage:
+        href: https://home.wittner.tech/
+        description: Portail
+        icon: homepage.png
+
+- Infrastructure:
+    - pve-ysera:
+        href: https://pve-ysera.lan.wittner.tech/
+        description: Proxmox perso (socle 24/7) · LAN
+        icon: proxmox.png
+    - pve-eranikus:
+        href: https://pve-eranikus.lan.wittner.tech/
+        description: Proxmox perso (socle 24/7) · LAN
+        icon: proxmox.png
+    - argocd-kalecgos:
+        href: https://argocd.lan.wittner.tech/
+        description: ArgoCD infra · LAN
+        icon: https://cdn.jsdelivr.net/gh/selfhst/icons@main/svg/argo-cd.svg
+    - Authentik:
+        href: https://authentik.wittner.tech/
+        description: SSO · Identity provider
+        icon: authentik.png
+    - OpenBao:
+        href: https://openbao.lan.wittner.tech/
+        description: Gestion des secrets · LAN
+        icon: https://cdn.jsdelivr.net/gh/selfhst/icons@main/svg/openbao.svg
+    - Grafana:
+        href: https://grafana.lan.wittner.tech/
+        description: Observabilité · LAN
+        icon: grafana.png
+
+- Domotique:
+    - Home Assistant:
+        href: https://ha.lan.wittner.tech/
+        description: rouge-alexstrasza (VM 112) · LAN
+        icon: home-assistant.png
+    - Zigbee2MQTT:
+        href: https://z2m.lan.wittner.tech/
+        description: Passerelle Zigbee · LAN
+        icon: zigbee2mqtt.png

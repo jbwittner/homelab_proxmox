@@ -1,0 +1,17 @@
+http:
+  routers:
+    dashboard:
+      rule: "Host(`traefik.lan.wittner.tech`)"
+      service: api@internal
+      entryPoints:
+        - websecure
+      tls: {}
+      middlewares:
+        - dashboard-redirect
+
+  middlewares:
+    dashboard-redirect:
+      redirectRegex:
+        regex: "^https://traefik.lan.wittner.tech/?$"
+        replacement: "https://traefik.lan.wittner.tech/dashboard/"
+        permanent: false

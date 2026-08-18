@@ -1,0 +1,22 @@
+http:
+  routers:
+    grafana:
+      rule: "Host(`grafana.lan.wittner.tech`)"
+      entryPoints:
+        - websecure
+      service: grafana
+      tls: {}
+
+  services:
+    grafana:
+      loadBalancer:
+        servers:
+          - url: "https://192.168.1.80"
+        passHostHeader: true
+        serversTransport: grafana-transport
+
+  serversTransports:
+    # serverName obligatoire : le backend est une IP, donc sans lui Traefik
+    # n'envoie aucun SNI et le Gateway Cilium ne trouve aucun listener.
+    grafana-transport:
+      serverName: "grafana.lan.wittner.tech"

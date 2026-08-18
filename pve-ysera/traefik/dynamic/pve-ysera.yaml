@@ -1,0 +1,20 @@
+http:
+  routers:
+    pve-ysera:
+      rule: "Host(`pve-ysera.lan.wittner.tech`)"
+      entryPoints:
+        - websecure
+      service: pve-ysera
+      tls: {}
+
+  services:
+    pve-ysera:
+      loadBalancer:
+        servers:
+          - url: "https://192.168.1.10:8006"
+        passHostHeader: true
+        serversTransport: pve-transport
+
+  serversTransports:
+    pve-transport:
+      insecureSkipVerify: true
