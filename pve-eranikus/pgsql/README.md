@@ -272,17 +272,72 @@ L'unité pointe vers `/usr/local/bin/pg-backup.sh` : le script doit être copié
 pas lié, car le montage est en lecture seule et ne peut pas porter le bit
 d'exécution.
 
-Un `.dump` par base plus un `globals-*.sql` par exécution, 14 jours de
-rétention dans `/var/backups/postgresql`.
+Une exécution produit **un répertoire**, nommé par horodatage :
+
+```
+/var/backups/postgresql/
+  20260819-233627/
+    globals.sql          rôles et mots de passe (empreintes SCRAM)
+    forgejo.dump         un dump -Fc par base
+    MANIFEST             date, version PostgreSQL, liste des bases
+  latest -> 20260819-233627
+```
+
+Restaurer, c'est prendre un répertoire : il contient un point cohérent dans le
+temps. Rétention de 14 jours, `latest` pointe toujours vers la dernière.
+
+Tout est écrit dans `<stamp>.part/` et renommé en `<stamp>/` seulement si
+l'exécution va au bout. **Un répertoire présent est donc, par construction, une
+sauvegarde complète** — une exécution interrompue ne laisse rien derrière elle.
+
+### Journalisation
+
+Sortie horodatée et préfixée par niveau (`STEP`, `INFO`, `WARN`, `ERROR`),
+capturée par systemd :
+
+```bash
+journalctl -u pg-backup -n 50 --no-pager     # dernière exécution
+journalctl -u pg-backup --since '7 days ago' # historique
+journalctl -u pg-backup -p warning           # seulement les anomalies
+```
+
+Chaque exécution consigne la version PostgreSQL, l'inventaire des bases avec
+leur taille brute, le besoin d'espace estimé, la durée et la taille de chaque
+dump, ce que la purge a supprimé, et l'espace restant. L'objectif est de
+pouvoir diagnostiquer une sauvegarde qui a mal tourné trois semaines plus tôt
+sans avoir à rejouer le script.
+
+En cas d'échec, le `trap` consigne la ligne fautive et le code de retour,
+supprime le répertoire incomplet, et le dit explicitement — un échec silencieux
+serait pire qu'une absence de sauvegarde.
+
+### Contrôle d'espace
+
+Les sauvegardes vivent sur `mp2`, un dataset ZFS de 50 Go pris sur le pool
+`data` (NVMe 1 To) — donc sur un **disque physique distinct** de celui de la
+base. Un incident sur le SSD 512 Go n'emporte plus les deux.
+
+Le script refuse malgré tout de démarrer s'il ne peut pas garantir
+`MIN_FREE_MB` libres à l'arrivée (512 Mo). L'enchaînement : estimation du
+besoin à partir de `pg_database_size`, purge des répertoires expirés si la
+marge est courte, nouveau contrôle, puis abandon avec un code d'erreur si
+c'est toujours insuffisant — sans avoir rien écrit. Le contrôle est refait
+avant chaque base, les premières ayant consommé de l'espace.
+
+La purge n'a lieu qu'**en fin de course** : si la sauvegarde du jour échoue,
+le script s'arrête avant, et les anciennes copies sont toujours là.
+
+Le volume porte `backup=0`, donc les `vzdump` du CT ne l'embarquent pas.
 
 **Le fichier globals est le plus facile à oublier et le plus coûteux à
 perdre** : les rôles et leurs mots de passe ne figurent dans aucun `pg_dump` de
 base. Sans lui, une restauration rend les données sans les comptes qui y
 accèdent.
 
-**Ces dumps vivent sur le même disque que la base qu'ils protègent.** Deux
-copies sur le même SSD ne survivent pas à une panne matérielle : c'est le
-`vzdump` et la copie hors-site qui couvrent ce risque, pas ce timer.
+**Les deux disques sont dans la même machine.** La séparation protège d'une
+panne de SSD, pas d'un vol, d'un incendie ou d'un `pct destroy` malencontreux —
+qui emporterait le conteneur *et* son volume de sauvegardes. La copie hors-site
+vers GCS reste le seul vrai filet.
 
 ## 7. Restauration
 
@@ -292,11 +347,13 @@ sudo -u postgres dropdb forgejo
 sudo -u postgres createdb forgejo -O forgejo -T template0 \
      --encoding UTF8 --lc-collate C --lc-ctype C
 sudo -u postgres pg_restore -d forgejo --no-owner --role=forgejo \
-     /var/backups/postgresql/forgejo-<STAMP>.dump
+     /var/backups/postgresql/latest/forgejo.dump
 ```
 
-Reconstruction complète : recréer le cluster, rejouer `globals-*.sql`, puis les
-dumps un par un.
+Reconstruction complète : recréer le cluster, rejouer le `globals.sql` du
+répertoire choisi, puis ses dumps un par un. Le `MANIFEST` rappelle la version
+PostgreSQL d'origine — un dump produit en 18 ne se restaure pas sur une
+majeure antérieure.
 
 **La protection du conteneur bloque la restauration d'un `vzdump` par-dessus le
 CTID 200**, l'opération détruisant le CT avant de le recréer. Prévoir
