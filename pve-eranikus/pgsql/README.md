@@ -5,8 +5,9 @@ base + rôle par locataire, isolés les uns des autres.
 
 Déployé le 19 août 2026 via le script communautaire `postgresql.sh`.
 Le CTID appartient à la plage **200-299**, réservée par convention aux
-services installés depuis un script communautaire : l'installation n'est
-pas décrite dans ce dépôt, elle se rejoue en relançant le script.
+services installés depuis un script communautaire : l'installation n'est pas
+décrite dans ce dépôt, elle se rejoue en relançant le script. Seule la
+configuration est versionnée ici.
 
 | | |
 |---|---|
@@ -18,6 +19,7 @@ pas décrite dans ce dépôt, elle se rejoue en relançant le script.
 | OS | Debian 13 (trixie) |
 | PostgreSQL | 18.6, dépôt PGDG, cluster `18/main` |
 | Stockage | `local-lvm` (SSD 512 Go) — le 1 To est réservé à Forgejo |
+| Dépôt monté | `/root/homelab_proxmox/pve-eranikus/pgsql` → `/etc/pgsql-git` (ro) |
 
 ## 1. Création du conteneur
 
@@ -26,8 +28,8 @@ var_os='debian' bash -c "$(curl -fsSL https://raw.githubusercontent.com/communit
 ```
 
 Réponses au questionnaire, sauvegardées par le script dans
-`/usr/local/community-scripts/defaults/postgresql.vars` — à copier ici
-après avoir vérifié qu'aucun secret n'y figure (`grep -i pass`).
+`/usr/local/community-scripts/defaults/postgresql.vars` — à copier ici après
+avoir vérifié qu'aucun secret n'y figure (`grep -i pass`).
 
 | Question | Réponse | Pourquoi |
 |---|---|---|
@@ -46,19 +48,20 @@ après avoir vérifié qu'aucun secret n'y figure (`grep -i pass`).
 | MTU / DNS / MAC / VLAN | vides | héritage de l'hôte |
 | Clé SSH | clé personnelle uniquement | |
 | Root SSH | non | l'accès admin passe par `pct enter 200` |
-| FUSE / TUN / mknod / mount FS | non | rien de tout cela n'est utile à un démon PostgreSQL |
+| FUSE / TUN / mknod / mount FS | non | inutiles à un démon PostgreSQL |
 | **Nesting** | **oui** | **obligatoire sur Debian 13** — voir ci-dessous |
 | Protection | oui | ce CT porte les données de tous les services |
 | Timezone | Europe/Paris | concorde avec `timezone` du drop-in |
 | APT Cacher / proxy | non | |
 | Post-install hook | vide | à écrire plus tard (voir « Reste à faire ») |
+| Version PostgreSQL | 18 | supportée jusqu'en novembre 2030 |
 | Adminer | non | interface web PHP non suivie, sur le CT le plus sensible |
 
 ### Le piège du nesting
 
 Le script demande le nesting **avant** d'afficher l'avertissement qui explique
 pourquoi il le faut, et la réponse n'est pas rattrapable ensuite : il faut tout
-recommencer. Réponds **oui** directement.
+recommencer. Répondre **oui** directement.
 
 Depuis systemd 254, les unités utilisent le mécanisme de *credentials*, qui
 exige de monter un tmpfs — impossible pour un CT non privilégié avec le profil
@@ -66,6 +69,15 @@ AppArmor standard, d'où l'erreur `243/CREDENTIALS` et un conteneur qui démarre
 en état dégradé. `nesting=1` bascule sur le profil
 `lxc-container-default-nesting` qui l'autorise. Cela concerne aussi les
 directives `PrivateTmp` et `NoNewPrivileges` de `pg-backup.service`.
+
+### Ce que pose le script
+
+`initdb` est lancé en `--auth-local peer --auth-host scram-sha-256`, locale
+`C.UTF-8`. Aucun mot de passe n'est généré et aucun fichier de credentials
+n'est écrit : le cluster est livré nu, l'accès se fait en peer depuis
+l'intérieur. Le paquet `postgresql-18-jit` est installé (désactivé par le
+drop-in, voir plus bas), et `ssl = on` avec le certificat snakeoil est déjà
+actif — aucun `ssl-cert` à installer.
 
 ### Après création
 
@@ -75,47 +87,93 @@ pct config 200 | grep -E 'net0|features|protection'
 pct exec 200 -- systemctl status fstrim.timer   # indispensable sur LVM-thin
 ```
 
-Le stockage étant du **LVM-thin** et non du ZFS, aucun réglage de `recordsize`
-n'est nécessaire. Deux conséquences en revanche : le pool est surprovisionné
-(surveiller `lvs`, un pool saturé arrête net le serveur), et
-`full_page_writes` doit rester à `on` — ext4 sur LVM n'offre aucune garantie
-d'atomicité des écritures de page.
+Le stockage est du **LVM-thin**, pas du ZFS : aucun réglage de `recordsize` à
+faire. Deux conséquences en revanche — le pool est surprovisionné (surveiller
+`lvs`, un pool saturé arrête net le serveur), et `full_page_writes` doit rester
+à `on`, ext4 sur LVM n'offrant aucune garantie d'atomicité des écritures de
+page.
 
-## 2. Configuration
+## 2. Montage du dépôt
+
+La protection du CT interdit toute modification de disque, ajout d'un point de
+montage compris. Il faut la lever puis la remettre :
 
 ```bash
-pct set 200 --mp1 /srv/homelab_proxmox/eranikus/pgsql,mp=/opt/homelab/pgsql,ro=1
+pct set 200 --protection 0
+pct set 200 --mp1 /root/homelab_proxmox/pve-eranikus/pgsql,mp=/etc/pgsql-git,ro=1
+pct reboot 200                         # un mp n'est pris en compte qu'au démarrage
+pct set 200 --protection 1
+pct config 200 | grep -E 'protection|mp1'
+```
+
+Dans le CT, les fichiers apparaissent en `nobody:nogroup` : c'est le décalage
+d'UID de 100000 propre aux conteneurs non privilégiés. Sans conséquence, les
+fichiers étant en 644 et le montage en lecture seule.
+
+## 3. Pose de la configuration
+
+Les deux fichiers sont des **liens symboliques** vers le dépôt. PostgreSQL
+accepte un symlink pour `pg_hba.conf` malgré ses exigences de permissions,
+vérifié sur cette instance.
+
+```bash
 pct enter 200
+ln -sf /etc/pgsql-git/10-homelab.conf /etc/postgresql/18/main/conf.d/10-homelab.conf
+ln -sf /etc/pgsql-git/pg_hba.conf     /etc/postgresql/18/main/pg_hba.conf
+systemctl restart postgresql           # listen_addresses exige un restart
 ```
+
+`postgresql.conf` **n'est jamais modifié** : il se termine par
+`include_dir = 'conf.d'`, donc le drop-in est lu après lui et l'emporte. Le
+fichier du paquet peut ainsi évoluer avec `apt` sans conflit ni `.dpkg-dist` à
+arbitrer.
+
+Attention à `postgresql.auto.conf`, dans `/var/lib/postgresql/18/main/` : écrit
+par les `ALTER SYSTEM SET`, il est lu **en dernier** et écrase le drop-in.
+`ALTER SYSTEM RESET <param>;` pour le nettoyer.
+
+### Mise à jour de la configuration
 
 ```bash
-# Drop-in : postgresql.conf n'est jamais modifié, donc aucun .dpkg-dist
-# à arbitrer lors des mises à jour du paquet.
-ln -sf /opt/homelab/pgsql/conf.d/10-homelab.conf \
-       /etc/postgresql/18/main/conf.d/10-homelab.conf
-
-# pg_hba.conf ne supporte pas l'inclusion de façon fiable : on copie.
-install -o postgres -g postgres -m 640 \
-        /opt/homelab/pgsql/pg_hba.conf /etc/postgresql/18/main/pg_hba.conf
-
-systemctl restart postgresql    # listen_addresses exige un restart, pas un reload
+cd /root/homelab_proxmox && git pull
+pct exec 200 -- systemctl reload postgresql
 ```
 
-Vérifications :
+Un `reload` suffit pour `pg_hba.conf` et la plupart des paramètres. Seuls
+`listen_addresses`, `shared_buffers`, `max_connections` et les autres
+paramètres marqués *postmaster* exigent un `restart`.
+
+### Vérifications
 
 ```bash
-sudo -u postgres psql -c "SHOW listen_addresses; SHOW ssl; SHOW shared_buffers; SHOW jit;"
-ss -lntp | grep 5432
-pg_lsclusters
-df -h /dev/shm                  # < 256 Mo bloquerait les requêtes parallèles
+pct exec 200 -- sudo -u postgres psql -c \
+  "SELECT name, setting, sourcefile FROM pg_settings WHERE sourcefile IS NOT NULL;"
+pct exec 200 -- sudo -u postgres psql -c \
+  "SELECT line_number, type, database, user_name, address, auth_method FROM pg_hba_file_rules;"
+pct exec 200 -- ss -lntp | grep 5432
 ```
 
-**Si `SHOW ssl` renvoie `off`** : `apt install ssl-cert`, puis pointer
-`ssl_cert_file` et `ssl_key_file` vers `/etc/ssl/certs/ssl-cert-snakeoil.pem`
-et sa clé. Tant que ce n'est pas fait, les règles doivent rester en `host` et
-non `hostssl`, sinon les connexions sont refusées sans message explicite.
+`pg_hba_file_rules` est la vérification qui compte : un `reload` réussi ne
+prouve pas que le fichier a été relu, PostgreSQL conservant l'ancienne
+configuration en mémoire si le nouveau est invalide. Une colonne `error` non
+vide signale une règle mal formée.
 
-## 3. Compte d'administration (`jbwittner`)
+État attendu après pose :
+
+```
+ line_number |  type   | database |  user_name  |   address    |  auth_method
+-------------+---------+----------+-------------+--------------+---------------
+          15 | local   | {all}    | {postgres}  |              | peer
+          16 | local   | {all}    | {all}       |              | peer
+          19 | host    | {all}    | {all}       | 127.0.0.1    | scram-sha-256
+          24 | hostssl | {all}    | {jbwittner} | 192.168.1.11 | scram-sha-256
+          34 | host    | {all}    | {all}       | 0.0.0.0      | reject
+```
+
+Et `ss` ne doit plus montrer que `192.168.1.56:5432` et `127.0.0.1:5432` —
+le `listen_addresses = '*'` du paquet est resserré par le drop-in.
+
+## 4. Compte d'administration (`jbwittner`)
 
 Créé depuis l'intérieur du CT, en peer sur socket Unix :
 
@@ -127,71 +185,75 @@ echo "$PASS"      # → OpenBao immédiatement, il ne réapparaîtra pas
 ```
 
 Mot de passe perdu ? Aucun blocage possible tant que la ligne `local all
-postgres peer` existe :
+postgres peer` existe — c'est la porte de secours, ne jamais la supprimer :
 
 ```bash
 sudo -u postgres psql -c "ALTER ROLE jbwittner PASSWORD '<nouveau>';"
 ```
 
-La ligne d'autorisation correspondante — le nom du rôle doit correspondre
-**exactement**, sinon aucune règle ne matche et la connexion est refusée :
-
-```
-host      all    jbwittner    192.168.1.11/32    scram-sha-256
-```
+Le nom du rôle dans `pg_hba.conf` doit correspondre **exactement**, sinon
+aucune règle ne matche et la connexion est refusée sans message explicite.
 
 ### Connexion depuis le Mac
 
-Deux chemins, celui du tunnel est préférable : un poste mobile n'a rien à
-faire dans un fichier qui décrit l'infrastructure, et le tunnel fonctionne
-encore depuis l'extérieur.
+Par tunnel SSH : un poste mobile n'a rien à faire dans un fichier qui décrit
+l'infrastructure, et le tunnel fonctionne encore depuis l'extérieur.
 
 ```bash
 ssh -L 5432:192.168.1.56:5432 root@192.168.1.11
 ```
 
 DBeaver : hôte `localhost`, port `5432`, base `postgres`, utilisateur
-`jbwittner`, SSL `require`. DBeaver sait monter le tunnel lui-même — onglet
-*SSH*, hôte `192.168.1.11`. **Le champ *Host* de la connexion principale doit
-alors contenir `192.168.1.56`**, c'est-à-dire l'adresse vue depuis le nœud une
-fois le tunnel établi ; y mettre `localhost` cherche PostgreSQL sur le nœud
-Proxmox lui-même et produit un « Connection reset ».
+`jbwittner`, SSL `require` (le certificat étant auto-signé, surtout pas
+`verify-full`). DBeaver sait monter le tunnel lui-même — onglet *SSH*, hôte
+`192.168.1.11`.
 
-En accès direct depuis le LAN, remplacer `192.168.1.11/32` par l'IP fixe du
-Mac.
+**Le champ *Host* de la connexion principale doit alors contenir
+`192.168.1.56`**, c'est-à-dire l'adresse vue depuis le nœud une fois le tunnel
+établi. Y mettre `localhost` fait chercher PostgreSQL sur le nœud Proxmox
+lui-même et produit un « Connection reset ».
+
+PostgreSQL voit la connexion arriver de `192.168.1.11`, l'IP du nœud, et non
+celle du Mac — d'où la règle `/32` sur cette adresse.
 
 Le `SUPERUSER` contourne le `REVOKE CONNECT` posé sur chaque base de
 locataire : pratique pour administrer, mais à ne pas utiliser comme
 identifiant de consultation courante — une requête maladroite sur la base d'un
 service passera sans garde-fou.
 
-## 4. Ajout d'un locataire
+## 5. Ajout d'un locataire
 
 ```bash
 PASS="$(head -c 32 /dev/urandom | base64 | tr -d '\n=+/')"
 sed -e 's/@@NAME@@/monservice/g' -e "s|@@PASSWORD@@|${PASS}|" \
-    /opt/homelab/pgsql/sql/tenant.sql.tpl \
+    /etc/pgsql-git/tenant.sql.tpl \
   | sudo -u postgres psql -v ON_ERROR_STOP=1
 echo "$PASS"
 ```
 
 Ajouter la ligne correspondante dans `pg_hba.conf`, **avant** le `reject`, puis
-`systemctl reload postgresql`. Côté client : `SSL_MODE = require` (certificat
-auto-signé, donc pas `verify-full`).
+`git pull` sur l'hôte et `systemctl reload postgresql`. Côté client :
+`SSL_MODE = require`.
 
 Dans les configurations applicatives, préférer un nom de domaine à l'IP — mais
 le déclarer dans le `/etc/hosts` du CT client plutôt que de dépendre d'AdGuard,
 sans quoi le service ne peut plus joindre sa base tant que le DNS n'est pas
 debout.
 
-## 5. Sauvegarde
+## 6. Sauvegarde
 
 ```bash
-install -m 644 /opt/homelab/pgsql/systemd/pg-backup.service /etc/systemd/system/
-install -m 644 /opt/homelab/pgsql/systemd/pg-backup.timer   /etc/systemd/system/
+pct enter 200
+install -m 644 /etc/pgsql-git/pg-backup.service /etc/systemd/system/
+install -m 644 /etc/pgsql-git/pg-backup.timer   /etc/systemd/system/
+install -m 755 /etc/pgsql-git/pg-backup.sh      /usr/local/bin/pg-backup.sh
 systemctl daemon-reload && systemctl enable --now pg-backup.timer
 systemctl start pg-backup.service && journalctl -u pg-backup -n 20
 ```
+
+L'unité pointe vers `/usr/local/bin/pg-backup.sh` : le script doit être copié,
+pas lié, car le montage est en lecture seule et ne peut pas porter le bit
+d'exécution.
 
 Un `.dump` par base plus un `globals-*.sql` par exécution, 14 jours de
 rétention dans `/var/backups/postgresql`.
@@ -205,7 +267,7 @@ accèdent.
 copies sur le même SSD ne survivent pas à une panne matérielle : c'est le
 `vzdump` et la copie hors-site qui couvrent ce risque, pas ce timer.
 
-## 6. Restauration
+## 7. Restauration
 
 ```bash
 # Une seule base, les autres locataires restent en ligne.
@@ -220,19 +282,18 @@ Reconstruction complète : recréer le cluster, rejouer `globals-*.sql`, puis le
 dumps un par un.
 
 **La protection du conteneur bloque la restauration d'un `vzdump` par-dessus le
-CTID 200**, puisque l'opération détruit le CT avant de le recréer. Prévoir
-`pct set 200 --protection 0` au préalable.
+CTID 200**, l'opération détruisant le CT avant de le recréer. Prévoir
+`pct set 200 --protection 0` au préalable — c'est le second endroit où la
+protection se met en travers, après l'ajout d'un point de montage.
 
 ## Reste à faire
 
-- [ ] Resserrer `pg_hba.conf` : vérifier qu'aucune règle large (`0.0.0.0/0`
-      ou `/24`) n'a été laissée par le script, et poser les `/32`.
-- [ ] Poser le drop-in ; `listen_addresses` est actuellement à `0.0.0.0`.
-- [ ] Vérifier `SHOW ssl`, puis durcir les règles en `hostssl`.
+- [ ] Installer le timer de sauvegarde (section 6).
 - [ ] Ligne du locataire `forgejo` — dépend de son IP définitive.
 - [ ] Copie hors-site des dumps vers GCS.
-- [ ] Hook post-install (`pct set`, bind-mount, pose de la conf, timer) pour
-      rendre l'ensemble rejouable. À écrire à partir de ce qui a réellement
+- [ ] Copier `postgresql.vars` dans ce dépôt après vérification des secrets.
+- [ ] Hook post-install (`pct set`, montage, symlinks, timer) pour rendre
+      l'ensemble rejouable. À écrire à partir de ce qui a réellement
       fonctionné, pas avant.
 
 ## Notes
@@ -244,7 +305,11 @@ CTID 200**, puisque l'opération détruit le CT avant de le recréer. Prévoir
   spécifique Debian), après snapshot du CT. PostgreSQL 18 conserve les
   statistiques du planner à la migration, il n'y a plus d'`ANALYZE` massif à
   lancer ensuite.
+- `jit = off` : le paquet `postgresql-18-jit` est installé, mais sur une charge
+  OLTP la compilation à la volée coûte plus qu'elle ne rapporte et produit des
+  latences erratiques.
+- `log_connections` n'est plus un booléen depuis PostgreSQL 18 mais une liste
+  de types d'événements. Un `= on` empêcherait le démarrage.
 - `work_mem` est **par nœud de tri et par connexion**. À 100 connexions et
   8 Mo, le pire cas théorique dépasse la RAM du CT : surveiller
   `log_temp_files` plutôt que d'augmenter à l'aveugle.
-- PostgreSQL 18 est supporté jusqu'en novembre 2030.
