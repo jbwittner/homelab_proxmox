@@ -17,8 +17,7 @@ mkdir -p "$DEST"
 
 # Les rôles et leurs mots de passe ne sont dans AUCUN pg_dump de base.
 # Sans ce fichier, une restauration te rend les données sans les comptes.
-pg_dumpall --globals-only --no-role-passwords=false \
-  > "${DEST}/globals-${STAMP}.sql"
+pg_dumpall --globals-only > "${DEST}/globals-${STAMP}.sql.part"
 
 # Liste des bases réelles, hors templates et hors postgres.
 mapfile -t DBS < <(psql -tAc \
