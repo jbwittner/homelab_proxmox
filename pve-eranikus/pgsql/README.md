@@ -224,11 +224,28 @@ service passera sans garde-fou.
 ## 5. Ajout d'un locataire
 
 ```bash
+NAME=forgejo
 PASS="$(head -c 32 /dev/urandom | base64 | tr -d '\n=+/')"
-sed -e 's/@@NAME@@/monservice/g' -e "s|@@PASSWORD@@|${PASS}|" \
-    /etc/pgsql-git/tenant.sql.tpl \
-  | sudo -u postgres psql -v ON_ERROR_STOP=1
-echo "$PASS"
+sudo -u postgres psql -v ON_ERROR_STOP=1 \
+     -v name="$NAME" -v password="$PASS" \
+     -f /etc/pgsql-git/tenant.sql
+echo "$NAME / $PASS"      # → OpenBao
+```
+
+Le nom est une variable, pas un motif à substituer : impossible de créer un
+rôle nommé d'après le gabarit par étourderie. Et `psql` cite lui-même les
+identifiants et les chaînes, donc aucun caractère n'est interdit dans le mot
+de passe — contrairement à une substitution `sed`, que `|` ou `&` cassent.
+
+Le `ON_ERROR_STOP=1` n'est pas décoratif : sans lui, un `CREATE ROLE` qui
+échoue laisserait passer le `CREATE DATABASE` et produirait une base orpheline
+sans propriétaire.
+
+Erreur de nom ? La base d'abord, le rôle ensuite :
+
+```bash
+sudo -u postgres psql -c "DROP DATABASE <nom>;"
+sudo -u postgres psql -c "DROP ROLE <nom>;"
 ```
 
 Ajouter la ligne correspondante dans `pg_hba.conf`, **avant** le `reject`, puis
