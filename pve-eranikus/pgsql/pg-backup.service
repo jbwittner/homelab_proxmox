@@ -10,6 +10,7 @@ User=postgres
 Group=postgres
 Environment=PG_BACKUP_DEST=/var/backups/postgresql
 Environment=PG_BACKUP_RETENTION=14
-ExecStart=/opt/homelab/pgsql/bin/pg-backup.sh
+Environment=PG_BACKUP_MIN_FREE_MB=512
+ExecStart=/usr/local/bin/pg-backup.sh
 NoNewPrivileges=true
 PrivateTmp=true
