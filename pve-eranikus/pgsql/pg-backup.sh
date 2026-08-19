@@ -64,12 +64,17 @@ umask 077
 mkdir -p "$DEST"
 
 avail_mb()   { df -Pm "$DEST" | awk 'NR==2 {print $4}'; }
+# Taille logique, lisible. `du` donnerait l'occupation réelle sur disque, qui
+# est plus petite sur ZFS (compression lz4) et prête à confusion dans un
+# journal : on veut savoir ce que pèse le dump, pas ce que le pool en fait.
+hsize()      { numfmt --to=iec --suffix=B "$(stat -c%s "$1")"; }
+dsize()      { du -sh --apparent-size "$1" | cut -f1; }
 db_size_mb() { psql -tAc "SELECT ceil(pg_database_size('$1')/1024.0/1024)"; }
 
 prune() {
   local n=0 d
   while IFS= read -r d; do
-    log "  purge (expiré > ${RETENTION_DAYS} j) : $(basename "$d") — $(du -sh "$d" | cut -f1)"
+    log "  purge (expiré > ${RETENTION_DAYS} j) : $(basename "$d") — $(du -sh --apparent-size "$d" | cut -f1)"
     rm -rf "$d"; n=$((n+1))
   done < <(find "$DEST" -mindepth 1 -maxdepth 1 -type d -name '20*' \
                 ! -name '*.part' -mtime "+${RETENTION_DAYS}")
@@ -85,7 +90,7 @@ prune() {
 # ─── Démarrage ───────────────────────────────────────────────────────────────
 step "démarrage — destination ${DEST}"
 log "  rétention ${RETENTION_DAYS} j | marge minimale ${MIN_FREE_MB} Mo | facteur de compression ${SIZE_FACTOR} %"
-log "  PostgreSQL $(psql -tAc 'SHOW server_version') sur $(hostname)"
+log "  PostgreSQL $(psql -tAc 'SHOW server_version' | awk '{print $1}') sur $(hostname)"
 log "  espace disponible : $(avail_mb) Mo"
 
 # ─── Inventaire ──────────────────────────────────────────────────────────────
@@ -132,7 +137,7 @@ step "globals (rôles et mots de passe)"
 # Contient des empreintes SCRAM : fichier le plus sensible du lot.
 t0=$SECONDS
 pg_dumpall --globals-only > "${WORK}/globals.sql"
-log "  globals.sql — $(du -h "${WORK}/globals.sql" | cut -f1), $(grep -c '^CREATE ROLE' "${WORK}/globals.sql" || true) rôle(s), $((SECONDS-t0))s"
+log "  globals.sql — $(hsize "${WORK}/globals.sql"), $(grep -c '^CREATE ROLE' "${WORK}/globals.sql" || true) rôle(s), $((SECONDS-t0))s"
 
 step "dumps par base"
 for db in "${DBS[@]}"; do
@@ -145,9 +150,7 @@ for db in "${DBS[@]}"; do
 
   t0=$SECONDS
   pg_dump -Fc --no-owner --no-acl "$db" > "${WORK}/${db}.dump"
-  sz=$(du -h "${WORK}/${db}.dump" | cut -f1)
-  szb=$(( $(stat -c%s "${WORK}/${db}.dump") / 1024 ))
-  log "  ${db} — ${sz} (${raw} Mo bruts), $((SECONDS-t0))s, ${szb} Kio écrits"
+  log "  ${db} — $(hsize "${WORK}/${db}.dump") depuis ${raw} Mo bruts, $((SECONDS-t0))s"
 done
 
 {
@@ -169,6 +172,6 @@ prune
 
 # ─── Résumé ──────────────────────────────────────────────────────────────────
 KEPT=$(find "$DEST" -mindepth 1 -maxdepth 1 -type d -name '20*' | wc -l)
-step "terminé en ${SECONDS}s — ${#DBS[@]} base(s), $(du -sh "$FINAL" | cut -f1) écrits"
-log "  ${KEPT} sauvegarde(s) conservée(s), $(du -sh "$DEST" | cut -f1) au total"
+step "terminé en ${SECONDS}s — ${#DBS[@]} base(s), $(dsize "$FINAL") produits"
+log "  ${KEPT} sauvegarde(s) conservée(s), $(dsize "$DEST") logiques / $(du -sh "$DEST" | cut -f1) sur disque"
 log "  espace restant : $(avail_mb) Mo"
