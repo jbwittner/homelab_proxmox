@@ -170,8 +170,10 @@ vide signale une règle mal formée.
           34 | host    | {all}    | {all}       | 0.0.0.0      | reject
 ```
 
-Et `ss` ne doit plus montrer que `192.168.1.56:5432` et `127.0.0.1:5432` —
-le `listen_addresses = '*'` du paquet est resserré par le drop-in.
+`ss` doit montrer **deux** sockets : `0.0.0.0:5432` et `[::]:5432`. Un seul
+socket, sur la boucle locale uniquement, est le symptôme d'une panne documentée
+dans `docs/postgresql-listen-addresses-lxc.md` — service actif, base
+injoignable.
 
 ## 4. Compte d'administration (`jbwittner`)
 
@@ -384,6 +386,15 @@ protection se met en travers, après l'ajout d'un point de montage.
   latences erratiques.
 - `log_connections` n'est plus un booléen depuis PostgreSQL 18 mais une liste
   de types d'événements. Un `= on` empêcherait le démarrage.
+- `listen_addresses = '*'` est délibéré, pas un oubli de durcissement. Une IP
+  explicite crée une course au démarrage dans un LXC : PostgreSQL peut démarrer
+  avant que `eth0` ne porte l'adresse, n'ouvrir que le socket loopback, et se
+  déclarer actif malgré tout. Le CT n'ayant qu'une interface, `'*'` couvre
+  exactement les mêmes adresses. Le contrôle d'accès est dans `pg_hba.conf`.
+  Détail complet dans `docs/postgresql-listen-addresses-lxc.md`.
+- **Ne jamais ajouter `After=network-online.target`** à l'unité PostgreSQL dans
+  un LXC : la cible n'est jamais atteinte et le service reste indéfiniment en
+  attente (`Active: inactive (dead)` avec un `Job:` en file).
 - `work_mem` est **par nœud de tri et par connexion**. À 100 connexions et
   8 Mo, le pire cas théorique dépasse la RAM du CT : surveiller
   `log_temp_files` plutôt que d'augmenter à l'aveugle.
