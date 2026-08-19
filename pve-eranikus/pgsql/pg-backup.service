@@ -1,0 +1,15 @@
+# /etc/systemd/system/pg-backup.service
+[Unit]
+Description=Sauvegarde logique PostgreSQL (dump par base + globals)
+After=postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=oneshot
+User=postgres
+Group=postgres
+Environment=PG_BACKUP_DEST=/var/backups/postgresql
+Environment=PG_BACKUP_RETENTION=14
+ExecStart=/opt/homelab/pgsql/bin/pg-backup.sh
+NoNewPrivileges=true
+PrivateTmp=true
