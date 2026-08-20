@@ -20,7 +20,7 @@ configuration est versionnée ici.
 | PostgreSQL | 18.6, dépôt PGDG, cluster `18/main` |
 | Stockage | `local-lvm` (SSD 512 Go) — le 1 To est réservé à Forgejo |
 | Dépôt monté | `/root/homelab_proxmox/pve-eranikus/pgsql` → `/etc/pgsql-git` (ro) |
-| Pose | `pg-init.sh`, joué sur le nœud |
+| Déploiement | `pg-deploy.sh`, joué sur le nœud |
 | Exploitation | `pgbk.sh`, joué sur le nœud |
 
 ## 1. Création du conteneur
@@ -95,33 +95,39 @@ faire. Deux conséquences en revanche — le pool est surprovisionné (surveille
 à `on`, ext4 sur LVM n'offrant aucune garantie d'atomicité des écritures de
 page.
 
-## 2. Pose depuis l'hôte — `pg-init.sh`
+## 2. Déploiement depuis l'hôte — `pg-deploy.sh`
 
 Tout ce que décrivent les sections 3, 4 et 7 se joue en une commande, **depuis
 le nœud, sans entrer dans le CT** :
 
 ```bash
 cd /root/homelab_proxmox && git pull
-pve-eranikus/pgsql/pg-init.sh
+pve-eranikus/pgsql/pg-deploy.sh
 ```
 
-Le script est **rejouable à l'identique** : chaque étape est conditionnelle et
-ne touche à rien si l'état est déjà conforme. C'est ce qui permet de
-l'enchaîner à un `git pull` sans réfléchir — c'est d'ailleurs la procédure de
-mise à jour de la configuration.
+**Première pose et mises à jour, c'est le même script**, et il n'y a pas de
+raison de distinguer les deux : chaque étape est conditionnelle et ne touche à
+rien si l'état est déjà conforme.
+
+L'enchaîner à chaque `git pull` n'est pas une précaution, c'est le geste
+normal. Les fichiers de configuration sont des symlinks vers le dépôt et
+suivent donc le `git pull` tout seuls — mais `pgbk.sh`, `pg-backup.sh` et les
+unités systemd sont des **copies**, imposées par un montage en lecture seule
+qui ne peut pas porter le bit d'exécution. Modifier `pgbk.sh` dans le dépôt ne
+change donc rien tant que `pg-deploy.sh` n'a pas été rejoué.
 
 ```bash
-pve-eranikus/pgsql/pg-init.sh --status   # état de chaque élément, ne change rien
-pve-eranikus/pgsql/pg-init.sh --dry-run  # annonce ce qui serait fait
-pve-eranikus/pgsql/pg-init.sh --ctid 201 # cible un autre conteneur, et le consigne
-pve-eranikus/pgsql/pg-init.sh --restart  # force un restart au lieu d'un reload
+pve-eranikus/pgsql/pg-deploy.sh --status   # état de chaque élément, ne change rien
+pve-eranikus/pgsql/pg-deploy.sh --dry-run  # annonce ce qui serait fait
+pve-eranikus/pgsql/pg-deploy.sh --ctid 201 # cible un autre conteneur, et le consigne
+pve-eranikus/pgsql/pg-deploy.sh --restart  # force un restart au lieu d'un reload
 ```
 
 Sur un CT déjà conforme, `--dry-run` doit annoncer **zéro modification** : c'est
 le contrôle qui prouve que le script décrit bien l'état existant, et non un
 état voisin.
 
-Ce qu'il fait, dans l'ordre : point de montage et protection (section 3),
+Ce qu'il déploie, dans l'ordre : point de montage et protection (section 3),
 symlinks de configuration (section 4), unités systemd et scripts de sauvegarde
 (sections 7 et 8), fichier `/etc/default/pgbk`, `pgbk` sur l'hôte,
 puis les contrôles de la section 4. Il se termine par un résumé d'une ligne par
@@ -132,7 +138,7 @@ Il ne crée pas le conteneur : cela reste l'affaire du script communautaire
 
 ### Le CTID n'est écrit qu'à un seul endroit
 
-`pg-init.sh` consigne le conteneur qu'il vient de poser dans
+`pg-deploy.sh` consigne le conteneur qu'il vient de poser dans
 `/etc/default/pgbk` :
 
 ```
@@ -140,14 +146,14 @@ PG_CTID=200
 ```
 
 `pgbk` le relit de là. Changer de conteneur ne demande donc que de rejouer
-`pg-init.sh --ctid <ID>` — il n'y a pas de second fichier à penser à mettre à
+`pg-deploy.sh --ctid <ID>` — il n'y a pas de second fichier à penser à mettre à
 jour, et `pgbk` **refuse de démarrer** si rien n'est consigné plutôt que de
 taper dans un CT supposé. Priorité : `--ctid`, puis `$PG_CTID`, puis le
 fichier.
 
 ## 3. Montage du dépôt
 
-Posé par `pg-init.sh` (section 2). Ce qu'il fait, et pourquoi.
+Posé par `pg-deploy.sh` (section 2). Ce qu'il fait, et pourquoi.
 
 La protection du CT interdit toute modification de disque, ajout d'un point de
 montage compris. Il faut la lever puis la remettre :
@@ -178,7 +184,7 @@ Les deux fichiers sont des **liens symboliques** vers le dépôt. PostgreSQL
 accepte un symlink pour `pg_hba.conf` malgré ses exigences de permissions,
 vérifié sur cette instance.
 
-Posés par `pg-init.sh` (section 2). Ce qu'il fait :
+Posés par `pg-deploy.sh` (section 2). Ce qu'il fait :
 
 ```bash
 ln -sf /etc/pgsql-git/10-homelab.conf /etc/postgresql/18/main/conf.d/10-homelab.conf
@@ -207,12 +213,14 @@ par les `ALTER SYSTEM SET`, il est lu **en dernier** et écrase le drop-in.
 
 ```bash
 cd /root/homelab_proxmox && git pull
-pve-eranikus/pgsql/pg-init.sh
+pve-eranikus/pgsql/pg-deploy.sh
 ```
 
-Le dépôt étant monté en lecture seule, un `git pull` suffit à mettre à jour les
-fichiers de configuration liés en symlink ; `pg-init.sh` recopie en revanche les
-scripts et les unités, qui eux sont des copies, et applique le tout.
+Le `git pull` suffit aux fichiers de configuration, qui sont des symlinks vers
+le dépôt ; `pg-deploy.sh` recopie les scripts et les unités, qui sont des
+copies, et applique le tout. Le `reload` de PostgreSQL est inconditionnel : les
+symlinks ayant pu changer de contenu avec le `git pull` sans que le script
+puisse s'en apercevoir, l'économiser ferait manquer un `pg_hba.conf` modifié.
 
 Un `reload` suffit pour `pg_hba.conf` et la plupart des paramètres. Seuls
 `listen_addresses`, `shared_buffers`, `max_connections` et les autres
@@ -329,7 +337,7 @@ sudo -u postgres psql -c "DROP ROLE <nom>;"
 ```
 
 Ajouter la ligne correspondante dans `pg_hba.conf`, **avant** le `reject`, puis
-depuis le nœud `git pull` et `pg-init.sh` (section 2), qui applique le
+depuis le nœud `git pull` et `pg-deploy.sh` (section 2), qui applique le
 rechargement. Côté client : `SSL_MODE = require`.
 
 Dans les configurations applicatives, préférer un nom de domaine à l'IP — mais
@@ -339,7 +347,7 @@ debout.
 
 ## 7. Sauvegarde
 
-Posée par `pg-init.sh` (section 2), qui fait dans le CT :
+Posée par `pg-deploy.sh` (section 2), qui fait dans le CT :
 
 ```bash
 install -m 644 /etc/pgsql-git/pg-backup.service /etc/systemd/system/
@@ -357,7 +365,7 @@ pgbk backup
 L'unité pointe vers `/usr/local/bin/pg-backup.sh` : le script doit être copié,
 pas lié, car le montage est en lecture seule et ne peut pas porter le bit
 d'exécution. Chaque copie est comparée en contenu **et en mode** avant d'être
-refaite, d'où un `pg-init.sh` sans effet quand rien n'a bougé.
+refaite, d'où un `pg-deploy.sh` sans effet quand rien n'a bougé.
 
 Une exécution produit **un répertoire**, nommé par horodatage :
 
@@ -440,11 +448,48 @@ pgbk show 20260820-093240          # MANIFEST + fichiers
 pgbk restore forgejo               # depuis le dernier instantané
 pgbk restore forgejo 20260819      # depuis le plus récent de ce jour
 pgbk verify forgejo                # contrôle ACL et propriétaires
+pgbk delete 20260819-233627        # supprime une sauvegarde
 ```
+
+### `pgbk delete` — et ce qu'il refuse
+
+La rétention de `pg-backup.sh` fait le ménage courant ; `delete` est pour les
+cas ponctuels — récupérer de la place, ou effacer un `pre-restore-*` une fois la
+restauration validée (la rétention ne les purge pas).
+
+**Le dernier instantané ne peut pas être supprimé.** Supprimer la dernière
+sauvegarde laisserait le cluster sans filet, et c'est le genre d'erreur qu'on
+ne remarque qu'au pire moment.
+
+La garde ne porte pas sur le mot `latest` mais sur le **chemin résolu** : une
+référence de la forme `AAAAMMJJ` désigne la plus récente de ce jour, qui est
+souvent le dernier instantané sans jamais le nommer. Les trois formulations
+sont donc refusées de la même façon :
+
+```bash
+pgbk delete latest              # refusé
+pgbk delete 20260820-020000     # refusé si c'est la cible de latest
+pgbk delete 20260820            # refusé — résout vers la même
+```
+
+Si le lien `latest` manque, la protection se reporte sur la plus récente : un
+lien cassé ne doit pas ouvrir la porte. Sont également refusés les répertoires
+`*.part` (exécution en cours ou interrompue, dont `pg-backup.sh` fait le ménage
+lui-même) et tout chemin qui sortirait de `/var/backups/postgresql`.
+
+Comme pour `restore`, il faut retaper le nom pour confirmer, et `--yes` court-
+circuite la question. `--plan` dit ce qui serait supprimé sans rien effacer :
+
+```bash
+pgbk delete 20260819 --plan     # affiche la cible réelle et s'arrête
+```
+
+C'est ce que le nœud utilise pour poser sa question, le CT étant seul à savoir
+à quel répertoire une référence correspond.
 
 ### Un seul fichier, deux rôles
 
-`pgbk.sh` est posé **à l'identique** aux deux endroits par `pg-init.sh` :
+`pgbk.sh` est posé **à l'identique** aux deux endroits par `pg-deploy.sh` :
 
 | | |
 |---|---|
@@ -460,7 +505,7 @@ La détection se fait sur la présence de `pct` — un nœud Proxmox l'a, le
 conteneur Debian non :
 
 - **sur le nœud** : il résout le CTID (section 2), vérifie que le conteneur
-  tourne et que `pgbk` y est posé — un message qui renvoie vers `pg-init.sh`
+  tourne et que `pgbk` y est posé — un message qui renvoie vers `pg-deploy.sh`
   plutôt qu'un « command not found » —, pose la confirmation, puis `exec pct
   exec` et s'efface. Le code de retour est celui du CT.
 - **dans le CT** : il fait le travail.
@@ -570,8 +615,8 @@ protection se met en travers, après l'ajout d'un point de montage.
 - [ ] Copie hors-site des dumps vers GCS.
 - [ ] Copier `postgresql.vars` dans ce dépôt après vérification des secrets.
 - [x] Hook post-install (`pct set`, montage, symlinks, timer) pour rendre
-      l'ensemble rejouable — c'est `pg-init.sh` (section 2), écrit à partir des
-      commandes qui avaient réellement fonctionné à la main.
+      l'ensemble rejouable — c'est `pg-deploy.sh` (section 2), écrit à partir
+      des commandes qui avaient réellement fonctionné à la main.
 
 ## Notes
 

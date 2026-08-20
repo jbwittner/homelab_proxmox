@@ -7,6 +7,7 @@
 #   pgbk show [instantané]            détail d'une sauvegarde
 #   pgbk restore <base> [instantané]  restaure une base
 #   pgbk verify <base>                contrôle l'état d'une base restaurée
+#   pgbk delete <instantané>          supprime une sauvegarde
 #
 # L'instantané se désigne par :
 #   latest            la plus récente (défaut)
@@ -15,8 +16,13 @@
 #
 # Options :
 #   --ctid ID   conteneur cible, prioritaire sur $PG_CTID et sur /etc/default/pgbk
-#   --yes       pas de demande de confirmation sur un restore
+#   --yes       pas de demande de confirmation sur un restore ou un delete
+#   --plan      delete : dit ce qui serait supprimé, n'efface rien
 #   --local     force le mode moteur (n'essaie pas de déléguer)
+#
+# Le dernier instantané — celui vers lequel « latest » pointe — ne peut pas
+# être supprimé : ce serait laisser le cluster sans filet. La rétention de
+# pg-backup.sh est là pour faire le ménage, delete est pour les cas ponctuels.
 #
 # UN SEUL FICHIER, DEUX RÔLES. Le même script est posé sur le nœud Proxmox et
 # dans le conteneur, et se comporte selon l'endroit où il tourne :
@@ -25,19 +31,20 @@
 #   dans le CT (pas de pct)    il fait le travail
 #
 # Il n'y a donc pas de « version hôte » et de « version CT » à ne pas
-# confondre : c'est le même contenu aux deux endroits, et pg-init.sh l'y pose.
+# confondre : c'est le même contenu aux deux endroits, et pg-deploy.sh l'y pose.
 #
 # pg-backup.sh reste le moteur des sauvegardes, appelé par le timer. pgbk est
 # l'interface humaine : il n'écrit aucune sauvegarde lui-même, il orchestre.
 #
 set -Eeuo pipefail
 
-CONF=/etc/default/pgbk          # PG_CTID, écrit par pg-init.sh
+CONF=/etc/default/pgbk          # PG_CTID, écrit par pg-deploy.sh
 CT_PGBK=/usr/local/bin/pgbk     # chemin du script DANS le conteneur
 DEST="${PG_BACKUP_DEST:-/var/backups/postgresql}"
 PSQL="sudo -u postgres psql"
 ASSUME_YES=0
 LOCAL=0
+PLAN=0
 
 log()   { printf '%s [INFO ] %s\n'  "$(date '+%H:%M:%S')" "$*"; }
 warn()  { printf '%s [WARN ] %s\n'  "$(date '+%H:%M:%S')" "$*" >&2; }
@@ -62,6 +69,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --yes)   ASSUME_YES=1; shift ;;
     --local) LOCAL=1; shift ;;
+    --plan)  PLAN=1; shift ;;
     --ctid)  [[ $# -ge 2 ]] || die "--ctid attend une valeur"
              CTID_FLAG=$2; shift 2 ;;
     *)       ARGS+=("$1"); shift ;;
@@ -84,13 +92,13 @@ if [[ $LOCAL -eq 0 && ${PGBK_LOCAL:-0} -eq 0 ]] && command -v pct >/dev/null 2>&
 
   [[ $EUID -eq 0 ]] || die "à lancer en root sur le nœud (pct l'exige)"
 
-  # Priorité : --ctid, puis l'environnement, puis le CTID consigné par pg-init.
+  # Priorité : --ctid, puis l'environnement, puis le CTID consigné par pg-deploy.
   # shellcheck source=/dev/null
   [[ -r $CONF ]] && . "$CONF"
   CTID=${CTID_FLAG:-${CTID_ENV:-${PG_CTID:-}}}
 
   [[ -n $CTID ]] || die "aucun conteneur cible : ${CONF} absent ou sans PG_CTID
-         le consigner  : pg-init.sh --ctid <ID>
+         le consigner  : pg-deploy.sh --ctid <ID>
          ou ponctuel   : pgbk --ctid <ID> ${CMD} $*"
   [[ $CTID =~ ^[0-9]+$ ]] || die "CTID invalide : ${CTID}"
 
@@ -98,17 +106,31 @@ if [[ $LOCAL -eq 0 && ${PGBK_LOCAL:-0} -eq 0 ]] && command -v pct >/dev/null 2>&
   [[ $(pct status "$CTID" 2>/dev/null | awk '{print $2}') == running ]] \
     || die "CT ${CTID} à l'arrêt — le démarrer : pct start ${CTID}"
   pct exec "$CTID" -- test -x "$CT_PGBK" 2>/dev/null \
-    || die "${CT_PGBK} absent du CT ${CTID} — le poser : pg-init.sh"
+    || die "${CT_PGBK} absent du CT ${CTID} — le poser : pg-deploy.sh"
 
   # pct exec n'alloue pas de TTY : le read du script côté CT ne verrait jamais
   # la saisie, et la question de sécurité de restore serait muette. Le
   # garde-fou est donc posé ici, où le terminal existe, puis --yes est passé.
-  if [[ $CMD == restore && $ASSUME_YES -eq 0 ]]; then
-    db=""
-    for a in "$@"; do [[ $a == --* ]] && continue; db=$a; break; done
-    [[ -n $db ]] || die "usage : pgbk restore <base> [instantané]"
-    read -r -p "ÉCRASE la base ${db} du CT ${CTID} [tapez le nom de la base pour confirmer] : " answer
-    [[ $answer == "$db" ]] || die "annulé"
+  if [[ $ASSUME_YES -eq 0 && ( $CMD == restore || $CMD == delete || $CMD == rm ) ]]; then
+    case "$CMD" in
+      restore)
+        db=""
+        for a in "$@"; do [[ $a == --* ]] && continue; db=$a; break; done
+        [[ -n $db ]] || die "usage : pgbk restore <base> [instantané]"
+        read -r -p "ÉCRASE la base ${db} du CT ${CTID} [tapez le nom de la base pour confirmer] : " answer
+        [[ $answer == "$db" ]] || die "annulé"
+        ;;
+      delete|rm)
+        # Le CT seul sait à quoi une référence correspond : « 20260819 » désigne
+        # la plus récente de ce jour, qui peut être le dernier instantané.
+        # --plan applique toutes les gardes et n'efface rien ; la question porte
+        # donc sur ce qui sera réellement supprimé, pas sur ce qui a été tapé.
+        target="$(pct exec "$CTID" -- "$CT_PGBK" "$CMD" "$@" --plan)" || exit $?
+        [[ -n $target ]] || die "rien à supprimer"
+        read -r -p "SUPPRIME l'instantané ${target} du CT ${CTID} [tapez son nom pour confirmer] : " answer
+        [[ $answer == "$target" ]] || die "annulé"
+        ;;
+    esac
     ASSUME_YES=1
   fi
 
@@ -217,8 +239,8 @@ cmd_show() {
 
 confirm() {
   [[ $ASSUME_YES -eq 1 ]] && return 0
-  local answer
-  read -r -p "$1 [tapez le nom de la base pour confirmer] : " answer
+  local answer what="${3:-le nom de la base}"
+  read -r -p "$1 [tapez ${what} pour confirmer] : " answer
   [[ $answer == "$2" ]] || die "annulé"
 }
 
@@ -290,6 +312,86 @@ SQL
   [[ -n ${pre:-} ]] && log "état précédent conservé dans ${pre}"
 }
 
+# ─── delete ──────────────────────────────────────────────────────────────────
+
+# Détails de la cible. Sur stderr en mode --plan, pour que stdout ne porte que
+# le nom résolu — seule chose que l'appelant capture.
+delete_details() {
+  local snap="$1" name="$2"
+  step "instantané visé : ${name}"
+  [[ -f "$snap/MANIFEST" ]] && awk '{print "         " $0}' "$snap/MANIFEST"
+  log "  taille : $(du -sh --apparent-size "$snap" 2>/dev/null | cut -f1)"
+}
+
+cmd_delete() {
+  local ref="${1:-}" snap name latest_target dest_real
+  [[ -n $ref ]] || die "usage : pgbk delete <instantané>"
+
+  # « latest » est un alias, pas une cible. Le refuser par son nom donne un
+  # message clair ; la garde qui compte est la comparaison de chemins plus bas,
+  # car « pgbk delete 20260819 » peut désigner le dernier instantané sans
+  # jamais prononcer le mot.
+  [[ $ref == latest ]] \
+    && die "le dernier instantané est protégé — il n'y a rien à supprimer sous ce nom"
+
+  # Résolution en DEUX TEMPS, délibérément.
+  #
+  # « resolve » meurt sur une référence inconnue, et ce die doit tuer le script.
+  # L'imbriquer dans une autre substitution — readlink -f "$(resolve …)" —
+  # l'avalerait : le sous-shell meurt, la substitution rend une chaîne vide, et
+  # « readlink -f "" » renvoie LE RÉPERTOIRE COURANT avec un code 0. Toutes les
+  # gardes ci-dessous seraient alors satisfaites et le rm -rf final emporterait
+  # le répertoire de travail. Ne jamais fusionner ces deux étapes.
+  if [[ -d "${DEST}/${ref}" ]]; then
+    snap="${DEST}/${ref}"
+  else
+    snap="$(resolve "$ref")"
+  fi
+  [[ -n $snap ]] || die "référence non résolue : ${ref}"
+  snap="$(readlink -f -- "$snap")"
+  [[ -n $snap && -d $snap ]] || die "instantané introuvable : ${ref}"
+
+  # Ceinture et bretelles : quoi qu'ait donné la résolution, rien en dehors de
+  # DEST n'est supprimable. Couvre aussi « delete ../../quelque-chose ».
+  dest_real="$(readlink -f -- "$DEST")"
+  [[ -n $dest_real && $snap == "$dest_real"/* ]] \
+    && [[ $snap != "$dest_real" ]] \
+    || die "hors de ${DEST} : ${snap} — refus"
+
+  name="$(basename "$snap")"
+
+  [[ $name == *.part ]] \
+    && die "${name} est une exécution en cours ou interrompue — pg-backup.sh nettoie ces débris lui-même"
+
+  latest_target=""
+  [[ -L "${DEST}/latest" ]] && latest_target="$(readlink -f -- "${DEST}/latest")"
+  if [[ -z $latest_target ]]; then
+    # Sans le lien, la plus récente en tient lieu : l'intention est la même, et
+    # un lien cassé ne doit pas ouvrir la porte à la suppression du dernier.
+    latest_target="$(snapshots | tail -1)"
+    [[ -n $latest_target ]] \
+      && warn "${DEST}/latest absent — protection reportée sur $(basename "$latest_target")"
+  fi
+
+  [[ -n $latest_target && $snap == "$latest_target" ]] \
+    && die "${name} est le dernier instantané — protégé.
+         Supprimer la dernière sauvegarde laisserait le cluster sans filet.
+         Lancer « pgbk backup » d'abord si le but est de la remplacer."
+
+  if [[ $PLAN -eq 1 ]]; then
+    delete_details "$snap" "$name" >&2
+    echo "$name"
+    return 0
+  fi
+
+  delete_details "$snap" "$name"
+  confirm "SUPPRIME l'instantané ${name}" "$name" "son nom"
+
+  rm -rf -- "$snap"
+  step "supprimé : ${name}"
+  log "  $(snapshots | wc -l) sauvegarde(s) restante(s), $(df -Pm "$DEST" | awk 'NR==2 {print $4}') Mo libres"
+}
+
 # ─── verify ──────────────────────────────────────────────────────────────────
 
 cmd_verify() {
@@ -326,5 +428,6 @@ case "$CMD" in
   show)    cmd_show "${1:-latest}" ;;
   restore) cmd_restore "$@" ;;
   verify)  cmd_verify "${1:-}" ;;
+  delete|rm) cmd_delete "${1:-}" ;;
   *)       die "commande inconnue : ${CMD} (voir pgbk --help)" ;;
 esac

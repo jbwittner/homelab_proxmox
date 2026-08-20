@@ -1,11 +1,20 @@
 #!/bin/bash
 #
-# Pose la configuration du CT PostgreSQL mutualise depuis l'hote Proxmox :
-# point de montage du depot, symlinks de configuration, unites systemd de
-# sauvegarde, et pgbk sur l'hote.
+# Deploie le CT PostgreSQL mutualise depuis l'hote Proxmox : point de montage
+# du depot, symlinks de configuration, unites systemd de sauvegarde, et pgbk
+# sur l'hote et dans le conteneur.
+#
+# PREMIERE POSE ET MISES A JOUR, c'est le meme script. Les fichiers de
+# configuration sont des symlinks vers le depot et suivent donc un git pull
+# tout seuls, mais les scripts et les unites sont des COPIES : modifier
+# pgbk.sh ou pg-backup.sh dans le depot ne change rien tant qu'on ne rejoue
+# pas ce script. L'enchainer a chaque git pull est le geste normal :
+#
+#   cd /root/homelab_proxmox && git pull
+#   pve-eranikus/pgsql/pg-deploy.sh
 #
 # Rejouable a l'identique : chaque etape est conditionnelle, rien n'est touche
-# si l'etat est deja conforme. C'est ce qui permet de l'enchainer a un git pull.
+# si l'etat est deja conforme.
 #
 # Le CTID retenu est consigne dans /etc/default/pgbk, d'ou pgbk le relit.
 # Changer de conteneur ne demande donc que de rejouer ce script avec --ctid :
@@ -16,12 +25,12 @@
 # selon l'endroit ou il tourne.
 #
 # Usage :
-#   ./pg-init.sh                  pose complete
-#   ./pg-init.sh --status         etat de chaque element, ne change rien
-#   ./pg-init.sh --dry-run        affiche ce qui serait fait
-#   ./pg-init.sh --ctid 201       cible un autre conteneur, et le consigne
-#   ./pg-init.sh --restart        force un restart de postgresql
-#   ./pg-init.sh --no-container   saute les prerequis conteneur (mp1, protection)
+#   ./pg-deploy.sh                deploiement complet (pose ou mise a jour)
+#   ./pg-deploy.sh --status       etat de chaque element, ne change rien
+#   ./pg-deploy.sh --dry-run      affiche ce qui serait fait
+#   ./pg-deploy.sh --ctid 201     cible un autre conteneur, et le consigne
+#   ./pg-deploy.sh --restart      force un restart de postgresql
+#   ./pg-deploy.sh --no-container saute les prerequis conteneur (mp1, protection)
 #
 # A lancer en root sur le noeud Proxmox, pas dans le CT.
 
@@ -266,6 +275,11 @@ container_setup() {
 
     # listen_addresses exige un restart : un reload ne suffit pas a la
     # premiere pose, quand pg_hba et le drop-in viennent d'apparaitre.
+    #
+    # Le reload, lui, est inconditionnel et c'est voulu : les fichiers de
+    # configuration etant des symlinks vers le depot, leur contenu a pu changer
+    # avec le git pull sans que rien ici ne puisse s'en apercevoir. Un reload
+    # est sans effet de bord, l'economiser ferait manquer un pg_hba modifie.
     if [[ $changed -eq 1 || $FORCE_RESTART -eq 1 ]]; then
         log "  restart de postgresql (configuration modifiee)"
         run ct systemctl restart postgresql
@@ -335,8 +349,8 @@ write_conf() {
     # plutot que de taper dans un conteneur suppose.
     local want
     want=$(printf '%s\n' \
-        "# Genere par pg-init.sh — conteneur PostgreSQL pilote par pgbk." \
-        "# Changer de CT : rejouer pg-init.sh --ctid <ID>, pas editer ce fichier." \
+        "# Genere par pg-deploy.sh — conteneur PostgreSQL pilote par pgbk." \
+        "# Changer de CT : rejouer pg-deploy.sh --ctid <ID>, pas editer ce fichier." \
         "PG_CTID=$CTID")
     if [[ -r $CONF ]] && [[ $(cat "$CONF") == "$want" ]]; then
         log "  $CONF : PG_CTID=$CTID"
