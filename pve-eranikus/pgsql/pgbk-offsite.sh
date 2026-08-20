@@ -154,6 +154,17 @@ RCLONE=(
   --retries "$PGBK_OFFSITE_RETRIES"
   --low-level-retries 3
   --stats 0
+  # ACCÈS UNIFORME AU NIVEAU BUCKET (UBLA), activé sur ce bucket. Sans ce
+  # drapeau, rclone joint une ACL héritée à chaque insertion d'objet et GCS
+  # refuse en bloc :
+  #   Error 400: Cannot insert legacy ACL for an object when uniform
+  #   bucket-level access is enabled
+  # Aucun objet n'est écrit, la copie ne part jamais — constaté le 20 août 2026.
+  # Le drapeau dit à rclone de ne pas envoyer d'ACL : les droits viennent
+  # entièrement de l'IAM du bucket, ce qui est précisément le but d'UBLA.
+  # Il est ici plutôt que dans rclone.conf pour que le script marche même sur
+  # une configuration reconstruite à la va-vite ; les deux ne se gênent pas.
+  --gcs-bucket-policy-only
 )
 if [[ -n $PGBK_OFFSITE_BWLIMIT ]]; then RCLONE+=(--bwlimit "$PGBK_OFFSITE_BWLIMIT"); fi
 

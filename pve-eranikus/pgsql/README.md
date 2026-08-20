@@ -679,6 +679,7 @@ de l'hôte ne le peut. D'où `User=root` dans l'unité.
 | Emplacement | `europe-west9` (Paris) |
 | Cycle de vie | Nearline à 30 j, Coldline à 90 j, suppression à 365 j |
 | Versionnement d'objet | désactivé |
+| Accès uniforme au niveau bucket | **activé** — voir le piège ci-dessous |
 | Compte de service | `roles/storage.objectViewer` + `roles/storage.objectCreator`, sur ce seul bucket |
 | Client | `rclone` 1.60.1-DEV (paquet Debian trixie), `/usr/bin/rclone` |
 
@@ -715,9 +716,15 @@ cat > /root/.config/rclone/rclone.conf <<'EOF'
 [gcs]
 type = google cloud storage
 service_account_file = /root/.config/rclone/pgsql-backups.json
+bucket_policy_only = true
 EOF
 chmod 600 /root/.config/rclone/rclone.conf
 ```
+
+Le listage prouve la clé, le réseau et les droits de lecture — **pas** que
+l'écriture passe. Le seul test d'écriture est la première exécution de
+`pgbk-offsite` : ne pas déposer d'objet-sonde dans le bucket, le nœud n'aurait
+pas le droit de l'effacer et il y resterait un an.
 
 La **clé JSON du compte de service** se dépose en
 `/root/.config/rclone/pgsql-backups.json`, en `600`. Elle vient du gestionnaire
@@ -729,6 +736,31 @@ chmod 600 /root/.config/rclone/pgsql-backups.json
 rclone --config /root/.config/rclone/rclone.conf \
        lsf gcs:homelab-pgsql-backups-dc93212a     # doit répondre sans erreur
 ```
+
+#### Le piège de l'accès uniforme (UBLA)
+
+Le bucket est en **uniform bucket-level access** : les droits viennent
+entièrement de l'IAM, et les ACL par objet sont refusées. Or `rclone` joint par
+défaut une ACL héritée (`predefinedAcl`) à chaque insertion. Résultat, une
+erreur par fichier et **aucun objet écrit** :
+
+```
+ERROR : forgejo.dump: Failed to copy: googleapi: Error 400: Cannot insert legacy
+ACL for an object when uniform bucket-level access is enabled, invalid
+```
+
+L'insertion étant rejetée avant tout stockage, ces échecs ne laissent **pas**
+d'objet partiel : il n'y a rien à nettoyer, seulement à relancer une fois la
+configuration corrigée.
+
+Deux endroits le règlent, et ils ne se gênent pas :
+
+- `bucket_policy_only = true` dans `rclone.conf`, ci-dessus — vaut aussi pour
+  les appels `rclone` faits à la main ;
+- `--gcs-bucket-policy-only` dans `pgbk-offsite.sh`, pour que le script
+  fonctionne même sur une configuration reconstruite à la va-vite.
+
+Constaté le 20 août 2026, à la première exécution réelle.
 
 ### Installation
 
