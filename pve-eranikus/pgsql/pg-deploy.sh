@@ -1,8 +1,13 @@
 #!/bin/bash
 #
 # Deploie le CT PostgreSQL mutualise depuis l'hote Proxmox : point de montage
-# du depot, symlinks de configuration, unites systemd de sauvegarde, et pgbk
-# sur l'hote et dans le conteneur.
+# du depot, symlinks de configuration, unites systemd de sauvegarde, pgbk sur
+# l'hote et dans le conteneur, et la copie hors-site vers GCS sur l'hote.
+#
+# DEUX MACHINES, UN SEUL SCRIPT. Ce repertoire porte des fichiers pour le CT
+# (pg-backup.*, la configuration PostgreSQL) et pour l'hote (pgbk-offsite.*).
+# Le tableau du README dit lequel va ou ; ici, la section B pose ce qui vit
+# dans le conteneur et les sections D et E ce qui vit sur le noeud.
 #
 # PREMIERE POSE ET MISES A JOUR, c'est le meme script. Les fichiers de
 # configuration sont des symlinks vers le depot et suivent donc un git pull
@@ -31,6 +36,7 @@
 #   ./pg-deploy.sh --ctid 201     cible un autre conteneur, et le consigne
 #   ./pg-deploy.sh --restart      force un restart de postgresql
 #   ./pg-deploy.sh --no-container saute les prerequis conteneur (mp1, protection)
+#   ./pg-deploy.sh --no-offsite   saute la copie hors-site GCS (section E)
 #
 # A lancer en root sur le noeud Proxmox, pas dans le CT.
 
@@ -39,6 +45,7 @@ set -euo pipefail
 SRC=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)   # source reelle du mp1
 MP=/etc/pgsql-git                                    # cible du montage dans le CT
 HOST_PGBK=/usr/local/sbin/pgbk
+HOST_OFFSITE=/usr/local/bin/pgbk-offsite             # copie hors-site, cote HOTE
 CONF=/etc/default/pgbk                               # CTID consigne, relu par pgbk
 WAIT_TIMEOUT=120
 
@@ -55,6 +62,7 @@ MODE=apply         # apply | status
 DRY=0
 FORCE_RESTART=0
 DO_CONTAINER=1
+DO_OFFSITE=1
 
 log()  { printf '%s\n' "$*"; }
 warn() { printf 'ATTENTION : %s\n' "$*" >&2; }
@@ -78,6 +86,7 @@ while [[ $# -gt 0 ]]; do
         --dry-run)      DRY=1; shift ;;
         --restart)      FORCE_RESTART=1; shift ;;
         --no-container) DO_CONTAINER=0; shift ;;
+        --no-offsite)   DO_OFFSITE=0; shift ;;
         --ctid)
             [[ $# -ge 2 ]] || die "--ctid attend une valeur."
             CTID_FLAG=$2; shift 2 ;;
@@ -93,7 +102,9 @@ CTID=${CTID_FLAG:-$CTID}
 
 [[ $EUID -eq 0 ]] || die "A lancer en root sur le noeud Proxmox."
 command -v pct >/dev/null || die "pct introuvable : ce script tourne sur l'hote, pas dans le CT."
-for f in pg-backup.sh pgbk.sh pg-backup.service pg-backup.timer; do
+NEEDED=(pg-backup.sh pgbk.sh pg-backup.service pg-backup.timer)
+[[ $DO_OFFSITE -eq 1 ]] && NEEDED+=(pgbk-offsite.sh pgbk-offsite.service pgbk-offsite.timer)
+for f in "${NEEDED[@]}"; do
     [[ -f "$SRC/$f" ]] || die "Depot incomplet : $SRC/$f absent."
 done
 
@@ -339,6 +350,12 @@ checks() {
         warn "pg-backup.timer n'est pas active"
         note KO "pg-backup.timer (inactive)"
     fi
+
+    # Timer de l'HOTE, pas du CT : pas de ct() ici.
+    if [[ $DO_OFFSITE -eq 1 ]] && systemctl is-enabled --quiet pgbk-offsite.timer 2>/dev/null; then
+        systemctl list-timers pgbk-offsite.timer --no-pager 2>/dev/null | sed 's/^/    /'
+        note OK "pgbk-offsite.timer (verifie)"
+    fi
 }
 
 # ------------------------------------------------ D. pgbk sur l'hote
@@ -368,18 +385,104 @@ write_conf() {
     log
 }
 
+# Pendant hote de install_ct : copie si le contenu ou le mode differe.
+# 0 = deja conforme, 1 = copie.
+install_host() {
+    local mode=$1 src=$2 dest=$3
+    if cmp -s "$src" "$dest" 2>/dev/null \
+       && [[ $(stat -c %a "$dest" 2>/dev/null) == "$mode" ]]; then
+        log "  $dest a jour"
+        note OK "$dest"
+        return 0
+    fi
+    log "  installation de $dest (mode $mode)"
+    run install -m "$mode" "$src" "$dest"
+    note POSE "$dest"
+    return 1
+}
+
 host_wrapper() {
     log "== pgbk sur l'hote"
     # Exactement le meme fichier que dans le CT : pgbk.sh se comporte selon
     # l'endroit ou il tourne. Un seul contenu, donc rien a confondre.
-    if cmp -s "$SRC/pgbk.sh" "$HOST_PGBK" 2>/dev/null \
-       && [[ $(stat -c %a "$HOST_PGBK" 2>/dev/null) == 755 ]]; then
-        log "  $HOST_PGBK a jour"
-        note OK "$HOST_PGBK"
+    install_host 755 "$SRC/pgbk.sh" "$HOST_PGBK" || true
+    log
+}
+
+# --------------------------------------------- E. copie hors-site (sur l'HOTE)
+
+# Valeur d'une variable declaree dans pgbk-offsite.service, ou $2 a defaut.
+# L'unite est la source unique de verite des chemins du hors-site ; ce script
+# les relit plutot que de les redeclarer, ce qui divergerait a la premiere
+# modification. Le defaut evite qu'une ligne Environment retiree ne produise un
+# controle sur une chaine vide, qui passerait pour un fichier absent.
+unit_env() {
+    local v
+    v=$(awk -F= -v k="$1" '$1 == "Environment" && $2 == k {v=$3} END {print v}' \
+        "$SRC/pgbk-offsite.service")
+    printf '%s\n' "${v:-$2}"
+}
+
+host_offsite() {
+    log "== Copie hors-site vers GCS (sur l'hote)"
+
+    local rclone_bin key src_dir copied=0 ready=1
+    rclone_bin=$(unit_env PGBK_OFFSITE_RCLONE /usr/bin/rclone)
+    key=$(unit_env PGBK_OFFSITE_KEY /root/.config/rclone/pgsql-backups.json)
+    src_dir=$(unit_env PGBK_OFFSITE_SRC /data/subvol-$CTID-disk-0)
+
+    # Le script et les unites sont poses dans tous les cas : ce sont des
+    # fichiers inertes tant que le timer n'est pas actif, et les avoir en
+    # place permet un « pgbk-offsite --dry-run » de diagnostic.
+    install_host 755 "$SRC/pgbk-offsite.sh"      "$HOST_OFFSITE"                          || copied=1
+    install_host 644 "$SRC/pgbk-offsite.service" /etc/systemd/system/pgbk-offsite.service || copied=1
+    install_host 644 "$SRC/pgbk-offsite.timer"   /etc/systemd/system/pgbk-offsite.timer   || copied=1
+
+    [[ $copied -eq 1 ]] && run systemctl daemon-reload
+
+    # L'unite decrit UN dataset, celui du CT 200. Avec --ctid 201 elle
+    # pointerait toujours sur le volume du 200 : la copie partirait chaque
+    # nuit, verte, sur les sauvegardes du mauvais conteneur. Pire qu'une
+    # copie absente, donc on n'arme pas.
+    if [[ $src_dir != *subvol-$CTID-* ]]; then
+        warn "PGBK_OFFSITE_SRC=$src_dir ne mentionne pas le CT $CTID"
+        warn "  vue HOTE du dataset de sauvegarde a corriger dans pgbk-offsite.service"
+        warn "  (si ce chemin est volontaire : systemctl enable --now pgbk-offsite.timer)"
+        note KO "pgbk-offsite (source hors CT $CTID)"
+        ready=0
+    elif [[ -d $src_dir ]]; then
+        log "  source : $src_dir (vue hote de /var/backups/postgresql)"
+        note OK "pgbk-offsite (source $src_dir)"
     else
-        log "  installation de $HOST_PGBK"
-        run install -m 755 "$SRC/pgbk.sh" "$HOST_PGBK"
-        note POSE "$HOST_PGBK"
+        # Le dataset n'est monte cote hote que quand le CT tourne.
+        warn "$src_dir absent — CT $CTID demarre ?"
+        note KO "pgbk-offsite (source $src_dir absente)"
+    fi
+
+    # Les identifiants GCP ne sont pas dans le depot et n'y seront jamais
+    # (README section 10). Sans eux, activer le timer produirait un echec
+    # bruyant toutes les nuits a 3h30 : on pose les fichiers, on n'arme pas.
+    if [[ ! -x $rclone_bin ]]; then
+        warn "$rclone_bin absent — apt install rclone"
+        ready=0
+    fi
+    if [[ ! -s $key ]]; then
+        warn "$key absente — cle du compte de service, a reposer depuis OpenBao"
+        ready=0
+    fi
+
+    if systemctl is-enabled --quiet pgbk-offsite.timer 2>/dev/null; then
+        log "  pgbk-offsite.timer deja active"
+        note OK "pgbk-offsite.timer (active)"
+        [[ $ready -eq 0 ]] && warn "timer actif mais prerequis GCS manquants : la copie echouera a 3h30"
+    elif [[ $ready -eq 1 ]]; then
+        log "  activation de pgbk-offsite.timer"
+        run systemctl enable --now pgbk-offsite.timer
+        note POSE "pgbk-offsite.timer (active)"
+    else
+        warn "pgbk-offsite.timer NON active : voir les avertissements ci-dessus"
+        warn "  y remedier (README section 10), puis rejouer ce script"
+        note KO "pgbk-offsite.timer (inactive)"
     fi
     log
 }
@@ -399,6 +502,9 @@ container_setup
 log
 write_conf
 host_wrapper
+if [[ $DO_OFFSITE -eq 1 ]]; then
+    host_offsite
+fi
 log
 checks
 log

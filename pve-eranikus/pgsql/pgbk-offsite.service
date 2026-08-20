@@ -1,0 +1,46 @@
+# /etc/systemd/system/pgbk-offsite.service
+#
+# UNITÉ DE L'HÔTE PROXMOX (pve-eranikus), pas du CT 200.
+# Ne pas confondre avec pg-backup.service, qui vit DANS le conteneur.
+#
+[Unit]
+Description=Copie hors-site des sauvegardes PostgreSQL vers GCS
+Documentation=file:///root/homelab_proxmox/pve-eranikus/pgsql/README.md
+# Sans réseau, rclone échoue bruyamment — ce qui est le comportement voulu,
+# mais autant ne pas produire une alerte à chaque démarrage du nœud.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# root : les dumps sont en 600, propriété d'un UID de CT non privilégié
+# (100102:100106). Aucun autre compte de l'hôte ne peut les lire.
+User=root
+Group=root
+
+# Ce nœud-ci, décrit à un seul endroit. Ajouter vert-ysera plus tard ne
+# demande que de changer PGBK_OFFSITE_NODE et PGBK_OFFSITE_SRC dans sa
+# propre copie de cette unité : l'arborescence distante suit.
+Environment=PGBK_OFFSITE_NODE=pve-eranikus
+Environment=PGBK_OFFSITE_SRC=/data/subvol-200-disk-0
+Environment=PGBK_OFFSITE_REMOTE=gcs
+Environment=PGBK_OFFSITE_BUCKET=homelab-pgsql-backups-dc93212a
+Environment=PGBK_OFFSITE_SUBPATH=postgresql
+Environment=PGBK_OFFSITE_CONFIG=/root/.config/rclone/rclone.conf
+Environment=PGBK_OFFSITE_KEY=/root/.config/rclone/pgsql-backups.json
+# Chemin absolu : le PATH de systemd n'inclut pas /usr/local/bin, et
+# pg-deploy.sh relit cette ligne pour verifier que rclone est installe.
+Environment=PGBK_OFFSITE_RCLONE=/usr/bin/rclone
+Environment=PGBK_OFFSITE_TRANSFERS=4
+Environment=PGBK_OFFSITE_CHECK=hash
+Environment=PGBK_OFFSITE_STALE_HOURS=48
+
+# Chemin absolu : le PATH fourni par systemd n'inclut pas /usr/local/bin.
+ExecStart=/usr/local/bin/pgbk-offsite
+
+# Une exécution qui traîne est un montage cassé, pas une lenteur passagère :
+# le timer repassera demain de toute façon.
+TimeoutStartSec=2h
+
+NoNewPrivileges=true
+PrivateTmp=true

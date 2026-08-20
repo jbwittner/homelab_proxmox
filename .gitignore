@@ -1,0 +1,15 @@
+# Aucun secret dans ce dépôt.
+#
+# Les clés de compte de service GCP (pgbk-offsite, section 10 du README du CT
+# PostgreSQL) vivent en /root/.config/rclone/ sur le nœud et viennent du
+# gestionnaire de secrets. Ces motifs sont un filet : une clé copiée par
+# mégarde dans un répertoire du dépôt ne doit pas pouvoir être commitée.
+*-backups.json
+*service-account*.json
+*credentials*.json
+*.pem
+*.key
+
+# Fichiers de configuration rclone : le remote lui-même n'a rien de secret,
+# mais le fichier peut porter des jetons selon le type de remote.
+rclone.conf

@@ -22,6 +22,36 @@ configuration est versionnée ici.
 | Dépôt monté | `/root/homelab_proxmox/pve-eranikus/pgsql` → `/etc/pgsql-git` (ro) |
 | Déploiement | `pg-deploy.sh`, joué sur le nœud |
 | Exploitation | `pgbk.sh`, joué sur le nœud |
+| Hors-site | `pgbk-offsite.sh`, joué sur le nœud (section 10) |
+
+### Où va chaque fichier
+
+Ce répertoire porte désormais des fichiers pour **deux machines**. Ils sont
+côte à côte dans une arborescence plate ; l'endroit où chacun s'installe n'est
+donc lisible qu'ici. Poser un fichier du mauvais côté ne produit pas d'erreur
+immédiate — juste une sauvegarde qui ne part jamais, ou un timer qui ne trouve
+rien.
+
+| Fichier | Tourne sur | Installé en |
+|---|---|---|
+| `pg-deploy.sh` | **hôte** `pve-eranikus` | joué depuis le dépôt |
+| `pgbk.sh` | **hôte** et **CT** | `/usr/local/sbin/pgbk` (hôte), `/usr/local/bin/pgbk` (CT) |
+| `pgbk-offsite.sh` | **hôte** `pve-eranikus` | `/usr/local/bin/pgbk-offsite` |
+| `pgbk-offsite.service` / `.timer` | **hôte** `pve-eranikus` | `/etc/systemd/system/` de l'hôte |
+| `pg-backup.sh` | **CT 200** | `/usr/local/bin/pg-backup.sh` |
+| `pg-backup.service` / `.timer` | **CT 200** | `/etc/systemd/system/` du CT |
+| `10-homelab.conf`, `pg_hba.conf` | **CT 200** | symlinks depuis `/etc/pgsql-git` |
+| `tenant.sql` | **CT 200** | joué à la main via `psql -f` |
+
+Le dataset de sauvegarde porte **deux noms selon le point de vue**, et c'est la
+confusion la plus facile à faire dans ce répertoire :
+
+| Vu du CT | Vu de l'hôte |
+|---|---|
+| `/var/backups/postgresql` | `/data/subvol-200-disk-0` |
+
+`pg-backup.sh` écrit dans le premier, `pgbk-offsite.sh` lit le second. Ce sont
+les mêmes octets.
 
 ## 1. Création du conteneur
 
@@ -130,6 +160,7 @@ le contrôle qui prouve que le script décrit bien l'état existant, et non un
 Ce qu'il déploie, dans l'ordre : point de montage et protection (section 3),
 symlinks de configuration (section 4), unités systemd et scripts de sauvegarde
 (sections 7 et 8), fichier `/etc/default/pgbk`, `pgbk` sur l'hôte,
+`pgbk-offsite` et ses unités sur l'hôte (section 10),
 puis les contrôles de la section 4. Il se termine par un résumé d'une ligne par
 élément (`OK` / `POSE` / `KO`).
 
@@ -432,7 +463,7 @@ accèdent.
 **Les deux disques sont dans la même machine.** La séparation protège d'une
 panne de SSD, pas d'un vol, d'un incendie ou d'un `pct destroy` malencontreux —
 qui emporterait le conteneur *et* son volume de sauvegardes. La copie hors-site
-vers GCS reste le seul vrai filet.
+vers GCS reste le seul vrai filet — c'est `pgbk-offsite`, section 10.
 
 ## 8. `pgbk` — interface de gestion
 
@@ -608,11 +639,318 @@ CTID 200**, l'opération détruisant le CT avant de le recréer. Prévoir
 `pct set 200 --protection 0` au préalable — c'est le second endroit où la
 protection se met en travers, après l'ajout d'un point de montage.
 
+## 10. Copie hors-site vers GCS — `pgbk-offsite`
+
+Les deux disques du nœud sont dans la même machine (section 7). La séparation
+SSD / NVMe protège d'une panne de disque, pas d'un vol, d'un incendie ou d'un
+`pct destroy` malencontreux — qui emporterait le conteneur *et* son volume de
+sauvegardes. **C'est cette copie-là qui est le vrai filet.**
+
+Chaque nuit, l'hôte pousse vers Google Cloud Storage les répertoires
+d'instantanés qui n'y sont pas encore :
+
+```
+gs://homelab-pgsql-backups-dc93212a/pve-eranikus/postgresql/20260820-093240/
+    forgejo.dump
+    globals.sql
+    MANIFEST
+```
+
+Le **nœud est au premier niveau** : `vert-ysera` pourra s'ajouter en posant les
+mêmes fichiers avec un autre `PGBK_OFFSITE_NODE`, sans rien restructurer.
+
+### Le script tourne sur l'hôte, pas dans le CT
+
+Décision délibérée. Le CT PostgreSQL est le composant le plus sensible du
+nœud : il n'a aucune raison de détenir des identifiants GCP ni d'atteindre
+internet. L'hôte lit directement le dataset ZFS — par sa **vue hôte**,
+`/data/subvol-200-disk-0`, et non `/var/backups/postgresql` qui n'existe que
+dans le conteneur — et mutualise `rclone` pour les futurs services du nœud.
+
+Les dumps sont en `600`, propriété de `100102:100106` (décalage d'UID des CT
+non privilégiés). Root sur l'hôte les lit sans difficulté ; aucun autre compte
+de l'hôte ne le peut. D'où `User=root` dans l'unité.
+
+### L'environnement GCS
+
+| | |
+|---|---|
+| Bucket | `homelab-pgsql-backups-dc93212a` |
+| Emplacement | `europe-west9` (Paris) |
+| Cycle de vie | Nearline à 30 j, Coldline à 90 j, suppression à 365 j |
+| Versionnement d'objet | désactivé |
+| Compte de service | `roles/storage.objectViewer` + `roles/storage.objectCreator`, sur ce seul bucket |
+| Client | `rclone` 1.60.1-DEV (paquet Debian trixie), `/usr/bin/rclone` |
+
+**Le compte de service ne peut ni écraser ni supprimer.** L'écrasement exige
+`objects.delete`, qui n'est pas accordé. C'est volontaire : un nœud compromis
+ne doit pas pouvoir détruire l'historique distant. Les suppressions sont faites
+côté serveur par la règle de cycle de vie, jamais par le nœud.
+
+Trois conséquences, toutes visibles dans le code :
+
+1. Le transfert se fait en `rclone copy --ignore-existing` : on ne *tente*
+   jamais un écrasement, qui partirait en 403 à chaque exécution.
+2. `rclone sync` est **interdit**. `sync` réplique les suppressions : un bug
+   local, un dataset démonté, et la copie distante s'évapore avec l'originale.
+   L'interdiction est structurante, pas cosmétique.
+3. Un transfert interrompu peut laisser un objet partiel que **rien, sur ce
+   nœud, ne pourra remplacer**. C'est le mode de panne le plus probable de tout
+   le montage — voir « Objet distant divergent » plus bas.
+
+> Cette protection contre les suppressions se vérifie **par lecture du code et
+> des droits IAM**. Ne jamais la « tester » en vidant le répertoire local pour
+> voir si le distant suit : le seul résultat garanti d'un tel test est la perte
+> des sauvegardes locales.
+
+### Prérequis sur le nœud
+
+`rclone` et la configuration du remote, à faire une fois :
+
+```bash
+apt install rclone                      # 1.60.1-DEV sur trixie, suffisant
+
+install -d -m 700 /root/.config/rclone
+cat > /root/.config/rclone/rclone.conf <<'EOF'
+[gcs]
+type = google cloud storage
+service_account_file = /root/.config/rclone/pgsql-backups.json
+EOF
+chmod 600 /root/.config/rclone/rclone.conf
+```
+
+La **clé JSON du compte de service** se dépose en
+`/root/.config/rclone/pgsql-backups.json`, en `600`. Elle vient du gestionnaire
+de secrets (OpenBao) : **elle n'est pas dans ce dépôt et n'y entrera pas**. Le
+`.gitignore` de la racine refuse les fichiers de clé par précaution.
+
+```bash
+chmod 600 /root/.config/rclone/pgsql-backups.json
+rclone --config /root/.config/rclone/rclone.conf \
+       lsf gcs:homelab-pgsql-backups-dc93212a     # doit répondre sans erreur
+```
+
+### Installation
+
+C'est `pg-deploy.sh` qui pose l'ensemble, comme pour le reste du CT — **une
+fois les prérequis ci-dessus réunis** :
+
+```bash
+cd /root/homelab_proxmox && git pull
+pve-eranikus/pgsql/pg-deploy.sh
+```
+
+Sa section « Copie hors-site vers GCS (sur l'hote) » fait, sur **l'hôte** et
+non dans le CT :
+
+```bash
+install -m 755 pgbk-offsite.sh      /usr/local/bin/pgbk-offsite
+install -m 644 pgbk-offsite.service /etc/systemd/system/pgbk-offsite.service
+install -m 644 pgbk-offsite.timer   /etc/systemd/system/pgbk-offsite.timer
+systemctl daemon-reload
+systemctl enable --now pgbk-offsite.timer
+```
+
+Comme pour les fichiers du CT, le script est **copié et non lié** : le dépôt
+peut être déplacé, ou en cours de `git pull` à 3h30. Modifier `pgbk-offsite.sh`
+dans le dépôt ne change donc rien tant que `pg-deploy.sh` n'a pas été rejoué.
+
+**Le timer n'est armé que si `rclone` et la clé sont là.** Sans eux, le script
+et les unités sont quand même posés — ce sont des fichiers inertes, et les
+avoir en place permet un `pgbk-offsite --dry-run` de diagnostic — mais le timer
+reste inactif et le résumé affiche `KO pgbk-offsite.timer (inactive)`. Armer un
+timer qui échouera toutes les nuits à 3h30 n'aiderait personne. Réunir les
+prérequis, rejouer `pg-deploy.sh`.
+
+Deux autres refus, visibles dans le résumé :
+
+| Message | Cause |
+|---|---|
+| `pgbk-offsite (source /data/subvol-200-disk-0 absente)` | le CT est à l'arrêt : le dataset n'est monté côté hôte que quand il tourne. Le timer reste armé, il n'y a rien à corriger |
+| `pgbk-offsite (source hors CT 201)` | `--ctid 201` avec une unité qui pointe toujours sur le volume du 200. **Le timer n'est pas armé** : une copie verte tous les soirs sur les sauvegardes du mauvais conteneur serait pire qu'une copie absente |
+
+`pg-deploy.sh --no-offsite` saute entièrement cette section — pour un nœud sans
+copie hors-site, ou pour ne toucher qu'au CT.
+
+Le script relit `pgbk-offsite.service` pour connaître `PGBK_OFFSITE_RCLONE`,
+`PGBK_OFFSITE_KEY` et `PGBK_OFFSITE_SRC` : l'unité reste le seul endroit où ces
+chemins sont écrits.
+
+### Vérification
+
+```bash
+/usr/local/bin/pgbk-offsite --dry-run     # annonce, n'envoie rien
+systemctl start pgbk-offsite.service      # première exécution réelle
+journalctl -u pgbk-offsite -n 60 --no-pager
+```
+
+Ce qu'il faut observer pour conclure que ça marche :
+
+1. La première exécution transfère **tous** les instantanés locaux et se
+   termine par `terminé en Ns — N instantané(s) en ligne`.
+2. La seconde, lancée dans la foulée, ne transfère **rien** :
+   `bilan — 0 transféré(s), N déjà en ligne, 0 en échec, 0 divergent(s)`.
+   C'est le contrôle d'idempotence — s'il retransfère, quelque chose ne va pas.
+3. Le timer est armé :
+
+```bash
+systemctl list-timers pgbk-offsite.timer    # prochaine échéance à 3h30 (+ délai aléatoire)
+```
+
+4. Le contenu distant correspond à `pgbk list` :
+
+```bash
+rclone --config /root/.config/rclone/rclone.conf \
+       lsf gcs:homelab-pgsql-backups-dc93212a/pve-eranikus/postgresql/
+```
+
+Les codes de retour sont faits pour être exploités par une supervision :
+
+| Code | Sens |
+|---|---|
+| 0 | tout est en ligne |
+| 1 | environnement inutilisable : `rclone`, clé, bucket, ou aucune sauvegarde locale |
+| 2 | au moins un transfert a échoué |
+| 3 | au moins un objet distant diverge de sa source — intervention humaine |
+
+Un échec est bruyant par construction : `journalctl -u pgbk-offsite -p warning`
+ne doit rien afficher pour une nuit normale. Le script signale aussi en `WARN`
+un dernier instantané local vieux de plus de 48 h — une copie hors-site
+parfaitement verte au-dessus d'une sauvegarde locale à l'arrêt ne protège plus
+rien.
+
+### Ce qui n'est jamais transféré
+
+| Écarté | Pourquoi |
+|---|---|
+| `latest` | symlink **absolu** vers `/var/backups/postgresql/...`, chemin qui n'existe que dans le CT — donc cassé vu de l'hôte |
+| `pre-restore-*` | filets posés par `pgbk restore` avant d'écraser une base : locaux, temporaires, sans valeur distante |
+| `*.part` | exécution en cours ou interrompue. Par construction de `pg-backup.sh`, un répertoire **sans** ce suffixe est complet |
+
+Le timer est à **3h30**, une heure après la sauvegarde locale du CT (2h30) :
+assez pour qu'elle soit terminée et son répertoire renommé.
+
+### Objet distant divergent — le cas à traiter à la main
+
+Après chaque transfert, le script relance un `rclone check --one-way` sur
+**tout** l'instantané, pas seulement sur ce qui vient de partir. C'est là, et
+nulle part ailleurs, qu'un objet partiel laissé par une exécution coupée se
+révèle :
+
+```
+[ERROR]   20260819-234306 : le distant DIVERGE de la source
+          ERROR : forgejo.dump: md5 differ
+[ERROR]   ces objets ne peuvent pas être corrigés depuis ce nœud : le compte de
+[ERROR]   service n'a pas le droit d'écraser (objectCreator sans objects.delete).
+```
+
+Le script **ne tente pas de réparer**, et surtout pas en boucle : une reprise
+qui se heurte à un 403 toutes les nuits masquerait le problème au lieu de le
+montrer. La correction demande le compte personnel, depuis un poste
+d'administration :
+
+```bash
+gcloud auth login
+gcloud storage rm gs://homelab-pgsql-backups-dc93212a/pve-eranikus/postgresql/20260819-234306/forgejo.dump
+```
+
+Puis, sur le nœud :
+
+```bash
+systemctl start pgbk-offsite.service    # l'objet manquant est renvoyé, puis contrôlé
+```
+
+### Restauration depuis GCS
+
+**La récupération se fait avec le compte personnel, pas avec la clé du nœud.**
+C'est délibéré : la restauration ne doit dépendre d'aucun secret stocké sur le
+nœud, sinon elle échoue précisément dans le scénario où l'on en a besoin — nœud
+détruit, volé, ou compte de service révoqué. Le compte de service, de son côté,
+n'a de toute façon pas le droit d'écrire ailleurs que dans ce bucket.
+
+**1. Récupérer un instantané, depuis n'importe quel poste :**
+
+```bash
+gcloud auth login
+gcloud storage ls gs://homelab-pgsql-backups-dc93212a/pve-eranikus/postgresql/
+gcloud storage cp -r \
+  gs://homelab-pgsql-backups-dc93212a/pve-eranikus/postgresql/20260820-093240 .
+cat 20260820-093240/MANIFEST     # date, version PostgreSQL, bases contenues
+```
+
+Le `MANIFEST` est à lire **avant** de restaurer : un dump produit en
+PostgreSQL 18 ne se restaure pas sur une majeure antérieure.
+
+**2. Remonter l'instantané dans le CT**, via le nœud :
+
+```bash
+scp -r 20260820-093240 root@192.168.1.11:/tmp/
+
+# puis, sur le nœud — pct push prend un fichier à la fois, d'où la boucle
+pct exec 200 -- mkdir -p /var/backups/postgresql/20260820-093240
+for f in /tmp/20260820-093240/*; do
+  pct push 200 "$f" "/var/backups/postgresql/20260820-093240/$(basename "$f")"
+done
+
+# les fichiers arrivent en root:root ; pg_restore tourne en postgres
+pct exec 200 -- chown -R postgres:postgres /var/backups/postgresql/20260820-093240
+pct exec 200 -- chmod 700 /var/backups/postgresql/20260820-093240
+```
+
+**3. Restaurer normalement**, l'instantané est redevenu un instantané local
+comme les autres :
+
+```bash
+pgbk show    20260820-093240      # contrôle : MANIFEST et fichiers attendus
+pgbk restore forgejo 20260820-093240
+pgbk verify  forgejo
+```
+
+`pgbk restore` prend au passage un filet `pre-restore-*` de l'état courant, et
+réapplique les ACL — l'étape que la restauration manuelle de la section 9
+oublie le plus souvent.
+
+**Reconstruction complète** (cluster perdu) : récupérer le répertoire, rejouer
+d'abord `globals.sql` — les rôles et leurs mots de passe ne sont dans aucun
+`pg_dump` de base —, puis les dumps un par un, puis les ACL de chaque
+locataire. `pgbk restore` refuse de restaurer une base dont le rôle
+propriétaire n'existe pas : c'est le rappel que `globals.sql` passe en premier.
+
+**`globals.sql` contient les empreintes SCRAM de tous les rôles.** C'est le
+fichier le plus sensible du lot, et il part hors-site. Le bucket est privé,
+chiffré au repos par GCS, et son IAM se limite à ce compte de service plus les
+comptes personnels d'administration ; il n'y a rien de plus à en attendre. Le
+récupérer sur un poste, c'est y poser des empreintes de mots de passe — les
+effacer une fois la restauration finie.
+
+### Paramétrage
+
+Valeurs par défaut dans le script, valeurs réelles dans
+`pgbk-offsite.service` : l'unité est le seul endroit qui décrit ce nœud-ci.
+
+| Variable | Défaut | Rôle |
+|---|---|---|
+| `PGBK_OFFSITE_NODE` | `$(hostname -s)` | premier niveau distant — `pve-eranikus` |
+| `PGBK_OFFSITE_SRC` | `/data/subvol-200-disk-0` | **vue hôte** du dataset de sauvegarde |
+| `PGBK_OFFSITE_REMOTE` | `gcs` | remote déclaré dans `rclone.conf` |
+| `PGBK_OFFSITE_BUCKET` | `homelab-pgsql-backups-dc93212a` | |
+| `PGBK_OFFSITE_SUBPATH` | `postgresql` | second niveau distant, sous le nœud |
+| `PGBK_OFFSITE_CONFIG` | `/root/.config/rclone/rclone.conf` | explicite : sous systemd, `HOME` n'est pas garanti |
+| `PGBK_OFFSITE_KEY` | `/root/.config/rclone/pgsql-backups.json` | contrôlée avant tout transfert |
+| `PGBK_OFFSITE_RCLONE` | `/usr/bin/rclone` | chemin absolu, le `PATH` systemd est minimal |
+| `PGBK_OFFSITE_TRANSFERS` | `4` | transferts parallèles |
+| `PGBK_OFFSITE_RETRIES` | `3` | reprises `rclone` |
+| `PGBK_OFFSITE_BWLIMIT` | *(vide)* | bridage, ex. `10M` pour épargner la montée ADSL |
+| `PGBK_OFFSITE_CHECK` | `hash` | `size` pour un contrôle plus rapide et plus faible |
+| `PGBK_OFFSITE_STALE_HOURS` | `48` | âge du dernier instantané local au-delà duquel on alerte |
+
 ## Reste à faire
 
 - [x] Installer le timer de sauvegarde (section 7).
 - [ ] Ligne du locataire `forgejo` — dépend de son IP définitive.
-- [ ] Copie hors-site des dumps vers GCS.
+- [x] Copie hors-site des dumps vers GCS (section 10).
+- [x] Faire poser `pgbk-offsite` et ses unités par `pg-deploy.sh`
+      (section E du script).
 - [ ] Copier `postgresql.vars` dans ce dépôt après vérification des secrets.
 - [x] Hook post-install (`pct set`, montage, symlinks, timer) pour rendre
       l'ensemble rejouable — c'est `pg-deploy.sh` (section 2), écrit à partir
