@@ -5,8 +5,9 @@ C'est aussi ce qui confine le verrouillage Proxmox à un seul endroit — le jou
 où un service migre vers une VM ou une machine nue, seul ce fichier est à
 remplacer.
 
-Rien ici ne mentionne PostgreSQL, Forgejo ni aucun service. La règle est
-simple : si un nom de service apparaît, le code est au mauvais endroit.
+Rien ici ne nomme un service particulier. La règle est simple : si le nom d'un
+service du homelab apparaît, le code est au mauvais endroit — et un test le
+vérifie, sans exception, y compris dans les commentaires.
 
 Les pièges encodés ici viennent tous de pannes réelles :
   - la protection interdit l'ajout d'un point de montage, et l'oublier au
@@ -21,14 +22,15 @@ Les pièges encodés ici viennent tous de pannes réelles :
 
 from __future__ import annotations
 
+import hashlib
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator
 
-from ..core.log import info, step, warn
-from ..core.runner import Runner
+from core.log import info, step, warn
+from core.runner import Runner
 
 WAIT_TIMEOUT = 120
 
@@ -70,10 +72,46 @@ class MountPoint:
         return ",".join(parts)
 
     def matches(self, current: str | None) -> bool:
-        """Compare sans dépendre de l'ordre des options."""
+        """Compare sans dépendre de l'ordre des options.
+
+        Proxmox réécrit la valeur qu'on lui donne : l'ordre des options n'est
+        pas garanti, et une comparaison de chaînes brutes conclurait à une
+        divergence à chaque déploiement — donc à un point de montage reposé et
+        à un conteneur redémarré pour rien.
+        """
         if not current:
             return False
         return set(current.split(",")) == set(self.render().split(","))
+
+
+@dataclass(frozen=True)
+class TreeChange:
+    """Ce qu'une synchronisation de répertoire a fait, ou ferait."""
+
+    pushed: tuple[str, ...] = ()
+    removed: tuple[str, ...] = ()
+    unchanged: int = 0
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.pushed or self.removed)
+
+
+def diff_tree(
+    local: dict[str, str], remote: dict[str, str]
+) -> tuple[list[str], list[str]]:
+    """Décide quoi pousser et quoi retirer, à partir de deux tables d'empreintes.
+
+    Fonction pure, donc testable sans conteneur — et c'est là qu'est toute la
+    décision.
+
+    L'élagage n'est pas un raffinement : sans lui, un module renommé laisse son
+    ancêtre en place, et cet ancêtre continue de s'importer. Le conteneur
+    tournerait alors sur du code que le dépôt ne contient plus.
+    """
+    to_push = sorted(k for k, digest in local.items() if remote.get(k) != digest)
+    to_remove = sorted(k for k in remote if k not in local)
+    return to_push, to_remove
 
 
 class Container:
@@ -104,6 +142,12 @@ class Container:
         return self.status == "running"
 
     def config(self) -> dict[str, str]:
+        """`pct config` en dictionnaire.
+
+        Découpe sur le PREMIER deux-points seulement : la valeur d'un point de
+        montage en contient un elle-même (`data:subvol-200-disk-0`), qu'un
+        séparateur trop gourmand couperait en plein milieu.
+        """
         conf: dict[str, str] = {}
         for line in self.runner.read("pct", "config", str(self.ctid)).lines:
             key, _, value = line.partition(":")
@@ -137,18 +181,66 @@ class Container:
             "pct", "push", str(self.ctid), str(src), dst, "--perms", perms
         )
 
-    def push_tree(self, src: Path, dst: str, *, perms: str = "0644") -> int:
-        """Copie un répertoire fichier par fichier — `pct push` ne fait qu'un
-        fichier à la fois. Sert à déposer la bibliothèque core dans le CT."""
-        self.exec("mkdir", "-p", dst)
-        count = 0
-        for path in sorted(src.rglob("*")):
-            if path.is_dir():
-                self.exec("mkdir", "-p", f"{dst}/{path.relative_to(src)}")
-                continue
-            self.push(path, f"{dst}/{path.relative_to(src)}", perms=perms)
-            count += 1
-        return count
+    # -- dépôt d'un arbre de fichiers ---------------------------------------
+
+    def digests(self, root: str) -> dict[str, str]:
+        """Empreintes des fichiers présents sous `root` dans le CT.
+
+        Un seul aller-retour plutôt qu'un `cmp` par fichier. Le script shell
+        est une CONSTANTE et le chemin arrive en argument : rien n'est
+        concaténé, donc rien n'est interprétable.
+        """
+        res = self.exec(
+            "sh",
+            "-c",
+            'cd "$1" 2>/dev/null && find . -type f -exec sha256sum {} + || true',
+            "sh",
+            root,
+            check=False,
+        )
+        out: dict[str, str] = {}
+        for line in res.lines:
+            digest, _, path = line.partition("  ")
+            if path.startswith("./"):
+                out[path[2:]] = digest
+        return out
+
+    def push_tree(
+        self, src: Path, dst: str, *, perms: str = "0644"
+    ) -> TreeChange:
+        """Synchronise un répertoire vers le CT. `pct push` ne fait qu'un
+        fichier à la fois, d'où la boucle.
+
+        Ne pousse que ce qui diffère, et retire ce que le dépôt ne contient
+        plus. Pousser inconditionnellement ferait annoncer des modifications
+        par `--dry-run` sur un conteneur conforme — or « zéro modification sur
+        un état conforme » est le contrôle qui prouve que l'outil décrit l'état
+        existant et non un état voisin.
+        """
+        local = {
+            str(p.relative_to(src)): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(src.rglob("*"))
+            if p.is_file()
+        }
+        remote = self.digests(dst)
+        to_push, to_remove = diff_tree(local, remote)
+
+        if to_push or to_remove:
+            self.exec("mkdir", "-p", dst)
+        for rel in to_push:
+            parent = f"{dst}/{rel}".rsplit("/", 1)[0]
+            if parent != dst:
+                self.exec("mkdir", "-p", parent)
+            self.push(src / rel, f"{dst}/{rel}", perms=perms)
+        for rel in to_remove:
+            self.runner.write("pct", "exec", str(self.ctid), "--", "rm", "-f",
+                              f"{dst}/{rel}")
+
+        return TreeChange(
+            pushed=tuple(to_push),
+            removed=tuple(to_remove),
+            unchanged=len(local) - len(to_push),
+        )
 
     # -- protection ---------------------------------------------------------
 
@@ -178,8 +270,10 @@ class Container:
     def ensure_mount(self, mp: MountPoint) -> bool:
         """Pose un point de montage s'il diffère. True si le CT doit redémarrer.
 
-        Un `mpN` n'est pris en compte qu'au démarrage : poser sans redémarrer
-        donne un répertoire vide côté conteneur, sans message d'erreur.
+        Le booléen renvoyé n'est pas une commodité : un `mpN` n'est pris en
+        compte qu'au démarrage, et poser sans redémarrer donne un répertoire
+        vide côté conteneur, sans le moindre message d'erreur. L'appelant ne
+        peut pas ignorer l'information — elle est dans la valeur de retour.
         """
         if mp.matches(self.config().get(mp.key)):
             return False
@@ -244,6 +338,27 @@ class StorageInfo:
     avail_kib: int
 
 
+def parse_storage_status(lines: list[str]) -> dict[str, StorageInfo]:
+    """Analyse la sortie de `pvesm status`, en-tête compris.
+
+    L'en-tête est reconnu à son contenu et non à sa position : un `pvesm` qui
+    n'en émettrait pas ferait sinon disparaître le premier stockage réel.
+    """
+    out: dict[str, StorageInfo] = {}
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 6 or fields[0] == "Name":
+            continue
+        name, kind, state, total, used, avail = fields[:6]
+        try:
+            out[name] = StorageInfo(
+                name, kind, state == "active", int(total), int(used), int(avail)
+            )
+        except ValueError:
+            continue
+    return out
+
+
 class Storage:
     """`pvesm` — les stockages déclarés au niveau du nœud."""
 
@@ -251,16 +366,19 @@ class Storage:
         self.runner = runner
 
     def status(self) -> dict[str, StorageInfo]:
-        out: dict[str, StorageInfo] = {}
-        for line in self.runner.read("pvesm", "status").lines[1:]:
-            name, kind, state, total, used, avail, *_ = line.split()
-            out[name] = StorageInfo(
-                name, kind, state == "active", int(total), int(used), int(avail)
-            )
-        return out
+        return parse_storage_status(self.runner.read("pvesm", "status").lines)
 
     def exists(self, name: str) -> bool:
         return name in self.status()
+
+    def path(self, volid: str) -> str:
+        """Chemin HÔTE d'un volume, demandé à Proxmox et non deviné.
+
+        Un volume de conteneur porte un identifiant (`data:subvol-200-disk-0`)
+        dont le chemin dépend du stockage : le déduire à la main marche jusqu'au
+        jour où le pool change de nom.
+        """
+        return self.runner.read("pvesm", "path", volid).out
 
     def add_zfspool(self, name: str, pool: str, *, content: str = "images,rootdir") -> None:
         self.runner.write(
@@ -269,6 +387,20 @@ class Storage:
 
 
 # ─── ZFS ─────────────────────────────────────────────────────────────────────
+
+
+def parse_zfs_list(lines: list[str]) -> dict[str, str]:
+    """`zfs list -H -o name,mountpoint` : nom → point de montage.
+
+    `-H` sépare par une TABULATION. Un découpage sur les espaces casserait sur
+    un point de montage qui en contient un.
+    """
+    out: dict[str, str] = {}
+    for line in lines:
+        name, _, mountpoint = line.partition("\t")
+        if name:
+            out[name.strip()] = mountpoint.strip()
+    return out
 
 
 class Zfs:
@@ -309,11 +441,9 @@ class Zfs:
 
     def datasets(self) -> dict[str, str]:
         """nom → point de montage."""
-        out: dict[str, str] = {}
-        for line in self.runner.read("zfs", "list", "-H", "-o", "name,mountpoint").lines:
-            name, _, mountpoint = line.partition("\t")
-            out[name] = mountpoint.strip()
-        return out
+        return parse_zfs_list(
+            self.runner.read("zfs", "list", "-H", "-o", "name,mountpoint").lines
+        )
 
     def container_dataset(self, ctid: int, disk: int = 0) -> str | None:
         """Chemin HÔTE du volume d'un conteneur.
@@ -358,7 +488,7 @@ class Node:
 
     @property
     def hostname(self) -> str:
-        return self.runner.read("hostname").out
+        return self.runner.read("hostname", "-s").out
 
     def container(self, ctid: int) -> Container:
         return Container(self.runner, ctid)

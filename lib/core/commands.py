@@ -1,25 +1,25 @@
-
 """Wrappers d'outils — une classe par binaire, des méthodes plutôt que des argv.
 
-Le reste du code n'écrit jamais `subprocess`, `pct` ni `psql` : il appelle des
-méthodes qui renvoient des types Python. Chaque particularité d'un outil — le
-format de `pct config`, les drapeaux `-tA` de psql, la citation des
-identifiants SQL — est traitée ici, une fois, et testée une fois.
+Le reste du code n'écrit jamais `subprocess` ni `psql` : il appelle des
+méthodes qui renvoient des types Python. Chaque particularité d'un outil — les
+drapeaux `-tA` de psql, la citation des identifiants SQL, les options que
+`rclone` exige sur ce bucket — est traitée ici, une fois, et testée une fois.
 
 Aucune de ces classes ne sait où elle tourne : c'est le Runner qu'on leur passe
 qui décide. `Psql(runner)` interroge le cluster local ; `Psql(runner.
 for_container(200))` interroge celui du CT 200 depuis le nœud. Même code.
+
+Rien ici ne connaît Proxmox. `pct` est l'affaire du nœud et vit dans
+`proxmox.Container` : ce paquet-ci est poussé DANS les conteneurs, où `pct`
+n'existe pas et n'aurait aucun sens.
 """
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
 
-from .log import info, warn
-from .runner import CommandError, Result, Runner
+from .runner import Result, Runner, Secret
 
 # ─── SQL ─────────────────────────────────────────────────────────────────────
 
@@ -68,11 +68,17 @@ class Psql:
     def run_file(self, path: str, *, db: str | None = None, **params: str) -> Result:
         """Joue un script SQL avec des variables psql.
 
-        Correspond à `psql -v name=forgejo -v password=... -f tenant.sql`.
+        Correspond à `psql -v name=<locataire> -v password=... -f <script>`.
+
+        Une valeur de type `Secret` reste secrète jusque dans l'argv : le
+        couple `clé=valeur` en hérite, donc un échec ne recopie pas le mot de
+        passe dans le journal. C'est le seul chemin par lequel un secret doit
+        atteindre psql.
         """
         extra: list[str] = []
         for key, value in params.items():
-            extra += ["-v", f"{key}={value}"]
+            pair = f"{key}={value}"
+            extra += ["-v", Secret(pair) if isinstance(value, Secret) else pair]
         extra += ["-f", path]
         return self.runner.write(*self._argv(db, extra))
 
@@ -138,72 +144,6 @@ class Psql:
         return int(out or 0)
 
 
-# ─── Proxmox ─────────────────────────────────────────────────────────────────
-
-
-class Pct:
-    """Conteneurs LXC. Toujours exécuté sur le nœud, jamais dedans."""
-
-    def __init__(self, runner: Runner) -> None:
-        self.runner = runner
-
-    def exists(self, ctid: int) -> bool:
-        return self.runner.probe("pct", "config", str(ctid))
-
-    def status(self, ctid: int) -> str:
-        return self.runner.read("pct", "status", str(ctid)).out.split()[-1]
-
-    def running(self, ctid: int) -> bool:
-        return self.status(ctid) == "running"
-
-    def config(self, ctid: int) -> dict[str, str]:
-        """`pct config` en dictionnaire. Format : `clé: valeur` par ligne."""
-        out = self.runner.read("pct", "config", str(ctid))
-        conf: dict[str, str] = {}
-        for line in out.lines:
-            key, _, value = line.partition(":")
-            conf[key.strip()] = value.strip()
-        return conf
-
-    def set(self, ctid: int, **options: str) -> Result:
-        argv = ["pct", "set", str(ctid)]
-        for key, value in options.items():
-            argv += [f"--{key}", str(value)]
-        return self.runner.write(*argv)
-
-    def start(self, ctid: int) -> Result:
-        return self.runner.write("pct", "start", str(ctid))
-
-    def reboot(self, ctid: int) -> Result:
-        return self.runner.write("pct", "reboot", str(ctid))
-
-    def push(self, ctid: int, src: Path, dst: str, *, perms: str = "0644") -> Result:
-        return self.runner.write(
-            "pct", "push", str(ctid), str(src), dst, "--perms", perms
-        )
-
-    @contextmanager
-    def unprotected(self, ctid: int) -> Iterator[None]:
-        """Lève la protection et la REMET, y compris sur exception.
-
-        Remplace le trio variable globale + trap EXIT + astuce de portée bash.
-        La protection interdit toute modification de disque, ajout de point de
-        montage compris — et l'oublier au retour ne produit aucune erreur.
-        """
-        was_protected = self.config(ctid).get("protection") == "1"
-        if not was_protected:
-            yield
-            return
-        info(f"  levée temporaire de la protection du CT {ctid}")
-        self.set(ctid, protection="0")
-        try:
-            yield
-        finally:
-            if self.config(ctid).get("protection") != "1":
-                self.set(ctid, protection="1")
-                info(f"  protection du CT {ctid} rétablie")
-
-
 # ─── systemd ─────────────────────────────────────────────────────────────────
 
 
@@ -262,6 +202,11 @@ class RcloneConfig:
     config: Path = Path("/root/.config/rclone/rclone.conf")
     binary: str = "/usr/bin/rclone"  # absolu : PATH systemd minimal
     transfers: int = 4
+    retries: int = 3
+    low_level_retries: int = 3
+    bwlimit: str = ""  # vide = aucune limitation
+    # « hash » compare les empreintes, « size » se contente de la taille.
+    check_mode: str = "hash"
 
 
 class Rclone:
@@ -270,7 +215,8 @@ class Rclone:
     Le compte de service a objectViewer + objectCreator : il peut lister et
     écrire, pas écraser ni supprimer. D'où `--ignore-existing` sur copy et
     l'absence délibérée de toute méthode `delete` ou `sync` — un objet
-    divergent est une anomalie à signaler, pas à corriger d'ici.
+    divergent est une anomalie à signaler, pas à corriger d'ici. Ne pas les
+    ajouter : cette absence EST la garantie.
     """
 
     def __init__(self, runner: Runner, cfg: RcloneConfig) -> None:
@@ -278,7 +224,29 @@ class Rclone:
         self.cfg = cfg
 
     def _base(self) -> list[str]:
-        return [self.cfg.binary, "--config", str(self.cfg.config)]
+        argv = [
+            self.cfg.binary,
+            "--config",
+            str(self.cfg.config),
+            "--retries",
+            str(self.cfg.retries),
+            "--low-level-retries",
+            str(self.cfg.low_level_retries),
+            "--stats",
+            "0",
+            # L'accès uniforme (UBLA) est activé sur le bucket : sans ce
+            # drapeau, rclone joint une ACL héritée à chaque objet et le
+            # transfert échoue en « Error 400: Cannot insert legacy ACL for an
+            # object when uniform bucket-level access is enabled », zéro octet
+            # écrit. Constaté le 20 août 2026, à la première exécution réelle.
+            # Il double le « bucket_policy_only » de rclone.conf, à dessein :
+            # le script doit marcher sur une configuration reconstruite à la
+            # va-vite, et les deux ne se gênent pas.
+            "--gcs-bucket-policy-only",
+        ]
+        if self.cfg.bwlimit:
+            argv += ["--bwlimit", self.cfg.bwlimit]
+        return argv
 
     def path(self, *parts: str) -> str:
         return f"{self.cfg.remote}:{self.cfg.bucket}/" + "/".join(parts)
@@ -287,14 +255,41 @@ class Rclone:
     def version(self) -> str:
         return self.runner.read(*self._base(), "version").lines[0].split()[1]
 
+    def reachable(self) -> tuple[bool, str]:
+        """Le bucket répond-il ? Message d'erreur brut si non.
+
+        Volontairement un `lsf` et non un `rclone about` : le compte de service
+        est `objectViewer`, il n'a pas `storage.buckets.get` et `about`
+        échouerait sur un bucket parfaitement sain.
+        """
+        res = self.runner.read(
+            *self._base(),
+            "lsf",
+            "--max-depth",
+            "1",
+            f"{self.cfg.remote}:{self.cfg.bucket}",
+            check=False,
+        )
+        return res.ok, (res.stdout + res.stderr).strip()
+
     def list_files(self, remote: str) -> list[str]:
-        """Chemins relatifs. Un préfixe inexistant renvoie une liste vide."""
+        """Chemins relatifs. Un préfixe inexistant renvoie une liste vide.
+
+        Lève `CommandError` si le listage lui-même échoue — à traduire par
+        l'appelant en « transfert échoué », pas en « rien à copier » : la
+        prochaine exécution réessaiera d'elle-même.
+        """
         return self.runner.read(
             *self._base(), "lsf", "--files-only", "-R", remote
         ).lines
 
     def copy(self, local: Path, remote: str) -> Result:
-        # copy, jamais sync : sync répliquerait les suppressions locales.
+        """copy, JAMAIS sync : sync répliquerait les suppressions locales.
+
+        Diffusé et sans limite de temps : un transfert de plusieurs dizaines de
+        minutes doit rester visible dans le journal pendant qu'il tourne, et
+        c'est `TimeoutStartSec` de l'unité qui l'encadre.
+        """
         return self.runner.write(
             *self._base(),
             "copy",
@@ -303,11 +298,25 @@ class Rclone:
             "--ignore-existing",
             "--transfers",
             str(self.cfg.transfers),
+            stream=True,
+            timeout=None,
         )
 
     def check(self, local: Path, remote: str) -> tuple[bool, str]:
-        """Vrai si le distant correspond. Porte sur TOUT l'instantané."""
-        res = self.runner.read(
-            *self._base(), "check", str(local), remote, "--one-way", check=False
-        )
-        return res.ok, res.stderr.strip()
+        """Vrai si le distant correspond. Porte sur TOUT l'instantané.
+
+        `--one-way` : ce qui existe en trop à distance ne nous regarde pas.
+        C'est ici, et nulle part ailleurs, qu'un objet partiel laissé par une
+        exécution interrompue se révèle.
+        """
+        argv = [*self._base(), "check", str(local), remote, "--one-way"]
+        if self.cfg.check_mode == "size":
+            argv.append("--size-only")
+        res = self.runner.read(*argv, check=False, timeout=None)
+        # rclone écrit son verdict sur stderr : les deux flux comptent.
+        return res.ok, (res.stdout + res.stderr).strip()
+
+    def size(self, remote: str) -> str:
+        """Ligne de bilan, pour le journal. Jamais bloquant."""
+        res = self.runner.read(*self._base(), "size", remote, check=False)
+        return " ".join(res.lines)

@@ -17,6 +17,40 @@ pas d'exécution.
 Ces règles viennent de ce qui a été construit ici. Les suivre, et les étendre
 quand un nouveau service apparaît.
 
+## `lib/` — les briques partagées par les deux nœuds
+
+Un service qui a besoin de plus qu'un script bash s'appuie sur `lib/`, à la
+racine du dépôt. Deux paquets, et la frontière entre eux est une frontière de
+sécurité, pas de goût :
+
+| | |
+|---|---|
+| `lib/core/` | générique : journalisation, exécution, wrappers d'outils. **Poussé DANS les conteneurs.** N'importe jamais `lib/proxmox/`, ne nomme aucun service. |
+| `lib/proxmox/` | `pct`, `pvesm`, `zfs`. **Ne quitte jamais l'hôte** — un conteneur n'a rien à faire avec `pct`. |
+
+- **Bibliothèque standard uniquement.** Aucun `pip install` sur l'hyperviseur
+  ni dans un conteneur. `pytest` est admis en développement, jamais importé par
+  le code livré.
+- **Jamais de chaîne shell.** Tout est un argv passé à `subprocess` : le triple
+  échappement Python → `pct` → shell du conteneur n'existe pas parce qu'aucun
+  shell n'intervient. Ni `shell=True`, ni commande construite par concaténation.
+- **Lecture et écriture sont distinctes dans la signature.** `read()` s'exécute
+  toujours, `write()` est neutralisée en simulation : un contrôle qui ne
+  pourrait plus lire l'état n'aurait rien à comparer.
+- **Les pièges s'encodent dans les types**, pas dans des commentaires. Poser un
+  point de montage renvoie « faut-il redémarrer » ; créer un pool ZFS sur un
+  chemin instable lève ; un mot de passe est un `Secret`, qui ne peut pas
+  ressortir dans un journal.
+- **`ct/` reçoit `core/` par `pct push`**, jamais par un second point de
+  montage : le montage est vivant, et un `git pull` en pleine nuit livrerait un
+  arbre à moitié à jour.
+
+`tests/` à la racine, `pytest`, **sans infrastructure** : tout passe par des
+doubles. Un double doit tenir compte de ses propres écritures — un faux nœud
+dont `pct config` ignore les `pct set` valide n'importe quoi. Les règles
+ci-dessus sont elles-mêmes vérifiées par des tests : une convention qu'aucun
+test ne défend se perd à la troisième modification.
+
 ## Documentation : un README court, un runbook détaillé
 
 Jamais un seul gros fichier. Un README court à la racine du service, le reste

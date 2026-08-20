@@ -13,3 +13,13 @@
 # Fichiers de configuration rclone : le remote lui-même n'a rien de secret,
 # mais le fichier peut porter des jetons selon le type de remote.
 rclone.conf
+
+# Artefacts Python. Le code de production n'a aucune dependance, mais les
+# tests de developpement en produisent — ils ne concernent que la machine qui
+# les a lances.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Worktrees et etat local de l'outillage d'assistance.
+.claude/
