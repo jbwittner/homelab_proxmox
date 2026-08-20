@@ -20,6 +20,8 @@ configuration est versionnée ici.
 | PostgreSQL | 18.6, dépôt PGDG, cluster `18/main` |
 | Stockage | `local-lvm` (SSD 512 Go) — le 1 To est réservé à Forgejo |
 | Dépôt monté | `/root/homelab_proxmox/pve-eranikus/pgsql` → `/etc/pgsql-git` (ro) |
+| Pose | `pg-init.sh`, joué sur le nœud |
+| Exploitation | `pgbk.sh`, joué sur le nœud |
 
 ## 1. Création du conteneur
 
@@ -93,7 +95,59 @@ faire. Deux conséquences en revanche — le pool est surprovisionné (surveille
 à `on`, ext4 sur LVM n'offrant aucune garantie d'atomicité des écritures de
 page.
 
-## 2. Montage du dépôt
+## 2. Pose depuis l'hôte — `pg-init.sh`
+
+Tout ce que décrivent les sections 3, 4 et 7 se joue en une commande, **depuis
+le nœud, sans entrer dans le CT** :
+
+```bash
+cd /root/homelab_proxmox && git pull
+pve-eranikus/pgsql/pg-init.sh
+```
+
+Le script est **rejouable à l'identique** : chaque étape est conditionnelle et
+ne touche à rien si l'état est déjà conforme. C'est ce qui permet de
+l'enchaîner à un `git pull` sans réfléchir — c'est d'ailleurs la procédure de
+mise à jour de la configuration.
+
+```bash
+pve-eranikus/pgsql/pg-init.sh --status   # état de chaque élément, ne change rien
+pve-eranikus/pgsql/pg-init.sh --dry-run  # annonce ce qui serait fait
+pve-eranikus/pgsql/pg-init.sh --ctid 201 # cible un autre conteneur, et le consigne
+pve-eranikus/pgsql/pg-init.sh --restart  # force un restart au lieu d'un reload
+```
+
+Sur un CT déjà conforme, `--dry-run` doit annoncer **zéro modification** : c'est
+le contrôle qui prouve que le script décrit bien l'état existant, et non un
+état voisin.
+
+Ce qu'il fait, dans l'ordre : point de montage et protection (section 3),
+symlinks de configuration (section 4), unités systemd et scripts de sauvegarde
+(sections 7 et 8), fichier `/etc/default/pgbk`, `pgbk` sur l'hôte,
+puis les contrôles de la section 4. Il se termine par un résumé d'une ligne par
+élément (`OK` / `POSE` / `KO`).
+
+Il ne crée pas le conteneur : cela reste l'affaire du script communautaire
+(section 1).
+
+### Le CTID n'est écrit qu'à un seul endroit
+
+`pg-init.sh` consigne le conteneur qu'il vient de poser dans
+`/etc/default/pgbk` :
+
+```
+PG_CTID=200
+```
+
+`pgbk` le relit de là. Changer de conteneur ne demande donc que de rejouer
+`pg-init.sh --ctid <ID>` — il n'y a pas de second fichier à penser à mettre à
+jour, et `pgbk` **refuse de démarrer** si rien n'est consigné plutôt que de
+taper dans un CT supposé. Priorité : `--ctid`, puis `$PG_CTID`, puis le
+fichier.
+
+## 3. Montage du dépôt
+
+Posé par `pg-init.sh` (section 2). Ce qu'il fait, et pourquoi.
 
 La protection du CT interdit toute modification de disque, ajout d'un point de
 montage compris. Il faut la lever puis la remettre :
@@ -106,22 +160,39 @@ pct set 200 --protection 1
 pct config 200 | grep -E 'protection|mp1'
 ```
 
+Le script ne remet la protection que s'il l'a effectivement levée, et pose un
+`trap` qui la rétablit même s'il est interrompu en cours de route. Un `Ctrl-C`
+au mauvais moment ne laisse pas le conteneur déprotégé.
+
+`pct reboot` rend la main **avant** que le CT ne soit utilisable : le script
+attend ensuite que le conteneur soit `running` puis que `postgresql` soit
+`active`, sinon la suite échouerait sur un montage pas encore visible.
+
 Dans le CT, les fichiers apparaissent en `nobody:nogroup` : c'est le décalage
 d'UID de 100000 propre aux conteneurs non privilégiés. Sans conséquence, les
 fichiers étant en 644 et le montage en lecture seule.
 
-## 3. Pose de la configuration
+## 4. Pose de la configuration
 
 Les deux fichiers sont des **liens symboliques** vers le dépôt. PostgreSQL
 accepte un symlink pour `pg_hba.conf` malgré ses exigences de permissions,
 vérifié sur cette instance.
 
+Posés par `pg-init.sh` (section 2). Ce qu'il fait :
+
 ```bash
-pct enter 200
 ln -sf /etc/pgsql-git/10-homelab.conf /etc/postgresql/18/main/conf.d/10-homelab.conf
 ln -sf /etc/pgsql-git/pg_hba.conf     /etc/postgresql/18/main/pg_hba.conf
 systemctl restart postgresql           # listen_addresses exige un restart
 ```
+
+La version du cluster n'est pas codée en dur dans le script : elle est lue dans
+`pg_lsclusters`, et une installation qui en porterait plusieurs le fait
+s'arrêter plutôt que d'en choisir un au hasard.
+
+Le `restart` n'a lieu que si un symlink a réellement changé — `listen_addresses`
+l'exige à la première pose, mais un `reload` suffit ensuite. `--restart` le
+force.
 
 `postgresql.conf` **n'est jamais modifié** : il se termine par
 `include_dir = 'conf.d'`, donc le drop-in est lu après lui et l'emporte. Le
@@ -136,8 +207,12 @@ par les `ALTER SYSTEM SET`, il est lu **en dernier** et écrase le drop-in.
 
 ```bash
 cd /root/homelab_proxmox && git pull
-pct exec 200 -- systemctl reload postgresql
+pve-eranikus/pgsql/pg-init.sh
 ```
+
+Le dépôt étant monté en lecture seule, un `git pull` suffit à mettre à jour les
+fichiers de configuration liés en symlink ; `pg-init.sh` recopie en revanche les
+scripts et les unités, qui eux sont des copies, et applique le tout.
 
 Un `reload` suffit pour `pg_hba.conf` et la plupart des paramètres. Seuls
 `listen_addresses`, `shared_buffers`, `max_connections` et les autres
@@ -175,7 +250,7 @@ socket, sur la boucle locale uniquement, est le symptôme d'une panne documenté
 dans `docs/postgresql-listen-addresses-lxc.md` — service actif, base
 injoignable.
 
-## 4. Compte d'administration (`jbwittner`)
+## 5. Compte d'administration (`jbwittner`)
 
 Créé depuis l'intérieur du CT, en peer sur socket Unix :
 
@@ -223,7 +298,10 @@ locataire : pratique pour administrer, mais à ne pas utiliser comme
 identifiant de consultation courante — une requête maladroite sur la base d'un
 service passera sans garde-fou.
 
-## 5. Ajout d'un locataire
+## 6. Ajout d'un locataire
+
+Depuis l'intérieur du CT (`pct enter 200`) — le fichier `tenant.sql` est lu
+dans le montage, et le socket Unix est le seul chemin en `peer` :
 
 ```bash
 NAME=forgejo
@@ -251,28 +329,35 @@ sudo -u postgres psql -c "DROP ROLE <nom>;"
 ```
 
 Ajouter la ligne correspondante dans `pg_hba.conf`, **avant** le `reject`, puis
-`git pull` sur l'hôte et `systemctl reload postgresql`. Côté client :
-`SSL_MODE = require`.
+depuis le nœud `git pull` et `pg-init.sh` (section 2), qui applique le
+rechargement. Côté client : `SSL_MODE = require`.
 
 Dans les configurations applicatives, préférer un nom de domaine à l'IP — mais
 le déclarer dans le `/etc/hosts` du CT client plutôt que de dépendre d'AdGuard,
 sans quoi le service ne peut plus joindre sa base tant que le DNS n'est pas
 debout.
 
-## 6. Sauvegarde
+## 7. Sauvegarde
+
+Posée par `pg-init.sh` (section 2), qui fait dans le CT :
 
 ```bash
-pct enter 200
 install -m 644 /etc/pgsql-git/pg-backup.service /etc/systemd/system/
 install -m 644 /etc/pgsql-git/pg-backup.timer   /etc/systemd/system/
 install -m 755 /etc/pgsql-git/pg-backup.sh      /usr/local/bin/pg-backup.sh
 systemctl daemon-reload && systemctl enable --now pg-backup.timer
-systemctl start pg-backup.service && journalctl -u pg-backup -n 20
+```
+
+Puis, depuis l'hôte, pour une première exécution :
+
+```bash
+pgbk backup
 ```
 
 L'unité pointe vers `/usr/local/bin/pg-backup.sh` : le script doit être copié,
 pas lié, car le montage est en lecture seule et ne peut pas porter le bit
-d'exécution.
+d'exécution. Chaque copie est comparée en contenu **et en mode** avant d'être
+refaite, d'où un `pg-init.sh` sans effet quand rien n'a bougé.
 
 Une exécution produit **un répertoire**, nommé par horodatage :
 
@@ -341,14 +426,12 @@ panne de SSD, pas d'un vol, d'un incendie ou d'un `pct destroy` malencontreux �
 qui emporterait le conteneur *et* son volume de sauvegardes. La copie hors-site
 vers GCS reste le seul vrai filet.
 
-## 7. `pgbk` — interface de gestion
+## 8. `pgbk` — interface de gestion
 
 `pg-backup.sh` est le moteur, appelé par le timer. `pgbk` est l'interface
 humaine : il n'écrit aucune sauvegarde lui-même, il orchestre.
 
-```bash
-install -m 755 /etc/pgsql-git/pgbk.sh /usr/local/bin/pgbk
-```
+**Les commandes se tapent sur le nœud**, pas dans le CT :
 
 ```bash
 pgbk backup                        # lance une sauvegarde via systemd
@@ -358,6 +441,43 @@ pgbk restore forgejo               # depuis le dernier instantané
 pgbk restore forgejo 20260819      # depuis le plus récent de ce jour
 pgbk verify forgejo                # contrôle ACL et propriétaires
 ```
+
+### Un seul fichier, deux rôles
+
+`pgbk.sh` est posé **à l'identique** aux deux endroits par `pg-init.sh` :
+
+| | |
+|---|---|
+| `/usr/local/sbin/pgbk` | sur le nœud |
+| `/usr/local/bin/pgbk` | dans le CT |
+
+Même contenu, même somme de contrôle. Il n'y a donc pas une « version hôte » et
+une « version CT » à ne pas confondre au moment d'éditer : il n'existe qu'un
+fichier dans le dépôt, et c'est l'endroit où il tourne qui décide de son
+comportement.
+
+La détection se fait sur la présence de `pct` — un nœud Proxmox l'a, le
+conteneur Debian non :
+
+- **sur le nœud** : il résout le CTID (section 2), vérifie que le conteneur
+  tourne et que `pgbk` y est posé — un message qui renvoie vers `pg-init.sh`
+  plutôt qu'un « command not found » —, pose la confirmation, puis `exec pct
+  exec` et s'efface. Le code de retour est celui du CT.
+- **dans le CT** : il fait le travail.
+
+`--ctid <ID>` vise ponctuellement un autre conteneur sans toucher à
+`/etc/default/pgbk`. `--local` force le mode moteur, utile pour déboguer.
+
+### La confirmation est posée sur le nœud
+
+`pct exec` n'alloue pas de TTY : un `read` exécuté dans le CT ne verrait jamais
+la saisie, et la question de sécurité de `restore` serait muette. Elle est donc
+posée du côté nœud, où le terminal existe, avant de déléguer avec `--yes`. Même
+question, même réponse attendue ; seul l'endroit où le garde-fou est posé
+change.
+
+Appeler `pgbk` directement dans le CT (`pct enter 200`) reste possible : il y
+est autonome, question comprise.
 
 Un instantané se désigne par `latest`, une date `AAAAMMJJ` (le plus récent de
 ce jour), ou un horodatage exact `AAAAMMJJ-HHMMSS`.
@@ -387,7 +507,7 @@ Contrôle les deux pièges constatés lors du test de rollback du 20 août 2026 
 contrôle explicite — les données sont là, la base répond, et l'isolation a
 disparu.
 
-## 8. Restauration manuelle
+## 9. Restauration manuelle
 
 ```bash
 # 1. Couper les connexions en cours, sinon dropdb échoue.
@@ -445,13 +565,13 @@ protection se met en travers, après l'ajout d'un point de montage.
 
 ## Reste à faire
 
-- [ ] Installer le timer de sauvegarde (section 6).
+- [x] Installer le timer de sauvegarde (section 7).
 - [ ] Ligne du locataire `forgejo` — dépend de son IP définitive.
 - [ ] Copie hors-site des dumps vers GCS.
 - [ ] Copier `postgresql.vars` dans ce dépôt après vérification des secrets.
-- [ ] Hook post-install (`pct set`, montage, symlinks, timer) pour rendre
-      l'ensemble rejouable. À écrire à partir de ce qui a réellement
-      fonctionné, pas avant.
+- [x] Hook post-install (`pct set`, montage, symlinks, timer) pour rendre
+      l'ensemble rejouable — c'est `pg-init.sh` (section 2), écrit à partir des
+      commandes qui avaient réellement fonctionné à la main.
 
 ## Notes
 

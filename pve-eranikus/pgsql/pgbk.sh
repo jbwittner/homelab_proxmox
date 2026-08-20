@@ -2,25 +2,42 @@
 #
 # pgbk — gestion des sauvegardes PostgreSQL du cluster mutualisé.
 #
-#   pgbk backup                     lance une sauvegarde
-#   pgbk list                       liste les sauvegardes disponibles
-#   pgbk show [instantané]          détail d'une sauvegarde
+#   pgbk backup                       lance une sauvegarde
+#   pgbk list                         liste les sauvegardes disponibles
+#   pgbk show [instantané]            détail d'une sauvegarde
 #   pgbk restore <base> [instantané]  restaure une base
-#   pgbk verify <base>              contrôle l'état d'une base restaurée
+#   pgbk verify <base>                contrôle l'état d'une base restaurée
 #
 # L'instantané se désigne par :
 #   latest            la plus récente (défaut)
 #   20260820-093240   horodatage exact
 #   20260820          la plus récente de ce jour
 #
-# pg-backup.sh reste le moteur, appelé par le timer. pgbk est l'interface
-# humaine : il n'écrit aucune sauvegarde lui-même.
+# Options :
+#   --ctid ID   conteneur cible, prioritaire sur $PG_CTID et sur /etc/default/pgbk
+#   --yes       pas de demande de confirmation sur un restore
+#   --local     force le mode moteur (n'essaie pas de déléguer)
+#
+# UN SEUL FICHIER, DEUX RÔLES. Le même script est posé sur le nœud Proxmox et
+# dans le conteneur, et se comporte selon l'endroit où il tourne :
+#
+#   sur le nœud (pct présent)  il confirme, puis délègue au CT et s'efface
+#   dans le CT (pas de pct)    il fait le travail
+#
+# Il n'y a donc pas de « version hôte » et de « version CT » à ne pas
+# confondre : c'est le même contenu aux deux endroits, et pg-init.sh l'y pose.
+#
+# pg-backup.sh reste le moteur des sauvegardes, appelé par le timer. pgbk est
+# l'interface humaine : il n'écrit aucune sauvegarde lui-même, il orchestre.
 #
 set -Eeuo pipefail
 
+CONF=/etc/default/pgbk          # PG_CTID, écrit par pg-init.sh
+CT_PGBK=/usr/local/bin/pgbk     # chemin du script DANS le conteneur
 DEST="${PG_BACKUP_DEST:-/var/backups/postgresql}"
 PSQL="sudo -u postgres psql"
 ASSUME_YES=0
+LOCAL=0
 
 log()   { printf '%s [INFO ] %s\n'  "$(date '+%H:%M:%S')" "$*"; }
 warn()  { printf '%s [WARN ] %s\n'  "$(date '+%H:%M:%S')" "$*" >&2; }
@@ -28,9 +45,83 @@ error() { printf '%s [ERROR] %s\n'  "$(date '+%H:%M:%S')" "$*" >&2; }
 step()  { printf '%s [STEP ] %s\n'  "$(date '+%H:%M:%S')" "$*"; }
 die()   { error "$*"; exit 1; }
 
-usage() { sed -n '3,20p' "$0" | sed 's/^# \?//'; exit "${1:-0}"; }
+usage() {
+  awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "$0"
+  exit "${1:-0}"
+}
 
-[[ $EUID -eq 0 ]] || die "à lancer en root dans le CT (pct enter 200)"
+# ─── Arguments ───────────────────────────────────────────────────────────────
+# Les drapeaux sont retirés de $@ quelle que soit leur position : un filtrage
+# par substitution laisserait un argument vide, et « restore --yes base »
+# arriverait dans cmd_restore avec une base vide.
+
+CTID_ENV=${PG_CTID:-}
+CTID_FLAG=
+ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --yes)   ASSUME_YES=1; shift ;;
+    --local) LOCAL=1; shift ;;
+    --ctid)  [[ $# -ge 2 ]] || die "--ctid attend une valeur"
+             CTID_FLAG=$2; shift 2 ;;
+    *)       ARGS+=("$1"); shift ;;
+  esac
+done
+
+# L'aide sort avant tout contrôle : lisible sans être root, et depuis
+# n'importe quelle machine.
+[[ ${#ARGS[@]} -eq 0 ]] && usage 1
+case "${ARGS[0]}" in -h|--help|help) usage ;; esac
+
+set -- "${ARGS[@]}"
+CMD="$1"; shift
+
+# ─── Mode hôte : confirmer, déléguer, s'effacer ──────────────────────────────
+# Détection par la présence de pct : un nœud Proxmox l'a, le conteneur Debian
+# non. --local (ou PGBK_LOCAL=1) force le mode moteur.
+
+if [[ $LOCAL -eq 0 && ${PGBK_LOCAL:-0} -eq 0 ]] && command -v pct >/dev/null 2>&1; then
+
+  [[ $EUID -eq 0 ]] || die "à lancer en root sur le nœud (pct l'exige)"
+
+  # Priorité : --ctid, puis l'environnement, puis le CTID consigné par pg-init.
+  # shellcheck source=/dev/null
+  [[ -r $CONF ]] && . "$CONF"
+  CTID=${CTID_FLAG:-${CTID_ENV:-${PG_CTID:-}}}
+
+  [[ -n $CTID ]] || die "aucun conteneur cible : ${CONF} absent ou sans PG_CTID
+         le consigner  : pg-init.sh --ctid <ID>
+         ou ponctuel   : pgbk --ctid <ID> ${CMD} $*"
+  [[ $CTID =~ ^[0-9]+$ ]] || die "CTID invalide : ${CTID}"
+
+  pct config "$CTID" >/dev/null 2>&1 || die "CT ${CTID} inexistant"
+  [[ $(pct status "$CTID" 2>/dev/null | awk '{print $2}') == running ]] \
+    || die "CT ${CTID} à l'arrêt — le démarrer : pct start ${CTID}"
+  pct exec "$CTID" -- test -x "$CT_PGBK" 2>/dev/null \
+    || die "${CT_PGBK} absent du CT ${CTID} — le poser : pg-init.sh"
+
+  # pct exec n'alloue pas de TTY : le read du script côté CT ne verrait jamais
+  # la saisie, et la question de sécurité de restore serait muette. Le
+  # garde-fou est donc posé ici, où le terminal existe, puis --yes est passé.
+  if [[ $CMD == restore && $ASSUME_YES -eq 0 ]]; then
+    db=""
+    for a in "$@"; do [[ $a == --* ]] && continue; db=$a; break; done
+    [[ -n $db ]] || die "usage : pgbk restore <base> [instantané]"
+    read -r -p "ÉCRASE la base ${db} du CT ${CTID} [tapez le nom de la base pour confirmer] : " answer
+    [[ $answer == "$db" ]] || die "annulé"
+    ASSUME_YES=1
+  fi
+
+  # exec : le code de retour du CT devient celui de cette commande.
+  if [[ $ASSUME_YES -eq 1 ]]; then
+    exec pct exec "$CTID" -- "$CT_PGBK" "$CMD" "$@" --yes
+  fi
+  exec pct exec "$CTID" -- "$CT_PGBK" "$CMD" "$@"
+fi
+
+# ─── Mode moteur : on est dans le conteneur ──────────────────────────────────
+
+[[ $EUID -eq 0 ]] || die "à lancer en root : « pgbk » depuis le nœud, ou dans le CT après « pct enter »"
 
 # ─── Résolution d'un instantané ──────────────────────────────────────────────
 
@@ -229,18 +320,11 @@ cmd_verify() {
 
 # ─── Entrée ──────────────────────────────────────────────────────────────────
 
-[[ $# -eq 0 ]] && usage 1
-
-CMD="$1"; shift
-[[ ${1:-} == --yes || ${2:-} == --yes ]] && ASSUME_YES=1
-set -- "${@/--yes/}"
-
 case "$CMD" in
   backup)  cmd_backup ;;
   list|ls) cmd_list ;;
   show)    cmd_show "${1:-latest}" ;;
-  restore) cmd_restore "${@}" ;;
+  restore) cmd_restore "$@" ;;
   verify)  cmd_verify "${1:-}" ;;
-  -h|--help|help) usage ;;
   *)       die "commande inconnue : ${CMD} (voir pgbk --help)" ;;
 esac
