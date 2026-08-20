@@ -341,21 +341,102 @@ panne de SSD, pas d'un vol, d'un incendie ou d'un `pct destroy` malencontreux �
 qui emporterait le conteneur *et* son volume de sauvegardes. La copie hors-site
 vers GCS reste le seul vrai filet.
 
-## 7. Restauration
+## 7. `pgbk` — interface de gestion
+
+`pg-backup.sh` est le moteur, appelé par le timer. `pgbk` est l'interface
+humaine : il n'écrit aucune sauvegarde lui-même, il orchestre.
 
 ```bash
-# Une seule base, les autres locataires restent en ligne.
+install -m 755 /etc/pgsql-git/pgbk.sh /usr/local/bin/pgbk
+```
+
+```bash
+pgbk backup                        # lance une sauvegarde via systemd
+pgbk list                          # instantanés, âge, taille, bases
+pgbk show 20260820-093240          # MANIFEST + fichiers
+pgbk restore forgejo               # depuis le dernier instantané
+pgbk restore forgejo 20260819      # depuis le plus récent de ce jour
+pgbk verify forgejo                # contrôle ACL et propriétaires
+```
+
+Un instantané se désigne par `latest`, une date `AAAAMMJJ` (le plus récent de
+ce jour), ou un horodatage exact `AAAAMMJJ-HHMMSS`.
+
+`pgbk backup` passe par `systemctl start`, donc avec le même environnement que
+les exécutions du timer — pas de divergence entre lancement manuel et
+automatique.
+
+### Ce que fait `pgbk restore`
+
+1. Capture le propriétaire **avant** le `dropdb` : il disparaît avec la base.
+2. Demande de retaper le nom de la base (contournable par `--yes`).
+3. **Dump de l'état courant** dans `pre-restore-<horodatage>/` — seule
+   protection contre une erreur d'instantané.
+4. Ferme les connexions, recrée la base, charge le dump avec `--role`.
+5. Réapplique les ACL, que le dump ne contient pas.
+6. Enchaîne sur `verify`.
+
+Les répertoires `pre-restore-*` ne sont **pas** purgés par la rétention : ce
+sont des filets, à supprimer à la main une fois la restauration validée.
+
+### `pgbk verify`
+
+Contrôle les deux pièges constatés lors du test de rollback du 20 août 2026 :
+`PUBLIC` qui retrouve le droit `CONNECT`, et des tables appartenant à
+`postgres` faute de `--role` au `pg_restore`. Les deux passent inaperçus sans
+contrôle explicite — les données sont là, la base répond, et l'isolation a
+disparu.
+
+## 8. Restauration manuelle
+
+```bash
+# 1. Couper les connexions en cours, sinon dropdb échoue.
+sudo -u postgres psql -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+     WHERE datname='forgejo' AND pid <> pg_backend_pid();"
+
+# 2. Recréer la base vide. Les autres locataires restent en ligne.
 sudo -u postgres dropdb forgejo
 sudo -u postgres createdb forgejo -O forgejo -T template0 \
      --encoding UTF8 --lc-collate C --lc-ctype C
+
+# 3. Restaurer les données.
 sudo -u postgres pg_restore -d forgejo --no-owner --role=forgejo \
      /var/backups/postgresql/latest/forgejo.dump
+
+# 4. RÉAPPLIQUER LES ACL — voir ci-dessous, l'étape la plus facile à oublier.
+sudo -u postgres psql -v ON_ERROR_STOP=1 <<'SQL'
+REVOKE CONNECT ON DATABASE forgejo FROM PUBLIC;
+GRANT  CONNECT ON DATABASE forgejo TO forgejo;
+SQL
 ```
 
+### Les ACL ne sont pas dans le dump
+
+**Vérifié le 20 août 2026 par un test de rollback complet.** Après
+restauration, la colonne `Access privileges` de `\l forgejo` revient **vide**,
+c'est-à-dire aux privilèges par défaut — donc `PUBLIC` a retrouvé le droit
+`CONNECT`. L'isolation entre locataires a disparu, silencieusement.
+
+Les droits au niveau base ne figurent ni dans un `pg_dump` sans `--create`, ni
+dans `globals.sql`, qui ne porte que les rôles. L'étape 4 n'est donc pas
+optionnelle.
+
+Contrôle après restauration :
+
+```bash
+sudo -u postgres psql -c "\l forgejo"     # doit afficher =T/forgejo
+sudo -u postgres psql -d forgejo -c "\dt" # Owner doit être forgejo, pas postgres
+```
+
+Le `--role=forgejo` de `pg_restore` est ce qui rétablit l'appartenance des
+tables : le dump est pris en `--no-owner --no-acl`, l'appartenance n'y figure
+pas. Sans ce drapeau, les tables appartiendraient à `postgres` et le service ne
+pourrait plus écrire.
+
 Reconstruction complète : recréer le cluster, rejouer le `globals.sql` du
-répertoire choisi, puis ses dumps un par un. Le `MANIFEST` rappelle la version
-PostgreSQL d'origine — un dump produit en 18 ne se restaure pas sur une
-majeure antérieure.
+répertoire choisi, puis ses dumps un par un, et réappliquer les ACL de chaque
+locataire. Le `MANIFEST` rappelle la version PostgreSQL d'origine — un dump
+produit en 18 ne se restaure pas sur une majeure antérieure.
 
 **La protection du conteneur bloque la restauration d'un `vzdump` par-dessus le
 CTID 200**, l'opération détruisant le CT avant de le recréer. Prévoir
