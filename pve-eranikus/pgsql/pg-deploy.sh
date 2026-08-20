@@ -29,6 +29,23 @@
 # le noeud, /usr/local/bin/pgbk dans le CT. Un seul contenu, qui se comporte
 # selon l'endroit ou il tourne.
 #
+# TOUT PASSE PAR CE SCRIPT. Il installe les paquets manquants, pose les points
+# de montage (dont le dataset de sauvegarde mp2), la configuration, les scripts,
+# les unites systemd, la configuration rclone, et declenche la premiere
+# sauvegarde puis la premiere copie hors-site. Le README liste les gestes
+# courants, RUNBOOK.md decrit en detail ce que fait ce script.
+#
+# Deux choses restent hors de sa portee, et c'est voulu :
+#   - la CREATION du conteneur, qui appartient au script communautaire ;
+#   - la CLE du compte de service GCP, qui est un secret et n'a rien a faire
+#     dans le depot. Le script dit ou la deposer et n'arme pas le hors-site
+#     tant qu'elle manque.
+#
+# Les operations qui GENERENT UN SECRET ne sont pas jouees par defaut : un
+# deploiement de routine ne doit pas faire apparaitre un mot de passe dans un
+# terminal ni en creer un dont personne n'attend la rotation. Elles sont
+# derriere --admin et --tenant.
+#
 # Usage :
 #   ./pg-deploy.sh                deploiement complet (pose ou mise a jour)
 #   ./pg-deploy.sh --status       etat de chaque element, ne change rien
@@ -36,7 +53,11 @@
 #   ./pg-deploy.sh --ctid 201     cible un autre conteneur, et le consigne
 #   ./pg-deploy.sh --restart      force un restart de postgresql
 #   ./pg-deploy.sh --no-container saute les prerequis conteneur (mp1, protection)
-#   ./pg-deploy.sh --no-offsite   saute la copie hors-site GCS (section E)
+#   ./pg-deploy.sh --no-offsite   saute la copie hors-site GCS (section F)
+#   ./pg-deploy.sh --no-install   n'installe aucun paquet (noeud sans reseau)
+#   ./pg-deploy.sh --no-first-run ne declenche ni sauvegarde ni copie initiale
+#   ./pg-deploy.sh --admin jbwittner   cree le compte d'administration s'il manque
+#   ./pg-deploy.sh --tenant forgejo    cree un locataire (base + role) s'il manque
 #
 # A lancer en root sur le noeud Proxmox, pas dans le CT.
 
@@ -46,6 +67,16 @@ SRC=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)   # source reelle du mp1
 MP=/etc/pgsql-git                                    # cible du montage dans le CT
 HOST_PGBK=/usr/local/sbin/pgbk
 HOST_OFFSITE=/usr/local/bin/pgbk-offsite             # copie hors-site, cote HOTE
+OFFSITE_UNIT=/etc/systemd/system/pgbk-offsite.service
+OFFSITE_DROPIN_DIR="${OFFSITE_UNIT}.d"
+OFFSITE_DROPIN="${OFFSITE_DROPIN_DIR}/10-noeud.conf"
+
+# Dataset des sauvegardes (mp2). Volume distinct du disque systeme du CT :
+# un incident sur le SSD qui porte PGDATA ne doit pas emporter les dumps.
+# backup=0 tient les vzdump du CT a l'ecart de 50 Go de dumps.
+MP2_MOUNT=${PG_MP2_MOUNT:-/var/backups/postgresql}   # vue CT
+MP2_STORAGE=${PG_MP2_STORAGE:-data}                  # pool Proxmox (NVMe 1 To)
+MP2_SIZE=${PG_MP2_SIZE:-50}                          # Go, a la creation seulement
 CONF=/etc/default/pgbk                               # CTID consigne, relu par pgbk
 WAIT_TIMEOUT=120
 
@@ -63,6 +94,10 @@ DRY=0
 FORCE_RESTART=0
 DO_CONTAINER=1
 DO_OFFSITE=1
+DO_INSTALL=1
+DO_FIRST_RUN=1
+ADMIN_ROLE=
+TENANT_NAME=
 
 log()  { printf '%s\n' "$*"; }
 warn() { printf 'ATTENTION : %s\n' "$*" >&2; }
@@ -87,6 +122,14 @@ while [[ $# -gt 0 ]]; do
         --restart)      FORCE_RESTART=1; shift ;;
         --no-container) DO_CONTAINER=0; shift ;;
         --no-offsite)   DO_OFFSITE=0; shift ;;
+        --no-install)   DO_INSTALL=0; shift ;;
+        --no-first-run) DO_FIRST_RUN=0; shift ;;
+        --admin)
+            [[ $# -ge 2 ]] || die "--admin attend un nom de role."
+            ADMIN_ROLE=$2; shift 2 ;;
+        --tenant)
+            [[ $# -ge 2 ]] || die "--tenant attend un nom de locataire."
+            TENANT_NAME=$2; shift 2 ;;
         --ctid)
             [[ $# -ge 2 ]] || die "--ctid attend une valeur."
             CTID_FLAG=$2; shift 2 ;;
@@ -109,10 +152,17 @@ for f in "${NEEDED[@]}"; do
 done
 
 pct config "$CTID" >/dev/null 2>&1 \
-    || die "CT $CTID inexistant. Le conteneur se cree avec le script communautaire (README, section 1)."
+    || die "CT $CTID inexistant. Le conteneur se cree avec le script communautaire (RUNBOOK.md, section 1)."
 
 # Execute une commande DANS le conteneur.
 ct() { pct exec "$CTID" -- "$@"; }
+
+# Valeur d'une cle de « pct config ». Volontairement en sed et non en
+# « awk -F': *' » : la valeur d'un point de montage contient elle-meme un
+# deux-points (data:subvol-200-disk-0), qu'un separateur ': *' couperait en
+# plein milieu — la cle serait lue comme « data » et toutes les comparaisons
+# qui suivent deviendraient fausses.
+cfg_get() { sed -n "s/^$2:[[:space:]]*//p" <<<"$1"; }
 
 # Execute une commande modifiante, ou l'annonce seulement en --dry-run.
 run() {
@@ -126,10 +176,11 @@ run() {
 # ------------------------------------------------- A. prerequis conteneur
 
 PROTECTION_ORIG=
+MP2_STATE=inconnu   # ok | divergent | inconnu (section A non jouee)
 restore_protection() {
     # Une interruption au milieu ne doit pas laisser le CT deprotege.
     [[ ${PROTECTION_ORIG:-} == 1 ]] || return 0
-    [[ $(pct config "$CTID" | awk -F': *' '/^protection:/ {print $2}') == 1 ]] && return 0
+    [[ $(cfg_get "$(pct config "$CTID")" protection) == 1 ]] && return 0
     warn "retablissement de la protection du CT $CTID"
     pct set "$CTID" --protection 1 || err "echec du retablissement de la protection sur $CTID"
 }
@@ -143,16 +194,60 @@ wait_for() {
     done
 }
 
+# Leve la protection du CT, une seule fois, avant toute modification de disque.
+# Ecrit « lowered » dans la portee de container_prereqs : bash donne aux
+# fonctions appelees l'acces aux locales de l'appelante, et c'est bien ce qu'on
+# veut ici — une seule bascule, remontee une seule fois en fin de section.
+need_unprotect() {
+    [[ ${PROTECTION_ORIG:-0} == 1 && $lowered -eq 0 ]] || return 0
+    log "  levee temporaire de la protection du CT $CTID"
+    run pct set "$CTID" --protection 0
+    lowered=1
+}
+
 container_prereqs() {
     log "== Prerequis conteneur (CT $CTID)"
 
-    local cfg mp1_want mp1_have startup need_reboot=0 lowered=0
+    local cfg mp1_want mp1_have mp2_have feat startup need_reboot=0 lowered=0
+
+    # Tout le reste de ce script parle au CT : il doit tourner. Un conteneur
+    # a l'arret n'est pas une erreur, c'est juste une etape de plus.
+    if [[ $(pct status "$CTID" | awk '{print $2}') != running ]]; then
+        log "  CT $CTID a l'arret — demarrage"
+        run pct start "$CTID"
+        if [[ $DRY -eq 0 ]]; then
+            wait_for "CT $CTID en etat running" \
+                     bash -c "pct status $CTID | grep -q running"
+            wait_for "postgresql actif" ct systemctl is-active --quiet postgresql
+        fi
+        note POSE "CT $CTID (demarre)"
+    fi
+
     cfg=$(pct config "$CTID")
-    PROTECTION_ORIG=$(awk -F': *' '/^protection:/ {print $2}' <<<"$cfg")
+    PROTECTION_ORIG=$(cfg_get "$cfg" protection)
     trap restore_protection EXIT
 
+    # nesting=1 est OBLIGATOIRE sur Debian 13 : sans lui, les unites qui
+    # utilisent PrivateTmp ou NoNewPrivileges — pg-backup.service en fait
+    # partie — echouent en 243/CREDENTIALS. Le conteneur demarre quand meme,
+    # en etat degrade, et la sauvegarde ne part jamais.
+    feat=$(cfg_get "$cfg" features)
+    if [[ $feat == *nesting=1* ]]; then
+        log "  features : $feat"
+        note OK "nesting"
+    else
+        local feat_want="nesting=1"
+        [[ -n $feat ]] && feat_want="$(sed 's/nesting=0//; s/,,/,/g; s/^,//; s/,$//' <<<"$feat"),nesting=1"
+        warn "nesting absent des features : ${feat:-(aucune)}"
+        log "  pose de features=$feat_want"
+        need_unprotect
+        run pct set "$CTID" --features "$feat_want"
+        need_reboot=1
+        note POSE "nesting"
+    fi
+
     mp1_want="${SRC},mp=${MP},ro=1"
-    mp1_have=$(awk -F': *' '/^mp1:/ {print $2}' <<<"$cfg")
+    mp1_have=$(cfg_get "$cfg" mp1)
 
     if [[ $mp1_have == "$mp1_want" ]]; then
         log "  mp1 conforme : $mp1_have"
@@ -161,16 +256,42 @@ container_prereqs() {
         [[ -n $mp1_have ]] && warn "mp1 divergent : $mp1_have"
         log "  pose du montage : $mp1_want"
         # La protection interdit toute modification de disque, mp1 compris.
-        if [[ ${PROTECTION_ORIG:-0} == 1 ]]; then
-            run pct set "$CTID" --protection 0
-            lowered=1
-        fi
+        need_unprotect
         run pct set "$CTID" --mp1 "$mp1_want"
         need_reboot=1
         note POSE "mp1 -> $MP"
     fi
 
-    startup=$(awk -F': *' '/^startup:/ {print $2}' <<<"$cfg")
+    # mp2 : le volume des sauvegardes, sur un DISQUE PHYSIQUE DISTINCT de
+    # celui de PGDATA. C'est toute la raison d'etre d'un second point de
+    # montage — une panne du SSD qui porte la base ne doit pas emporter les
+    # dumps avec elle.
+    mp2_have=$(cfg_get "$cfg" mp2)
+    if [[ -z $mp2_have ]]; then
+        log "  creation du volume de sauvegarde : ${MP2_STORAGE}:${MP2_SIZE} -> ${MP2_MOUNT}"
+        need_unprotect
+        # « storage:taille » demande a Proxmox d'allouer le volume ; il
+        # apparait ensuite dans la config sous son vrai nom (subvol-<CTID>-...).
+        run pct set "$CTID" --mp2 "${MP2_STORAGE}:${MP2_SIZE},mp=${MP2_MOUNT},backup=0"
+        MP2_STATE=ok
+        need_reboot=1
+        note POSE "mp2 -> $MP2_MOUNT (${MP2_SIZE} Go)"
+    elif [[ $mp2_have == *"mp=${MP2_MOUNT}"* ]]; then
+        MP2_STATE=ok
+        log "  mp2 conforme : $mp2_have"
+        [[ $mp2_have == *backup=0* ]] \
+            || warn "mp2 sans backup=0 : les vzdump du CT embarquent ${MP2_SIZE} Go de dumps"
+        note OK "mp2 -> $MP2_MOUNT"
+    else
+        # Ne pas toucher : un mp2 existant qui pointe ailleurs porte peut-etre
+        # des donnees. Le dire, laisser l'humain trancher.
+        warn "mp2 present mais monte ailleurs : $mp2_have"
+        warn "  attendu mp=${MP2_MOUNT} — corriger a la main avant de continuer"
+        MP2_STATE=divergent
+        note KO "mp2 (divergent)"
+    fi
+
+    startup=$(cfg_get "$cfg" startup)
     if [[ -n $startup ]]; then
         log "  startup : $startup"
         note OK "startup"
@@ -193,6 +314,7 @@ container_prereqs() {
     fi
 
     if [[ $lowered -eq 1 ]]; then
+        log "  retablissement de la protection du CT $CTID"
         run pct set "$CTID" --protection 1
     elif [[ ${PROTECTION_ORIG:-0} != 1 ]]; then
         warn "le CT $CTID n'est pas protege (pct set $CTID --protection 1)"
@@ -244,6 +366,36 @@ install_ct() {
     return 1
 }
 
+# Dependances du CT. L'image du script communautaire les porte deja ; rien ne
+# le garantit sur un conteneur recree autrement, et l'absence ne se voit qu'au
+# moment ou une sauvegarde echoue.
+container_packages() {
+    # pgbk et pg-backup.sh passent tous les deux par « sudo -u postgres ».
+    if ct sh -c 'command -v sudo >/dev/null 2>&1'; then
+        log "  sudo present"
+        note OK "sudo (CT)"
+    elif [[ $DO_INSTALL -eq 0 ]]; then
+        warn "sudo absent du CT et --no-install : pgbk ne fonctionnera pas"
+        note KO "sudo (CT, absent)"
+    else
+        log "  installation de sudo dans le CT"
+        run ct apt-get update -qq
+        run ct env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sudo
+        note POSE "sudo (CT)"
+    fi
+
+    # LVM-thin : sans fstrim, les blocs liberes ne sont jamais rendus au pool,
+    # qui est surprovisionne. Un pool sature arrete net le serveur.
+    if ct systemctl is-enabled --quiet fstrim.timer 2>/dev/null; then
+        log "  fstrim.timer actif"
+        note OK "fstrim.timer (CT)"
+    else
+        log "  activation de fstrim.timer dans le CT"
+        run ct systemctl enable --now fstrim.timer
+        note POSE "fstrim.timer (CT)"
+    fi
+}
+
 container_setup() {
     log "== Pose dans le CT $CTID"
 
@@ -258,6 +410,7 @@ container_setup() {
         return 0
     fi
 
+    container_packages
     detect_cluster
 
     local changed=0
@@ -409,7 +562,106 @@ host_wrapper() {
     log
 }
 
-# --------------------------------------------- E. copie hors-site (sur l'HOTE)
+# ------------------------------------- E. dependances de l'hote (paquets, GCS)
+
+host_packages() {
+    # Appelee seulement quand le hors-site est demande : rclone n'est une
+    # dependance que de lui.
+    log "== Paquets de l'hote"
+    local rclone_bin
+    rclone_bin=$(unit_env PGBK_OFFSITE_RCLONE /usr/bin/rclone)
+
+    if [[ -x $rclone_bin ]]; then
+        log "  rclone $("$rclone_bin" version 2>/dev/null | awk 'NR==1 {print $2}') ($rclone_bin)"
+        note OK "rclone"
+    elif [[ $DO_INSTALL -eq 0 ]]; then
+        warn "rclone absent et --no-install : la copie hors-site ne sera pas armee"
+        note KO "rclone (absent)"
+    else
+        log "  installation de rclone"
+        run apt-get update -qq
+        run env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rclone
+        # Le paquet trixie s'installe en /usr/bin/rclone. Si l'unite pointe
+        # ailleurs, mieux vaut le dire ici que d'echouer a 3h30.
+        if [[ $DRY -eq 0 && ! -x $rclone_bin ]]; then
+            die "rclone installe mais absent de $rclone_bin — corriger PGBK_OFFSITE_RCLONE dans pgbk-offsite.service"
+        fi
+        note POSE "rclone"
+    fi
+    log
+}
+
+rclone_config() {
+    log "== Configuration rclone (hote)"
+    local conf key remote
+
+    conf=$(unit_env PGBK_OFFSITE_CONFIG /root/.config/rclone/rclone.conf)
+    key=$(unit_env PGBK_OFFSITE_KEY /root/.config/rclone/pgsql-backups.json)
+    remote=$(unit_env PGBK_OFFSITE_REMOTE gcs)
+
+    run install -d -m 700 "$(dirname "$conf")"
+
+    if [[ ! -f $conf ]]; then
+        log "  ecriture de $conf (remote [$remote])"
+        if [[ $DRY -eq 1 ]]; then
+            printf '  [dry-run] ecrire %s\n' "$conf"
+        else
+            # bucket_policy_only : le bucket est en acces uniforme (UBLA), qui
+            # refuse les ACL par objet. Sans cette ligne, rclone joint une ACL
+            # heritee a chaque insertion et GCS rejette TOUT en 400.
+            printf '%s\n' \
+                "# Genere par pg-deploy.sh — remote de la copie hors-site." \
+                "[$remote]" \
+                "type = google cloud storage" \
+                "service_account_file = $key" \
+                "bucket_policy_only = true" > "$conf"
+            chmod 600 "$conf"
+        fi
+        note POSE "$conf"
+    else
+        # Ne pas reecrire : ce fichier peut porter d'autres remotes, et il est
+        # hors depot. On signale ce qui manque avec la ligne exacte a ajouter.
+        log "  $conf present"
+        note OK "$conf"
+        if ! grep -q '^[[:space:]]*bucket_policy_only' "$conf"; then
+            warn "bucket_policy_only absent de $conf"
+            warn "  sans lui, UBLA refuse chaque insertion en 400 (RUNBOOK.md section 10) :"
+            warn "  echo 'bucket_policy_only = true' >> $conf"
+        fi
+    fi
+
+    # La cle est le SEUL element que ce script ne peut pas poser : un secret
+    # n'entre pas dans le depot. Ce qu'il peut faire, c'est en corriger le mode
+    # et refuser d'armer le timer tant qu'elle manque (section F).
+    if [[ -s $key ]]; then
+        if [[ $(stat -c %a "$key" 2>/dev/null) != 600 ]]; then
+            log "  chmod 600 $key"
+            run chmod 600 "$key"
+        fi
+        log "  cle du compte de service : $key"
+        note OK "cle GCP"
+    else
+        warn "$key absente"
+        warn "  cle du compte de service, a deposer depuis OpenBao — puis rejouer ce script"
+        note KO "cle GCP (absente)"
+    fi
+    log
+}
+
+# --------------------------------------------- F. copie hors-site (sur l'HOTE)
+
+# Vue HOTE du dataset de sauvegarde, DEMANDEE A PROXMOX plutot que devinee.
+# C'est ce qui rend le hors-site correct sur n'importe quel CTID et n'importe
+# quel pool : le chemin suit la configuration reelle du conteneur.
+backup_dir_host() {
+    local spec volid path
+    spec=$(cfg_get "$(pct config "$CTID")" mp2)
+    [[ -n $spec ]] || return 1
+    volid=${spec%%,*}
+    path=$(pvesm path "$volid" 2>/dev/null) || return 1
+    [[ -n $path && -d $path ]] || return 1
+    printf '%s\n' "$path"
+}
 
 # Valeur d'une variable declaree dans pgbk-offsite.service, ou $2 a defaut.
 # L'unite est la source unique de verite des chemins du hors-site ; ce script
@@ -423,67 +675,227 @@ unit_env() {
     printf '%s\n' "${v:-$2}"
 }
 
+# Drop-in de l'unite : CE noeud-ci et CE conteneur-ci. L'unite du depot ne
+# porte que des valeurs par defaut lisibles ; ce fichier fait autorite. C'est
+# lui qui rend le hors-site juste sur --ctid 201 comme sur vert-ysera, sans
+# editer quoi que ce soit dans le depot.
+# 0 = deja conforme, 1 = ecrit.
+write_dropin() {
+    local src=$1 node want have
+    node=$(hostname -s)
+    want=$(printf '%s\n' \
+        "# Genere par pg-deploy.sh — ne pas editer, il sera reecrit." \
+        "[Service]" \
+        "Environment=PGBK_OFFSITE_NODE=$node" \
+        "Environment=PGBK_OFFSITE_SRC=$src")
+    have=$(cat "$OFFSITE_DROPIN" 2>/dev/null || true)
+
+    if [[ $have == "$want" ]]; then
+        log "  $OFFSITE_DROPIN a jour (noeud $node, source $src)"
+        note OK "$OFFSITE_DROPIN"
+        return 0
+    fi
+    log "  ecriture de $OFFSITE_DROPIN (noeud $node, source $src)"
+    if [[ $DRY -eq 1 ]]; then
+        printf '  [dry-run] ecrire %s\n' "$OFFSITE_DROPIN"
+    else
+        install -d -m 755 "$OFFSITE_DROPIN_DIR"
+        printf '%s\n' "$want" > "$OFFSITE_DROPIN"
+        chmod 644 "$OFFSITE_DROPIN"
+    fi
+    note POSE "$OFFSITE_DROPIN"
+    return 1
+}
+
 host_offsite() {
     log "== Copie hors-site vers GCS (sur l'hote)"
 
-    local rclone_bin key src_dir copied=0 ready=1
+    local rclone_bin key src_dir resolved copied=0 ready=1 armed=0
     rclone_bin=$(unit_env PGBK_OFFSITE_RCLONE /usr/bin/rclone)
     key=$(unit_env PGBK_OFFSITE_KEY /root/.config/rclone/pgsql-backups.json)
-    src_dir=$(unit_env PGBK_OFFSITE_SRC /data/subvol-$CTID-disk-0)
 
     # Le script et les unites sont poses dans tous les cas : ce sont des
     # fichiers inertes tant que le timer n'est pas actif, et les avoir en
     # place permet un « pgbk-offsite --dry-run » de diagnostic.
     install_host 755 "$SRC/pgbk-offsite.sh"      "$HOST_OFFSITE"                          || copied=1
-    install_host 644 "$SRC/pgbk-offsite.service" /etc/systemd/system/pgbk-offsite.service || copied=1
+    install_host 644 "$SRC/pgbk-offsite.service" "$OFFSITE_UNIT"                          || copied=1
     install_host 644 "$SRC/pgbk-offsite.timer"   /etc/systemd/system/pgbk-offsite.timer   || copied=1
+
+    if resolved=$(backup_dir_host); then
+        src_dir=$resolved
+        write_dropin "$resolved" || copied=1
+        log "  source : $src_dir (vue hote de $MP2_MOUNT)"
+        note OK "pgbk-offsite (source $src_dir)"
+    else
+        # mp2 pas encore visible : CT jamais redemarre depuis sa creation, ou
+        # pool indisponible. On se rabat sur la valeur de l'unite et on
+        # verifie au moins qu'elle parle bien de CE conteneur.
+        src_dir=$(unit_env PGBK_OFFSITE_SRC "/data/subvol-${CTID}-disk-0")
+        warn "volume mp2 non resolu (pvesm) — repli sur l'unite : $src_dir"
+        if [[ $src_dir != *subvol-$CTID-* ]]; then
+            # Ne pas armer : une copie qui part chaque nuit, verte, sur les
+            # sauvegardes d'un autre conteneur est pire qu'une copie absente.
+            warn "  et cette valeur ne mentionne pas le CT $CTID"
+            note KO "pgbk-offsite (source hors CT $CTID)"
+            ready=0
+        else
+            note KO "pgbk-offsite (source $src_dir non resolue)"
+        fi
+    fi
 
     [[ $copied -eq 1 ]] && run systemctl daemon-reload
 
-    # L'unite decrit UN dataset, celui du CT 200. Avec --ctid 201 elle
-    # pointerait toujours sur le volume du 200 : la copie partirait chaque
-    # nuit, verte, sur les sauvegardes du mauvais conteneur. Pire qu'une
-    # copie absente, donc on n'arme pas.
-    if [[ $src_dir != *subvol-$CTID-* ]]; then
-        warn "PGBK_OFFSITE_SRC=$src_dir ne mentionne pas le CT $CTID"
-        warn "  vue HOTE du dataset de sauvegarde a corriger dans pgbk-offsite.service"
-        warn "  (si ce chemin est volontaire : systemctl enable --now pgbk-offsite.timer)"
-        note KO "pgbk-offsite (source hors CT $CTID)"
-        ready=0
-    elif [[ -d $src_dir ]]; then
-        log "  source : $src_dir (vue hote de /var/backups/postgresql)"
-        note OK "pgbk-offsite (source $src_dir)"
-    else
-        # Le dataset n'est monte cote hote que quand le CT tourne.
-        warn "$src_dir absent — CT $CTID demarre ?"
-        note KO "pgbk-offsite (source $src_dir absente)"
-    fi
-
     # Les identifiants GCP ne sont pas dans le depot et n'y seront jamais
-    # (README section 10). Sans eux, activer le timer produirait un echec
+    # (RUNBOOK.md section 10). Sans eux, activer le timer produirait un echec
     # bruyant toutes les nuits a 3h30 : on pose les fichiers, on n'arme pas.
+    # Un mp2 qui pointe ailleurs (section A) veut dire qu'on ne sait pas quel
+    # volume porte les sauvegardes. Copier « quelque chose » dans le doute
+    # remplirait le bucket d'objets qu'on ne pourra jamais remplacer.
+    if [[ $MP2_STATE == divergent ]]; then
+        warn "mp2 divergent (voir plus haut) — source des sauvegardes incertaine"
+        ready=0
+    fi
     if [[ ! -x $rclone_bin ]]; then
-        warn "$rclone_bin absent — apt install rclone"
+        warn "$rclone_bin absent — la copie hors-site ne peut pas fonctionner"
         ready=0
     fi
     if [[ ! -s $key ]]; then
-        warn "$key absente — cle du compte de service, a reposer depuis OpenBao"
+        warn "$key absente — cle du compte de service"
         ready=0
     fi
 
     if systemctl is-enabled --quiet pgbk-offsite.timer 2>/dev/null; then
         log "  pgbk-offsite.timer deja active"
         note OK "pgbk-offsite.timer (active)"
-        [[ $ready -eq 0 ]] && warn "timer actif mais prerequis GCS manquants : la copie echouera a 3h30"
+        [[ $ready -eq 0 ]] && warn "timer actif mais prerequis manquants : la copie echouera a 3h30"
     elif [[ $ready -eq 1 ]]; then
         log "  activation de pgbk-offsite.timer"
         run systemctl enable --now pgbk-offsite.timer
         note POSE "pgbk-offsite.timer (active)"
+        armed=1
     else
         warn "pgbk-offsite.timer NON active : voir les avertissements ci-dessus"
-        warn "  y remedier (README section 10), puis rejouer ce script"
+        warn "  y remedier (RUNBOOK.md section 10), puis rejouer ce script"
         note KO "pgbk-offsite.timer (inactive)"
     fi
+
+    # PREMIERE COPIE, tout de suite. Le listage du bucket ne prouve que la
+    # lecture : la seule facon de savoir que les objets partent vraiment est
+    # d'en envoyer. Autant que ce soit maintenant, pendant qu'un humain
+    # regarde, plutot qu'a 3h30 dans un journal que personne n'ouvrira.
+    if [[ $armed -eq 1 && $DO_FIRST_RUN -eq 1 && $DRY -eq 0 ]]; then
+        log "  premiere copie hors-site (peut prendre plusieurs minutes)"
+        if systemctl start pgbk-offsite.service; then
+            log "  copie initiale terminee"
+            note OK "copie hors-site initiale"
+        else
+            warn "la copie initiale a echoue — journalctl -u pgbk-offsite -n 60 --no-pager"
+            note KO "copie hors-site initiale"
+        fi
+    fi
+    log
+}
+
+# ------------------------------------------- G. premiere sauvegarde, secrets
+
+# Un CT tout juste deploye n'a aucune sauvegarde avant 2h30. Tant qu'il n'y en
+# a pas une, il n'y a rien a copier hors-site et rien a restaurer : la chaine
+# n'est pas prouvee. On en declenche donc une, une seule fois.
+first_backup() {
+    log "== Premiere sauvegarde"
+    local n
+    n=$(ct sh -c "find ${MP2_MOUNT} -mindepth 1 -maxdepth 1 -type d -name '20*' ! -name '*.part' 2>/dev/null | wc -l" 2>/dev/null || echo 0)
+
+    if [[ ${n:-0} -gt 0 ]]; then
+        log "  $n sauvegarde(s) deja presente(s)"
+        note OK "sauvegardes ($n)"
+        log
+        return 0
+    fi
+    if [[ $DO_FIRST_RUN -eq 0 ]]; then
+        warn "aucune sauvegarde et --no-first-run : le CT reste sans filet"
+        note KO "sauvegardes (aucune)"
+        log
+        return 0
+    fi
+
+    log "  aucune sauvegarde — declenchement de pg-backup.service"
+    if [[ $DRY -eq 1 ]]; then
+        printf '  [dry-run] ct systemctl start pg-backup.service\n'
+        note POSE "premiere sauvegarde"
+    elif ct systemctl start pg-backup.service; then
+        ct journalctl -u pg-backup -n 12 --no-pager 2>/dev/null | sed 's/^/    /'
+        note POSE "premiere sauvegarde"
+    else
+        warn "la premiere sauvegarde a echoue :"
+        ct journalctl -u pg-backup -n 30 --no-pager 2>/dev/null | sed 's/^/    /' >&2
+        note KO "premiere sauvegarde"
+    fi
+    log
+}
+
+# Mot de passe jetable, alphanumerique : aucun caractere a citer, ni pour SQL,
+# ni pour une URL de connexion applicative.
+new_password() { head -c 32 /dev/urandom | base64 | tr -d '\n=+/'; }
+
+psql_ct() { ct sudo -u postgres psql -tAc "$1"; }
+
+# --admin : le compte d'administration. Cree UNIQUEMENT s'il manque — rejouer
+# le script ne doit jamais faire tourner un mot de passe dans le dos de
+# quelqu'un qui l'a range dans OpenBao.
+do_admin() {
+    local role=$1 pass
+    log "== Compte d'administration ($role)"
+    if [[ $(psql_ct "SELECT 1 FROM pg_roles WHERE rolname='$role'" || true) == 1 ]]; then
+        log "  le role $role existe deja — inchange"
+        log "  mot de passe perdu ? ALTER ROLE $role PASSWORD '<nouveau>' en peer (RUNBOOK.md section 5)"
+        note OK "role $role"
+        log
+        return 0
+    fi
+    if [[ $DRY -eq 1 ]]; then
+        printf '  [dry-run] CREATE ROLE %s LOGIN SUPERUSER\n' "$role"
+        note POSE "role $role"
+        log
+        return 0
+    fi
+
+    pass=$(new_password)
+    ct sudo -u postgres psql -v ON_ERROR_STOP=1 -q -c \
+       "CREATE ROLE \"$role\" LOGIN SUPERUSER PASSWORD '$pass';"
+    log "  $role / $pass"
+    warn "MOT DE PASSE AFFICHE UNE SEULE FOIS — le ranger dans OpenBao maintenant"
+    warn "  et ajouter la ligne hostssl correspondante dans pg_hba.conf, puis rejouer ce script"
+    note POSE "role $role (mot de passe affiche)"
+    log
+}
+
+# --tenant : un couple base + role, via tenant.sql lu dans le montage.
+do_tenant() {
+    local name=$1 pass
+    log "== Locataire ($name)"
+    if [[ $(psql_ct "SELECT 1 FROM pg_database WHERE datname='$name'" || true) == 1 ]]; then
+        log "  la base $name existe deja — inchangee"
+        note OK "locataire $name"
+        log
+        return 0
+    fi
+    if [[ $DRY -eq 1 ]]; then
+        printf '  [dry-run] psql -f %s/tenant.sql -v name=%s\n' "$MP" "$name"
+        note POSE "locataire $name"
+        log
+        return 0
+    fi
+
+    # ON_ERROR_STOP=1 : sans lui, un CREATE ROLE en echec laisserait passer le
+    # CREATE DATABASE et produirait une base orpheline sans proprietaire.
+    pass=$(new_password)
+    ct sudo -u postgres psql -v ON_ERROR_STOP=1 -q \
+       -v name="$name" -v password="$pass" -f "$MP/tenant.sql"
+    log "  $name / $pass"
+    warn "MOT DE PASSE AFFICHE UNE SEULE FOIS — le ranger dans OpenBao maintenant"
+    warn "  puis ajouter la ligne de $name dans pg_hba.conf AVANT le reject, et rejouer ce script"
+    note POSE "locataire $name (mot de passe affiche)"
     log
 }
 
@@ -502,10 +914,26 @@ container_setup
 log
 write_conf
 host_wrapper
+
+# La premiere sauvegarde AVANT le hors-site : sans elle, la copie initiale
+# n'aurait rien a transferer et sortirait en erreur « aucune sauvegarde
+# locale ». L'ordre n'est pas cosmetique.
+first_backup
+
 if [[ $DO_OFFSITE -eq 1 ]]; then
+    host_packages
+    rclone_config
     host_offsite
 fi
-log
+
+# Operations a secret, uniquement sur demande explicite.
+if [[ -n $ADMIN_ROLE ]]; then
+    do_admin "$ADMIN_ROLE"
+fi
+if [[ -n $TENANT_NAME ]]; then
+    do_tenant "$TENANT_NAME"
+fi
+
 checks
 log
 
