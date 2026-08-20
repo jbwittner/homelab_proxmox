@@ -1,0 +1,11 @@
+# /etc/systemd/system/pg-backup.timer
+[Unit]
+Description=Sauvegarde PostgreSQL quotidienne
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

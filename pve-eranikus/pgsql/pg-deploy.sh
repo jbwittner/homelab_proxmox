@@ -4,10 +4,13 @@
 # du depot, symlinks de configuration, unites systemd de sauvegarde, pgbk sur
 # l'hote et dans le conteneur, et la copie hors-site vers GCS sur l'hote.
 #
-# DEUX MACHINES, UN SEUL SCRIPT. Ce repertoire porte des fichiers pour le CT
-# (pg-backup.*, la configuration PostgreSQL) et pour l'hote (pgbk-offsite.*).
-# Le tableau du README dit lequel va ou ; ici, la section B pose ce qui vit
-# dans le conteneur et les sections D et E ce qui vit sur le noeud.
+# DEUX MACHINES, UN SEUL SCRIPT, DEUX REPERTOIRES. ct/ est la charge utile du
+# point de montage : c'est LUI, et lui seul, qui est monte en /etc/pgsql-git.
+# host/ porte ce qui s'installe sur le noeud (pgbk-offsite.*) et que le
+# conteneur n'a aucune raison de voir — a commencer par le nom du bucket et le
+# chemin de la cle GCS. Le critere n'est pas « quelle machine l'execute » mais
+# « est-ce la charge utile du mp1 » : pgbk.sh tourne des deux cotes et vit dans
+# ct/, l'hote le lit a travers la frontiere.
 #
 # PREMIERE POSE ET MISES A JOUR, c'est le meme script. Les fichiers de
 # configuration sont des symlinks vers le depot et suivent donc un git pull
@@ -63,7 +66,9 @@
 
 set -euo pipefail
 
-SRC=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)   # source reelle du mp1
+SRC=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)   # racine du service
+CT_SRC="$SRC/ct"                                     # source reelle du mp1
+HOST_SRC="$SRC/host"                                 # ce qui s'installe sur le noeud
 MP=/etc/pgsql-git                                    # cible du montage dans le CT
 HOST_PGBK=/usr/local/sbin/pgbk
 HOST_OFFSITE=/usr/local/bin/pgbk-offsite             # copie hors-site, cote HOTE
@@ -145,11 +150,14 @@ CTID=${CTID_FLAG:-$CTID}
 
 [[ $EUID -eq 0 ]] || die "A lancer en root sur le noeud Proxmox."
 command -v pct >/dev/null || die "pct introuvable : ce script tourne sur l'hote, pas dans le CT."
-NEEDED=(pg-backup.sh pgbk.sh pg-backup.service pg-backup.timer)
-[[ $DO_OFFSITE -eq 1 ]] && NEEDED+=(pgbk-offsite.sh pgbk-offsite.service pgbk-offsite.timer)
-for f in "${NEEDED[@]}"; do
-    [[ -f "$SRC/$f" ]] || die "Depot incomplet : $SRC/$f absent."
+for f in pg-backup.sh pgbk.sh pg-backup.service pg-backup.timer; do
+    [[ -f "$CT_SRC/$f" ]] || die "Depot incomplet : $CT_SRC/$f absent."
 done
+if [[ $DO_OFFSITE -eq 1 ]]; then
+    for f in pgbk-offsite.sh pgbk-offsite.service pgbk-offsite.timer; do
+        [[ -f "$HOST_SRC/$f" ]] || die "Depot incomplet : $HOST_SRC/$f absent."
+    done
+fi
 
 pct config "$CTID" >/dev/null 2>&1 \
     || die "CT $CTID inexistant. Le conteneur se cree avec le script communautaire (doc/RUNBOOK.md, section 1)."
@@ -246,7 +254,7 @@ container_prereqs() {
         note POSE "nesting"
     fi
 
-    mp1_want="${SRC},mp=${MP},ro=1"
+    mp1_want="${CT_SRC},mp=${MP},ro=1"
     mp1_have=$(cfg_get "$cfg" mp1)
 
     if [[ $mp1_have == "$mp1_want" ]]; then
@@ -492,7 +500,7 @@ checks() {
         log "  ecoute : $n socket(s)"
         note OK "listen 5432"
     else
-        warn "$n socket sur 5432 — deux attendus (0.0.0.0 et [::]), voir docs/postgresql-listen-addresses-lxc.md"
+        warn "$n socket sur 5432 — deux attendus (0.0.0.0 et [::]), voir doc/RUNBOOK.md section 4"
         note KO "listen 5432"
     fi
 
@@ -558,7 +566,10 @@ host_wrapper() {
     log "== pgbk sur l'hote"
     # Exactement le meme fichier que dans le CT : pgbk.sh se comporte selon
     # l'endroit ou il tourne. Un seul contenu, donc rien a confondre.
-    install_host 755 "$SRC/pgbk.sh" "$HOST_PGBK" || true
+    # Lu dans ct/ : pgbk.sh est la charge utile du montage ET le point d'entree
+    # de l'hote. Un seul fichier, deux roles — la frontiere ct/ est une
+    # frontiere de VISIBILITE, pas d'execution.
+    install_host 755 "$CT_SRC/pgbk.sh" "$HOST_PGBK" || true
     log
 }
 
@@ -671,7 +682,7 @@ backup_dir_host() {
 unit_env() {
     local v
     v=$(awk -F= -v k="$1" '$1 == "Environment" && $2 == k {v=$3} END {print v}' \
-        "$SRC/pgbk-offsite.service")
+        "$HOST_SRC/pgbk-offsite.service")
     printf '%s\n' "${v:-$2}"
 }
 
@@ -717,9 +728,9 @@ host_offsite() {
     # Le script et les unites sont poses dans tous les cas : ce sont des
     # fichiers inertes tant que le timer n'est pas actif, et les avoir en
     # place permet un « pgbk-offsite --dry-run » de diagnostic.
-    install_host 755 "$SRC/pgbk-offsite.sh"      "$HOST_OFFSITE"                          || copied=1
-    install_host 644 "$SRC/pgbk-offsite.service" "$OFFSITE_UNIT"                          || copied=1
-    install_host 644 "$SRC/pgbk-offsite.timer"   /etc/systemd/system/pgbk-offsite.timer   || copied=1
+    install_host 755 "$HOST_SRC/pgbk-offsite.sh"      "$HOST_OFFSITE"                          || copied=1
+    install_host 644 "$HOST_SRC/pgbk-offsite.service" "$OFFSITE_UNIT"                          || copied=1
+    install_host 644 "$HOST_SRC/pgbk-offsite.timer"   /etc/systemd/system/pgbk-offsite.timer   || copied=1
 
     if resolved=$(backup_dir_host); then
         src_dir=$resolved
@@ -901,7 +912,7 @@ do_tenant() {
 
 # ---------------------------------------------------------------- execution
 
-log "CT $CTID — depot $SRC"
+log "CT $CTID — depot $SRC (mp1 : ct/, hote : host/)"
 [[ $MODE == status ]] && log "(mode --status : aucune modification)"
 log
 

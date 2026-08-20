@@ -193,7 +193,7 @@ montage compris. Il faut la lever puis la remettre :
 
 ```bash
 pct set 200 --protection 0
-pct set 200 --mp1 /root/homelab_proxmox/pve-eranikus/pgsql,mp=/etc/pgsql-git,ro=1
+pct set 200 --mp1 /root/homelab_proxmox/pve-eranikus/pgsql/ct,mp=/etc/pgsql-git,ro=1
 pct reboot 200                         # un mp n'est pris en compte qu'au démarrage
 pct set 200 --protection 1
 pct config 200 | grep -E 'protection|mp1'
@@ -202,6 +202,12 @@ pct config 200 | grep -E 'protection|mp1'
 Le script ne remet la protection que s'il l'a effectivement levée, et pose un
 `trap` qui la rétablit même s'il est interrompu en cours de route. Un `Ctrl-C`
 au mauvais moment ne laisse pas le conteneur déprotégé.
+
+**La source du montage est `ct/`, pas le répertoire du service.** Le conteneur ne
+voit donc ni `host/` (scripts et unités du nœud, nom du bucket, chemin de la clé
+GCS), ni `doc/`, ni `pg-deploy.sh`. Les chemins `/etc/pgsql-git/<fichier>` sont
+inchangés : seule la source a bougé. Conséquence pratique : le runbook ne se lit
+plus depuis le conteneur, il se lit depuis le nœud.
 
 `pct reboot` rend la main **avant** que le CT ne soit utilisable : le script
 attend ensuite que le conteneur soit `running` puis que `postgresql` soit

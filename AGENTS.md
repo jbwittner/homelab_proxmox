@@ -2,10 +2,17 @@
 
 Homelab Proxmox. Un répertoire par nœud, un sous-répertoire par service.
 
-**Les fichiers exploitables restent à plat** — scripts, configuration, unités
-systemd, ceux de l'hôte et ceux du conteneur côte à côte : le répertoire est
-bind-monté dans le CT, et les chemins `/etc/<service>-git/<fichier>` doivent
-rester stables. **La documentation va dans `doc/`.**
+**Le contrat du montage, c'est `/etc/<service>-git/<fichier>`.** Ce que le
+conteneur monte vit à plat dans **`ct/`**, et ces chemins-là ne bougent jamais.
+Ce qui s'installe sur le nœud vit dans **`host/`** — le conteneur n'a aucune
+raison de voir les scripts de l'hôte ni la configuration d'un stockage distant.
+Le déployeur et la documentation restent à la racine du service, et **la
+documentation va dans `doc/`**.
+
+Le critère de découpage n'est pas « quelle machine l'exécute » mais **« est-ce la
+charge utile du montage »** : un fichier qui tourne des deux côtés vit dans `ct/`,
+et l'hôte le lit à travers la frontière. `ct/` est une frontière de *visibilité*,
+pas d'exécution.
 
 Ces règles viennent de ce qui a été construit ici. Les suivre, et les étendre
 quand un nouveau service apparaît.
