@@ -33,7 +33,7 @@
 # de montage (dont le dataset de sauvegarde mp2), la configuration, les scripts,
 # les unites systemd, la configuration rclone, et declenche la premiere
 # sauvegarde puis la premiere copie hors-site. Le README liste les gestes
-# courants, RUNBOOK.md decrit en detail ce que fait ce script.
+# courants, doc/RUNBOOK.md decrit en detail ce que fait ce script.
 #
 # Deux choses restent hors de sa portee, et c'est voulu :
 #   - la CREATION du conteneur, qui appartient au script communautaire ;
@@ -152,7 +152,7 @@ for f in "${NEEDED[@]}"; do
 done
 
 pct config "$CTID" >/dev/null 2>&1 \
-    || die "CT $CTID inexistant. Le conteneur se cree avec le script communautaire (RUNBOOK.md, section 1)."
+    || die "CT $CTID inexistant. Le conteneur se cree avec le script communautaire (doc/RUNBOOK.md, section 1)."
 
 # Execute une commande DANS le conteneur.
 ct() { pct exec "$CTID" -- "$@"; }
@@ -625,7 +625,7 @@ rclone_config() {
         note OK "$conf"
         if ! grep -q '^[[:space:]]*bucket_policy_only' "$conf"; then
             warn "bucket_policy_only absent de $conf"
-            warn "  sans lui, UBLA refuse chaque insertion en 400 (RUNBOOK.md section 10) :"
+            warn "  sans lui, UBLA refuse chaque insertion en 400 (doc/RUNBOOK.md section 10) :"
             warn "  echo 'bucket_policy_only = true' >> $conf"
         fi
     fi
@@ -746,7 +746,7 @@ host_offsite() {
     [[ $copied -eq 1 ]] && run systemctl daemon-reload
 
     # Les identifiants GCP ne sont pas dans le depot et n'y seront jamais
-    # (RUNBOOK.md section 10). Sans eux, activer le timer produirait un echec
+    # (doc/RUNBOOK.md section 10). Sans eux, activer le timer produirait un echec
     # bruyant toutes les nuits a 3h30 : on pose les fichiers, on n'arme pas.
     # Un mp2 qui pointe ailleurs (section A) veut dire qu'on ne sait pas quel
     # volume porte les sauvegardes. Copier « quelque chose » dans le doute
@@ -775,7 +775,7 @@ host_offsite() {
         armed=1
     else
         warn "pgbk-offsite.timer NON active : voir les avertissements ci-dessus"
-        warn "  y remedier (RUNBOOK.md section 10), puis rejouer ce script"
+        warn "  y remedier (doc/RUNBOOK.md section 10), puis rejouer ce script"
         note KO "pgbk-offsite.timer (inactive)"
     fi
 
@@ -848,7 +848,7 @@ do_admin() {
     log "== Compte d'administration ($role)"
     if [[ $(psql_ct "SELECT 1 FROM pg_roles WHERE rolname='$role'" || true) == 1 ]]; then
         log "  le role $role existe deja — inchange"
-        log "  mot de passe perdu ? ALTER ROLE $role PASSWORD '<nouveau>' en peer (RUNBOOK.md section 5)"
+        log "  mot de passe perdu ? ALTER ROLE $role PASSWORD '<nouveau>' en peer (doc/RUNBOOK.md section 5)"
         note OK "role $role"
         log
         return 0

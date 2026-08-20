@@ -2,7 +2,7 @@
 
 Le détail complet : création du conteneur, conception, pièges rencontrés en
 production, procédures de restauration. **Les gestes courants sont dans
-[README.md](README.md)** — ce fichier-ci est ce qu'on ouvre quand quelque chose
+[README.md](../README.md)** — ce fichier-ci est ce qu'on ouvre quand quelque chose
 sort de l'ordinaire, ou quand il faut refaire l'installation depuis zéro.
 
 Sauf la création du conteneur (section 1), tout ce qui suit est joué par

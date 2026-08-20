@@ -5,7 +5,7 @@
 #
 [Unit]
 Description=Copie hors-site des sauvegardes PostgreSQL vers GCS
-Documentation=file:///root/homelab_proxmox/pve-eranikus/pgsql/RUNBOOK.md
+Documentation=file:///root/homelab_proxmox/pve-eranikus/pgsql/doc/RUNBOOK.md
 # Sans réseau, rclone échoue bruyamment — ce qui est le comportement voulu,
 # mais autant ne pas produire une alerte à chaque démarrage du nœud.
 After=network-online.target

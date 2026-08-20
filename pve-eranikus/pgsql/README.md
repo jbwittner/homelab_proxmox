@@ -3,9 +3,13 @@
 Cluster PostgreSQL unique servant les services LXC du nœud. Un couple
 base + rôle par locataire, isolés les uns des autres.
 
-Ce fichier ne porte que **ce qu'on tape**. Le détail — création du conteneur,
-conception, pièges rencontrés en production, procédures de restauration — est
-dans **[RUNBOOK.md](RUNBOOK.md)**.
+Ce fichier ne porte que **ce qu'on tape**. Le reste est dans `doc/` :
+
+| | |
+|---|---|
+| [doc/RUNBOOK.md](doc/RUNBOOK.md) | le détail — création du conteneur, conception, pièges rencontrés en production |
+| [doc/PRA.md](doc/PRA.md) | **les mauvais jours** — une procédure de reprise par scénario, du `DELETE` malheureux au nœud parti en fumée |
+| [doc/PRA-exercice.md](doc/PRA-exercice.md) | comment jouer le PRA pour de faux, et mesurer ce qu'il coûte vraiment |
 
 | | |
 |---|---|
@@ -36,7 +40,7 @@ Elle installe les paquets manquants (`rclone`, `sudo`), pose les points de
 montage — dont le volume des sauvegardes —, la configuration, les scripts, les
 unités systemd et `rclone.conf`, puis déclenche la première sauvegarde et la
 première copie hors-site. Détail :
-[runbook § 2](RUNBOOK.md#2-déploiement-depuis-lhôte--pg-deploysh).
+[runbook § 2](doc/RUNBOOK.md#2-déploiement-depuis-lhôte--pg-deploysh).
 
 ```bash
 pg-deploy.sh --status        # état de chaque élément, ne change rien
@@ -55,9 +59,9 @@ ci-dessous omettent le préfixe `/root/homelab_proxmox/pve-eranikus/pgsql/`.
 `pgbk`, lui, est bien installé sur le nœud.
 
 **Deux choses qu'il ne fait pas**, délibérément : créer le conteneur (script
-communautaire, [§ 1](RUNBOOK.md#1-création-du-conteneur)) et déposer la clé du
+communautaire, [§ 1](doc/RUNBOOK.md#1-création-du-conteneur)) et déposer la clé du
 compte de service GCP, qui est un secret
-([§ 10](RUNBOOK.md#10-copie-hors-site-vers-gcs--pgbk-offsite)).
+([§ 10](doc/RUNBOOK.md#10-copie-hors-site-vers-gcs--pgbk-offsite)).
 
 ## Gestes courants
 
@@ -121,21 +125,30 @@ les mêmes octets.
 
 ## En cas de pépin
 
+**Quelque chose est perdu ?** Aller directement au
+[PRA](doc/PRA.md#trouver-son-scénario) : il commence par une table de
+diagnostic et donne une procédure complète par scénario.
+
 | Symptôme | Où regarder |
 |---|---|
-| Restaurer une base | [§ 8](RUNBOOK.md#8-pgbk--interface-de-gestion), ou [§ 9](RUNBOOK.md#9-restauration-manuelle) à la main |
-| Récupérer une sauvegarde depuis GCS | [§ 10 — Restauration depuis GCS](RUNBOOK.md#restauration-depuis-gcs) |
-| `pgbk-offsite` sort en code 3 | objet distant divergent, [§ 10](RUNBOOK.md#objet-distant-divergent--le-cas-à-traiter-à-la-main) — intervention humaine |
-| `pgbk-offsite.timer` reste inactif | clé GCP, `rclone` ou `mp2` : le résumé de `pg-deploy.sh` dit lequel ([§ 10](RUNBOOK.md#installation)) |
-| Erreur 400 « legacy ACL » | accès uniforme du bucket, [§ 10](RUNBOOK.md#le-piège-de-laccès-uniforme-ubla) |
-| Base injoignable, service `active` | `listen_addresses` en LXC, [§ 4](RUNBOOK.md#4-pose-de-la-configuration) |
-| Après restauration, isolation disparue | les ACL ne sont pas dans le dump, [§ 9](RUNBOOK.md#les-acl-ne-sont-pas-dans-le-dump) |
-| CT en `243/CREDENTIALS` | nesting, [§ 1](RUNBOOK.md#le-piège-du-nesting) |
+| Une base est corrompue, un `DELETE` est parti trop loin | [PRA § 1](doc/PRA.md#1--une-base-perdue-ou-corrompue) |
+| PostgreSQL ne démarre plus | [PRA § 2](doc/PRA.md#2--le-cluster-ne-démarre-plus) |
+| Le CT 200 ou le nœud a disparu | [PRA § 3](doc/PRA.md#3--le-conteneur-est-détruit) et [§ 4](doc/PRA.md#4--le-nœud-est-perdu) |
+| Restaurer une base, cas ordinaire | [runbook § 8](doc/RUNBOOK.md#8-pgbk--interface-de-gestion), ou [§ 9](doc/RUNBOOK.md#9-restauration-manuelle) à la main |
+| Récupérer une sauvegarde depuis GCS | [runbook § 10](doc/RUNBOOK.md#restauration-depuis-gcs) |
+| `pgbk-offsite` sort en code 3 | objet distant divergent, [§ 10](doc/RUNBOOK.md#objet-distant-divergent--le-cas-à-traiter-à-la-main) — intervention humaine |
+| `pgbk-offsite.timer` reste inactif | clé GCP, `rclone` ou `mp2` : le résumé de `pg-deploy.sh` dit lequel ([§ 10](doc/RUNBOOK.md#installation)) |
+| Erreur 400 « legacy ACL » | accès uniforme du bucket, [§ 10](doc/RUNBOOK.md#le-piège-de-laccès-uniforme-ubla) |
+| Base injoignable, service `active` | `listen_addresses` en LXC, [§ 4](doc/RUNBOOK.md#4-pose-de-la-configuration) |
+| Après restauration, isolation disparue | les ACL ne sont pas dans le dump, [§ 9](doc/RUNBOOK.md#les-acl-ne-sont-pas-dans-le-dump) |
+| CT en `243/CREDENTIALS` | nesting, [§ 1](doc/RUNBOOK.md#le-piège-du-nesting) |
 
 ## Reste à faire
 
 - [ ] Ligne du locataire `forgejo` dans `pg_hba.conf` — dépend de son IP
       définitive. C'est le dernier geste que `pg-deploy.sh` ne fait pas.
 - [ ] Copier `postgresql.vars` dans ce dépôt après vérification des secrets.
+- [ ] **Jouer le premier exercice de PRA** ([doc/PRA-exercice.md](doc/PRA-exercice.md)) —
+      tant qu'il ne l'a pas été, le RTO est inconnu et le plan n'est pas prouvé.
 - [x] Sauvegarde locale, `pgbk`, copie hors-site GCS, et pose complète par
       `pg-deploy.sh` — voir le runbook.
