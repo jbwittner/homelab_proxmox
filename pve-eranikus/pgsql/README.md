@@ -54,27 +54,6 @@ pg-deploy.sh --no-first-run  # ne déclenche ni sauvegarde ni copie initiale
 
 Sur un CT déjà conforme, `--dry-run` doit annoncer **zéro modification**.
 
-### Bascule du montage vers `ct/` — à jouer une fois
-
-Le `mp1` pointait sur le répertoire du service ; il pointe désormais sur son
-sous-répertoire `ct/`. Le prochain déploiement va donc constater la divergence,
-**abaisser la protection, reposer le `mp1`, redémarrer le CT 200** et rétablir la
-protection. Un point de montage n'est lu qu'au démarrage : ce redémarrage n'est
-pas facultatif, et c'est une courte indisponibilité de PostgreSQL à prévoir.
-
-Pendant la bascule, les fichiers à plat sont **conservés** dans le dépôt. C'est
-délibéré : le montage est vivant, et si la source perdait `pg_hba.conf` entre le
-`git pull` et la fin du déploiement, tout reload, restart ou démarrage du CT dans
-cet intervalle laisserait PostgreSQL incapable de démarrer. Les originaux à plat
-ne sont supprimés qu'**après** un déploiement réussi, dans un second commit.
-
-```bash
-cd /root/homelab_proxmox && git pull
-pve-eranikus/pgsql/pg-deploy.sh --dry-run   # attendu : une seule ligne POSE, mp1
-pve-eranikus/pgsql/pg-deploy.sh             # repose le mp1 et redémarre le CT
-pct config 200 | grep mp1                   # doit se terminer par /pgsql/ct
-```
-
 Le script se joue depuis le dépôt et n'est pas dans le `PATH` : les exemples
 ci-dessous omettent le préfixe `/root/homelab_proxmox/pve-eranikus/pgsql/`.
 `pgbk`, lui, est bien installé sur le nœud.
@@ -119,17 +98,11 @@ journalctl -u pgbk-offsite -p warning                      # anomalies seules
 
 ## Où va chaque fichier
 
-Ce répertoire porte des fichiers pour **deux machines**, et le découpage le dit :
-
-- **`ct/`** est la charge utile du point de montage. C'est **lui seul** qui est
-  monté en `/etc/pgsql-git`, en lecture seule.
-- **`host/`** est ce qui s'installe sur le nœud. Le conteneur ne le voit pas —
-  ni le nom du bucket, ni le chemin de la clé GCS.
-- `pg-deploy.sh`, `README.md` et `doc/` restent à la racine du service.
-
-Le critère n'est pas « quelle machine l'exécute » mais **« est-ce la charge utile
-du `mp1` »** : `pgbk.sh` tourne des deux côtés et vit dans `ct/`, l'hôte le lit à
-travers la frontière. `ct/` est une frontière de **visibilité**, pas d'exécution.
+Ce répertoire porte des fichiers pour **deux machines**, et le découpage le dit.
+**`ct/` est la charge utile du montage** — lui seul est monté en
+`/etc/pgsql-git`, en lecture seule. **`host/`** est ce qui s'installe sur le
+nœud, et que le conteneur ne voit pas : ni le nom du bucket, ni le chemin de la
+clé GCS. `pg-deploy.sh`, ce fichier et `doc/` restent à la racine du service.
 
 | Fichier | Tourne sur | Installé en |
 |---|---|---|
@@ -142,9 +115,9 @@ travers la frontière. `ct/` est une frontière de **visibilité**, pas d'exécu
 | `ct/10-homelab.conf`, `ct/pg_hba.conf` | **CT 200** | symlinks depuis `/etc/pgsql-git` |
 | `ct/tenant.sql` | **CT 200** | joué par `pg-deploy.sh --tenant` |
 
-Les chemins **`/etc/pgsql-git/<fichier>` ne changent pas** : seule la source du
-montage a bougé. En revanche le conteneur ne voit plus `doc/` — le runbook se lit
-depuis le nœud.
+Les chemins **`/etc/pgsql-git/<fichier>`** sont stables : c'est le contrat du
+montage. Le conteneur ne voit plus `doc/` — le runbook se lit depuis le nœud.
+Pourquoi ce découpage : [runbook § 3](doc/RUNBOOK.md#3-montage-du-dépôt).
 
 Le dataset de sauvegarde porte **deux noms selon le point de vue**, et c'est la
 confusion la plus facile à faire ici :

@@ -118,6 +118,11 @@ unités systemd sont des **copies**, imposées par un montage en lecture seule
 qui ne peut pas porter le bit d'exécution. Modifier `pgbk.sh` dans le dépôt ne
 change donc rien tant que `pg-deploy.sh` n'a pas été rejoué.
 
+Le script lit **deux répertoires** : `ct/`, qui est la charge utile du montage,
+et `host/`, qui ne quitte jamais le nœud. Il refuse de démarrer si l'un des
+fichiers attendus manque de son côté — le message nomme le chemin complet.
+Détail du montage en section 3.
+
 ```bash
 pve-eranikus/pgsql/pg-deploy.sh --status   # état de chaque élément, ne change rien
 pve-eranikus/pgsql/pg-deploy.sh --dry-run  # annonce ce qui serait fait
@@ -136,7 +141,7 @@ Ce qu'il fait, dans l'ordre :
 
 | # | Étape | Détail |
 |---|---|---|
-| A | Prérequis du conteneur | démarre le CT s'il est à l'arrêt, corrige `features=nesting=1`, pose `mp1` (le dépôt) et **`mp2` (le volume des sauvegardes)**, `startup order=1`, redémarre si un point de montage a bougé — section 3 |
+| A | Prérequis du conteneur | démarre le CT s'il est à l'arrêt, corrige `features=nesting=1`, pose `mp1` (le répertoire `ct/` du dépôt) et **`mp2` (le volume des sauvegardes)**, `startup order=1`, redémarre si un point de montage a bougé — section 3 |
 | B | Pose dans le CT | `sudo` et `fstrim.timer` si absents, symlinks de configuration (section 4), scripts et unités de sauvegarde (section 7), `reload`/`restart` de PostgreSQL |
 | C | `/etc/default/pgbk` | le CTID, consigné à un seul endroit |
 | D | `pgbk` sur l'hôte | même fichier que dans le CT (section 8) |
@@ -208,6 +213,23 @@ voit donc ni `host/` (scripts et unités du nœud, nom du bucket, chemin de la c
 GCS), ni `doc/`, ni `pg-deploy.sh`. Les chemins `/etc/pgsql-git/<fichier>` sont
 inchangés : seule la source a bougé. Conséquence pratique : le runbook ne se lit
 plus depuis le conteneur, il se lit depuis le nœud.
+
+### Bascule du montage vers `ct/` — 20 août 2026
+
+Le `mp1` pointait sur le répertoire du service entier. La bascule s'est faite en
+**deux commits**, et l'ordre n'est pas cosmétique. Le
+montage est vivant : à l'instant où un `git mv` atterrit, la source ne contient
+plus `pg_hba.conf` et les symlinks du CT pendent. PostgreSQL continue de servir
+depuis sa mémoire, mais **tout reload, restart ou démarrage du CT dans cette
+fenêtre le laisse incapable de démarrer**. D'où :
+
+1. ajouter `ct/` et `host/` en **copie**, les fichiers à plat conservés, puis
+   déployer — le `mp1` est reposé, le CT redémarre, les symlinks résolvent
+   désormais dans `ct/` ;
+2. seulement ensuite, supprimer les originaux à plat.
+
+À aucun instant la source du montage n'a manqué d'un fichier de configuration.
+La même précaution vaut pour tout déplacement futur d'un fichier de `ct/`.
 
 `pct reboot` rend la main **avant** que le CT ne soit utilisable : le script
 attend ensuite que le conteneur soit `running` puis que `postgresql` soit
@@ -597,6 +619,10 @@ une « version CT » à ne pas confondre au moment d'éditer : il n'existe qu'un
 fichier dans le dépôt, et c'est l'endroit où il tourne qui décide de son
 comportement.
 
+Ce fichier unique vit dans **`ct/`** — l'hôte le lit à travers la frontière. Le
+critère de rangement n'est pas « quelle machine l'exécute », sans quoi `pgbk.sh`
+n'aurait pas de place, mais « est-ce la charge utile du montage ».
+
 La détection se fait sur la présence de `pct` — un nœud Proxmox l'a, le
 conteneur Debian non :
 
@@ -735,6 +761,12 @@ dans le conteneur — et mutualise `rclone` pour les futurs services du nœud.
 Les dumps sont en `600`, propriété de `100102:100106` (décalage d'UID des CT
 non privilégiés). Root sur l'hôte les lit sans difficulté ; aucun autre compte
 de l'hôte ne le peut. D'où `User=root` dans l'unité.
+
+Depuis le découpage du dépôt (section 3), la décision n'est plus seulement une
+convention : `pgbk-offsite.sh` et son unité vivent dans `host/`, hors du
+montage. Le conteneur ne peut plus lire ni le nom du bucket, ni le chemin de la
+clé, ni la disposition du remote. Les secrets, eux, n'ont jamais été dans le
+dépôt — ils sont sous `/root/.config/rclone/` sur le nœud.
 
 ### L'environnement GCS
 
@@ -1086,7 +1118,7 @@ réels. Ce dernier l'emporte, et c'est lui qui porte `PGBK_OFFSITE_NODE` et
   avant que `eth0` ne porte l'adresse, n'ouvrir que le socket loopback, et se
   déclarer actif malgré tout. Le CT n'ayant qu'une interface, `'*'` couvre
   exactement les mêmes adresses. Le contrôle d'accès est dans `pg_hba.conf`.
-  Détail complet dans `docs/postgresql-listen-addresses-lxc.md`.
+  Détail complet en section 4.
 - **Ne jamais ajouter `After=network-online.target`** à l'unité PostgreSQL dans
   un LXC : la cible n'est jamais atteinte et le service reste indéfiniment en
   attente (`Active: inactive (dead)` avec un `Job:` en file).
