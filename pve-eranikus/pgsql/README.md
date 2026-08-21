@@ -36,10 +36,11 @@ pve-eranikus/pgsql/pg deploy
 L'enchaîner à chaque `git pull` est le geste normal : les scripts et les unités
 sont des **copies**, pas des symlinks, et ne suivent pas le `git pull` seuls.
 
-> **`pg-deploy.sh` est conservé le temps de la bascule.** Les deux
-> implémentations décrivent le même montage ; `pg deploy` est celle qui vaut.
-> L'ancienne ne sera retirée qu'une fois la parité des deux `--status`
-> constatée sur le nœud — voir « Reste à faire ».
+> **La bascule est faite.** `pg-deploy.sh` a été retiré le 21 août 2026, après
+> comparaison des deux `--status` sur le nœud : les 35 lignes du bilan bash
+> avaient chacune leur contrepartie exacte. `pg deploy` en rapporte sept de
+> plus — dont la protection du conteneur, que le bash levait et rétablissait
+> sans jamais le dire.
 
 Elle installe les paquets manquants (`rclone`, `sudo`), pose les points de
 montage — dont le volume des sauvegardes —, la configuration, les scripts, les
@@ -147,16 +148,13 @@ Ce répertoire porte des fichiers pour **deux machines**, et le découpage le di
 **`ct/` est la charge utile du montage** — lui seul est monté en
 `/etc/pgsql-git`, en lecture seule. **`host/`** est ce qui s'installe sur le
 nœud, et que le conteneur ne voit pas : ni le nom du bucket, ni le chemin de la
-clé GCS. Le lanceur `pg`, `pg-deploy.sh`, ce fichier et `doc/` restent à la
-racine du service.
+clé GCS. Le lanceur `pg`, ce fichier et `doc/` restent à la racine du service.
 
 | Fichier | Tourne sur | Installé en |
 |---|---|---|
-| `pg-deploy.sh` | **hôte** | joué depuis le dépôt — conservé jusqu'à parité |
 | `pg`, `pgtool/` + `lib/` (racine du dépôt) | **hôte** | `/usr/local/sbin/pg`, arbre d'import en `/usr/local/lib/pgtool` |
 | `ct/pgbk.sh` | **hôte** et **CT** | `/usr/local/sbin/pgbk` (hôte), `/usr/local/bin/pgbk` (CT) |
 | `pgtool/` + `lib/core/` poussés par `pct push` | **CT 200** | `/usr/local/lib/pgtool/`, lanceur en `/usr/local/bin/pg` |
-| `host/pgbk-offsite.sh` | **hôte** | `/usr/local/bin/pgbk-offsite` |
 | `host/pgbk-offsite.service` / `.timer` | **hôte** | `/etc/systemd/system/` de l'hôte |
 | `ct/pg-backup.sh` | **CT 200** | `/usr/local/bin/pg-backup.sh` |
 | `ct/pg-backup.service` / `.timer` | **CT 200** | `/etc/systemd/system/` du CT |
@@ -174,8 +172,8 @@ confusion la plus facile à faire ici :
 |---|---|
 | `/var/backups/postgresql` | `/data/subvol-200-disk-0` |
 
-`pg-backup.sh` écrit dans le premier, `pgbk-offsite.sh` lit le second. Ce sont
-les mêmes octets.
+`pg-backup.sh` écrit dans le premier, `pg offsite` lit le second. Ce sont les
+mêmes octets.
 
 ## En cas de pépin
 
@@ -202,14 +200,9 @@ sort en 1 s'il y en a un.
 
 ## Reste à faire
 
-- [ ] **Constater la parité des deux `--status`** — `pg deploy --status` face à
-      `pg-deploy.sh --status`, section par section, sur le nœud. C'est cette
-      comparaison, et elle seule, qui autorise à retirer `pg-deploy.sh` : tant
-      qu'elle n'a pas été faite, les deux restent, et c'est `pg deploy` qui
-      fait foi.
-- [ ] **Constater la parité de `pg offsite` et de `pg <commande>`** avec
-      `pgbk-offsite` et `pgbk`, puis retirer les anciens scripts (ils restent
-      installés exprès le temps de la comparaison).
+- [ ] **Constater la parité de `pg <commande>`** avec `pgbk` dans le CT, puis
+      retirer `ct/pgbk.sh` — il reste installé exprès, c'est le filet du
+      conteneur tant que la restauration Python n'a pas été éprouvée.
 - [ ] Ligne du locataire `forgejo` dans `pg_hba.conf` — dépend de son IP
       définitive. C'est le dernier geste que `pg deploy` ne fait pas.
 - [ ] Copier `postgresql.vars` dans ce dépôt après vérification des secrets.
@@ -221,3 +214,5 @@ sort en 1 s'il y en a un.
 - [x] Sauvegarde locale, `pgbk`, copie hors-site GCS, et pose complète par
       `pg deploy` — voir le runbook.
 - [x] `pg status` : les trois maillons du montage regardés ensemble.
+- [x] Retrait de `pg-deploy.sh` et du hors-site bash, parité constatée
+      le 21 août 2026.

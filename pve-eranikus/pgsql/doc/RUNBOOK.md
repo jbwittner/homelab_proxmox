@@ -108,31 +108,34 @@ cd /root/homelab_proxmox && git pull
 pve-eranikus/pgsql/pg deploy
 ```
 
-> **Deux implémentations cohabitent le temps de la bascule.** `pg deploy` est
-> celle qui vaut ; `pg-deploy.sh` est conservé jusqu'à ce que la parité des
-> deux `--status` ait été constatée sur le nœud, section par section. Les
-> drapeaux sont les mêmes, à une addition près (`--no-container`). Partout
-> ci-dessous, `pg-deploy.sh <drapeaux>` se lit `pg deploy <drapeaux>`.
+> **La bascule est faite.** `pg-deploy.sh` a été retiré le 21 août 2026, après
+> comparaison des deux `--status` sur ce nœud : chacune des 35 lignes du bilan
+> bash avait sa contrepartie exacte, aux deux fichiers générés près, dont
+> l'en-tête porte le nom du générateur.
 >
-> Ce que `pg deploy` fait de plus, et qui explique la migration :
+> `pg deploy` en rapporte sept de plus. Quatre sont des constats que le bash
+> faisait sans jamais les résumer — le conteneur démarré, **la protection**, la
+> sentinelle du montage, le cluster détecté. Les trois autres sont les
+> barrières, qui rendent visibles les drapeaux `changed` et `copied` que le
+> bash levait à la main.
+>
+> Ce qui a changé de fond, et qui explique la migration :
 >
 > - **le plan est produit par le constat, jamais par l'application** — ce que
 >   `--dry-run` annonce est exactement ce que le mode réel exécute, il n'y en a
 >   pas deux descriptions qui puissent diverger ;
 > - **`--dry-run` annonce aussi les effets** : « il faudra redémarrer le CT »
 >   est l'information la plus utile de ce mode, et le bash ne la donnait pas ;
+> - **`--status` ne rend que des verdicts** — le bash y laissait fuir des
+>   lignes de plan, ce qui le faisait passer pour une simulation ;
 > - **un prérequis non constaté bloque ce qui en dépend** au lieu de le laisser
 >   conclure dans le vide. Le hors-site ne s'arme plus sur un `mp2` que
 >   personne n'a vérifié — le trou que `--no-container` ouvrait ;
 > - **une action qui ferait apparaître un mot de passe est refusée** tant
 >   qu'elle n'a pas été demandée par `--admin` ou `--tenant`.
 >
-> **Un écart attendu pendant la comparaison des deux `--status`.** Les fichiers
-> générés portent le nom de leur générateur en en-tête. Le premier `pg deploy`
-> après un `pg-deploy.sh` réécrit donc `10-noeud.conf` — même contenu utile,
-> en-tête différent — et l'annonce en POSE. C'est correct, et cela ne se
-> produit qu'une fois. `rclone.conf`, lui, n'est jamais réécrit quand il
-> existe : son en-tête restera celui du bash, et ce n'est pas un défaut.
+> `--no-container` saute les **prérequis** du conteneur — disques, protection,
+> nesting. La pose dans le CT a lieu quand même, comme dans le bash.
 
 **Première pose et mises à jour, c'est la même commande**, et il n'y a pas de
 raison de distinguer les deux : chaque étape est conditionnelle et ne touche à
@@ -883,10 +886,13 @@ gs://homelab-pgsql-backups-dc93212a/pve-eranikus/postgresql/20260820-093240/
 Le **nœud est au premier niveau** : `vert-ysera` pourra s'ajouter en posant les
 mêmes fichiers avec un autre `PGBK_OFFSITE_NODE`, sans rien restructurer.
 
-### `pg offsite` — la commande, et l'ancien script
+### `pg offsite` — la commande
 
 Depuis le 21 août 2026 la copie hors-site est en Python : `pgbk-offsite.sh` est
-devenu `pg offsite`, et c'est ce que lance l'unité. **Le nom de l'unité n'a pas
+devenu `pg offsite`, et c'est ce que lance l'unité. Le script bash a été retiré
+du dépôt le même jour, et le déploiement **retire aussi le binaire resté posé**
+sur le nœud (`/usr/local/bin/pgbk-offsite`) : le supprimer du dépôt seulement
+laisserait sur place un exécutable périmé que quelqu'un rejouerait un jour. **Le nom de l'unité n'a pas
 changé** — le renommer orphelinerait le drop-in `10-noeud.conf`, le lien
 d'activation et l'historique du journal. Seul `ExecStart` a bougé.
 
@@ -939,8 +945,7 @@ non privilégiés). Root sur l'hôte les lit sans difficulté ; aucun autre comp
 de l'hôte ne le peut. D'où `User=root` dans l'unité.
 
 Depuis le découpage du dépôt (section 3), la décision n'est plus seulement une
-convention : `pgbk-offsite.sh` et son unité vivent dans `host/`, hors du
-montage. Le conteneur ne peut plus lire ni le nom du bucket, ni le chemin de la
+convention : l'unité du hors-site vit dans `host/`, hors du montage. Le conteneur ne peut plus lire ni le nom du bucket, ni le chemin de la
 clé, ni la disposition du remote. Les secrets, eux, n'ont jamais été dans le
 dépôt — ils sont sous `/root/.config/rclone/` sur le nœud.
 
@@ -1045,7 +1050,7 @@ Deux endroits le règlent, et ils ne se gênent pas :
 
 - `bucket_policy_only = true` dans `rclone.conf`, ci-dessus — vaut aussi pour
   les appels `rclone` faits à la main ;
-- `--gcs-bucket-policy-only` dans `pgbk-offsite.sh`, pour que le script
+- `--gcs-bucket-policy-only` dans `pg offsite`, pour que la commande
   fonctionne même sur une configuration reconstruite à la va-vite.
 
 Constaté le 20 août 2026, à la première exécution réelle.
@@ -1076,7 +1081,7 @@ juste sur `--ctid 201` comme sur `vert-ysera`, sans éditer une ligne du dépôt
 l'unité versionnée ne porte plus que des valeurs par défaut lisibles.
 
 Comme pour les fichiers du CT, le script est **copié et non lié** : le dépôt
-peut être déplacé, ou en cours de `git pull` à 3h30. Modifier `pgbk-offsite.sh`
+peut être déplacé, ou en cours de `git pull` à 3h30. Modifier le hors-site
 dans le dépôt ne change donc rien tant que `pg deploy` n'a pas été rejoué.
 
 **Le timer n'est armé que si tout est réuni** — `rclone`, la clé, et un `mp2`

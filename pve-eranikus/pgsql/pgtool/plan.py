@@ -41,6 +41,7 @@ from pgtool.steps import controles as C
 from pgtool.steps import horssite as F
 from pgtool.steps import hote as D
 from pgtool.steps import prerequis as A
+from pgtool.steps import retraits as H
 from pgtool.steps import secrets as G
 
 # Le rechargement de PostgreSQL, demandé à chaque parcours.
@@ -49,6 +50,8 @@ EFFETS_FINAUX = (B.EFFET_REFRESH,)
 # Chemins d'installation sur le nœud, absolus : le PATH de systemd est minimal.
 UNITE_HORSSITE = Path("/etc/systemd/system/pgbk-offsite.service")
 TIMER_HORSSITE = Path("/etc/systemd/system/pgbk-offsite.timer")
+# Le script bash du hors-site a été retiré du dépôt : l'unité appelle
+# « pg offsite ». Ce chemin ne sert donc plus qu'à RETIRER ce qui reste posé.
 SCRIPT_HORSSITE = Path("/usr/local/bin/pgbk-offsite")
 DROPIN_HORSSITE = Path(
     "/etc/systemd/system/pgbk-offsite.service.d/10-noeud.conf"
@@ -118,11 +121,19 @@ def etapes(ctx: Context) -> list:
         F.ConfigRclone(Path(rclone_conf), remote=remote, cle=Path(cle)),
         F.SourceHorsSite(),
         F.DropInNoeud(DROPIN_HORSSITE, node=_noeud()),
-        F.UniteHorsSite("pgbk-offsite.sh", SCRIPT_HORSSITE, mode=0o755),
         F.UniteHorsSite("pgbk-offsite.service", UNITE_HORSSITE),
         F.UniteHorsSite("pgbk-offsite.timer", TIMER_HORSSITE),
         Barrier("unités du nœud rechargées", "F"),
         F.ArmementHorsSite(),
+
+        # ── H. ce que plus rien n'appelle ────────────────────────────────
+        # Conditionné à l'unité qui l'a remplacé : la retirer alors que son
+        # remplaçant est en défaut laisserait le nœud sans copie hors-site.
+        H.RetraitOrphelin(
+            SCRIPT_HORSSITE,
+            remplace_par="« pg offsite », appelé par l'unité",
+            requires=("pgbk-offsite.service",),
+        ),
 
         # ── G. les opérations à secret, sur demande explicite ────────────
         G.RoleAdmin(),

@@ -586,7 +586,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     deploy.add_argument(
         "--no-container", action="store_true",
-        help="ne touche pas au conteneur — le hors-site ne s'armera pas",
+        help=(
+            "saute les PRÉREQUIS du conteneur — disques, protection, nesting. "
+            "La pose dans le CT a lieu quand même. L'état de mp2 reste alors "
+            "non déterminé, donc le hors-site ne s'armera pas."
+        ),
     )
     deploy.add_argument(
         "--no-offsite", action="store_true",
