@@ -9,13 +9,13 @@ succès, pas un échec — c'est exactement ce pour quoi on le joue.
 
 ## Deux niveaux
 
-| | Exercice court | Exercice complet |
-|---|---|---|
-| Ce qu'il prouve | la chaîne de sauvegarde est **fidèle et restaurable** | le [scénario 4](PRA.md#4--le-nœud-est-perdu) fonctionne de bout en bout |
-| Où | dans le CT 200, sur une base jetable | sur un CT jetable, CTID **299** |
-| Impact sur la production | aucun | aucun, si les deux garde-fous ci-dessous sont respectés |
-| Durée indicative | ~30 min | ~2 h |
-| Cadence | trimestrielle | semestrielle, **et après tout changement structurel** |
+| | Exercice court | Exercice complet | Exercice de bascule |
+|---|---|---|---|
+| Ce qu'il prouve | la chaîne de sauvegarde est **fidèle et restaurable** | le [scénario 4](PRA.md#4--le-nœud-est-perdu) fonctionne de bout en bout | `pg restore` fait ce que faisait `pgbk restore` |
+| Où | dans le CT 200, sur une base jetable | sur un CT jetable, CTID **299** | dans le CT 200, locataire et dépôt jetables |
+| Impact sur la production | aucun | aucun, si les deux garde-fous ci-dessous sont respectés | aucun, si `PG_BACKUP_DEST` est bien détourné |
+| Durée indicative | ~30 min | ~2 h | ~30 min |
+| Cadence | trimestrielle | semestrielle, **et après tout changement structurel** | **une fois**, avant de retirer le moteur bash |
 
 ## Les deux garde-fous
 
@@ -265,11 +265,191 @@ rm -rf <instantané> /tmp/<instantané>   # empreintes SCRAM
       notée : une étape manquante devient une ligne de `PRA.md`, un geste
       oublié devient une ligne de `pg-deploy.sh`.
 
+## Exercice de bascule — valider le moteur Python
+
+**Se joue une fois**, avant de retirer `pgbk` du conteneur. Les deux autres
+exercices prouvent que la chaîne de sauvegarde est fidèle ; celui-ci prouve que
+`pg restore` fait ce que faisait `pgbk restore`, et le prouve sur des données
+qu'on peut se permettre de perdre.
+
+| | |
+|---|---|
+| Ce qu'il prouve | `pg restore` restaure, rend la base à son propriétaire, et **réapplique les ACL** |
+| Où | dans le CT 200, sur un locataire jetable et un dépôt de sauvegardes temporaire |
+| Impact sur la production | aucun — ni la base `forgejo`, ni le dépôt `/var/backups/postgresql`, ni le bucket ne sont touchés |
+| Durée indicative | ~30 min |
+| Cadence | **une seule fois**, puis à chaque changement de `restore.py` |
+
+### Le garde-fou de cet exercice
+
+> **Toujours `PG_BACKUP_DEST` sur un répertoire temporaire.**
+>
+> Sans cette variable, la sauvegarde d'exercice atterrirait dans
+> `/var/backups/postgresql`, deviendrait le `latest` du CT, et **partirait dans
+> le bucket à 3h30** — où plus personne ne peut l'effacer. Elle contiendrait en
+> outre les empreintes SCRAM de tous les rôles, pour une base de test.
+>
+> Le dépôt temporaire vit dans le CT, il est en `700`, et le démontage
+> l'efface.
+
+Les deux garde-fous des autres exercices ne s'appliquent pas ici : on ne crée
+pas de conteneur, et on ne touche pas à `/etc/default/pgbk`.
+
+### 1. Un locataire jetable
+
+```bash
+# sur le nœud
+pve-eranikus/pgsql/pg-deploy.sh --tenant pra
+```
+
+Le mot de passe s'affiche une fois. **Il n'a pas besoin d'être conservé** : ce
+locataire sera supprimé au démontage, et l'exercice se connecte en `peer`.
+
+```bash
+pct enter 200
+sudo -u postgres psql -d pra -c "
+  CREATE TABLE facture (id serial PRIMARY KEY, montant numeric, pose date);
+  INSERT INTO facture (montant, pose)
+  SELECT g * 10.5, current_date - g FROM generate_series(1, 500) g;
+  ALTER TABLE facture OWNER TO pra;"
+sudo -u postgres psql -d pra -tAc "SELECT count(*), sum(montant) FROM facture"
+```
+
+- [ ] La base `pra` contient **500** lignes. Noter la somme : _______________
+- [ ] `pg show` n'est pas encore concerné ; on est dans le CT, en `pct enter`.
+
+### 2. Une sauvegarde, hors du dépôt de production
+
+```bash
+mkdir -p /tmp/pra-backups && chmod 700 /tmp/pra-backups
+chown postgres:postgres /tmp/pra-backups
+
+PG_BACKUP_DEST=/tmp/pra-backups \
+  sudo -u postgres /usr/local/bin/pg-backup.sh --json > /tmp/pra.json
+python3 -m json.tool /tmp/pra.json | head -20
+```
+
+- [ ] `"status": "ok"` et `"exit_code": 0`.
+- [ ] `pra` figure dans `"databases"`.
+- [ ] **`/var/backups/postgresql` n'a pas bougé** :
+      `ls /var/backups/postgresql | wc -l` donne le même nombre qu'avant.
+
+### 3. Le dégât
+
+```bash
+sudo -u postgres psql -d pra -c "DELETE FROM facture WHERE id > 100"
+sudo -u postgres psql -d pra -tAc "SELECT count(*) FROM facture"
+```
+
+- [ ] Il ne reste que **100** lignes. C'est le `DELETE` parti trop loin du
+      [scénario 1](PRA.md#1--une-base-perdue-ou-corrompue).
+
+### 4. Restaurer avec le moteur Python
+
+```bash
+PG_BACKUP_DEST=/tmp/pra-backups /usr/local/bin/pg restore pra --yes
+echo "code de retour : $?"
+```
+
+- [ ] **Code de retour 0.**
+- [ ] Le journal montre, dans cet ordre : le propriétaire capturé, le filet
+      `pre-restore-*`, les sessions fermées, le `dropdb`, le chargement, puis
+      **« réapplication des ACL »**.
+- [ ] Un répertoire `pre-restore-*` existe dans `/tmp/pra-backups`.
+
+```bash
+sudo -u postgres psql -d pra -tAc "SELECT count(*), sum(montant) FROM facture"
+```
+
+- [ ] Les **500** lignes sont revenues, et la somme est celle notée en 1.
+
+### 5. Ce qu'aucun dump ne porte
+
+C'est le contrôle qui compte le plus : les ACL ne sont ni dans le dump ni dans
+`globals.sql`, et leur absence ne produit **aucun message**.
+
+```bash
+sudo -u postgres psql -tAc \
+  "SELECT array_to_string(datacl, ' ') FROM pg_database WHERE datname='pra'"
+sudo -u postgres psql -d pra -tAc \
+  "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tableowner <> 'pra'"
+/usr/local/bin/pg verify pra
+```
+
+- [ ] Le `datacl` ne contient **pas** d'entrée dont le bénéficiaire est vide —
+      c'est ainsi que PostgreSQL écrit `PUBLIC`. Autrement dit : `PUBLIC` ne
+      peut pas se connecter.
+- [ ] **Zéro** table n'appartient à quelqu'un d'autre que `pra` : le `--role`
+      de `pg_restore` a bien été passé.
+- [ ] `pg verify pra` n'émet aucun `[WARN ]`.
+
+### 6. Le cas qui sortait en erreur
+
+Le bash rendait **1** sur une restauration réussie quand la base n'existait
+pas : sa dernière instruction testait un filet qui n'avait pas eu lieu d'être.
+
+```bash
+sudo -u postgres dropdb pra
+PG_BACKUP_DEST=/tmp/pra-backups /usr/local/bin/pg restore pra --yes
+echo "code de retour : $?"
+```
+
+- [ ] **Code de retour 0**, et la base est bien recréée avec ses 500 lignes.
+- [ ] Le journal dit « la base pra n'existe pas — création » et **aucun** filet
+      `pre-restore-*` n'est créé pour cette exécution : il n'y avait rien à
+      sauver.
+
+### 7. Comparer au moteur bash
+
+```bash
+PG_BACKUP_DEST=/tmp/pra-backups /usr/local/bin/pgbk restore pra --yes --local
+echo "code de retour bash : $?"
+sudo -u postgres psql -d pra -tAc "SELECT count(*) FROM facture"
+```
+
+- [ ] Le bash restaure les mêmes 500 lignes.
+- [ ] Écart attendu et **connu** : si la base existait, le bash rend 0 ; si
+      elle n'existait pas, il rend 1 alors que la restauration a réussi. C'est
+      le défaut que le portage corrige, pas une régression.
+
+### 8. Démonter — ne rien sauter
+
+```bash
+sudo -u postgres dropdb pra
+sudo -u postgres psql -c "DROP ROLE pra"
+rm -rf /tmp/pra-backups /tmp/pra.json
+exit
+```
+
+- [ ] La base et le rôle `pra` n'existent plus :
+      `pct exec 200 -- sudo -u postgres psql -tAc "SELECT datname FROM pg_database WHERE datname='pra'"`
+      ne renvoie rien.
+- [ ] **`/tmp/pra-backups` est effacé** : il contenait un `globals.sql`, donc
+      les empreintes SCRAM de tous les rôles du cluster.
+- [ ] `pg list` sur le nœud montre le même nombre d'instantanés qu'avant
+      l'exercice, et le même `← latest`.
+- [ ] `pg offsite --dry-run` sort en 0 et n'annonce **rien à transférer**.
+
+### 9. Consigner, et décider
+
+- [ ] Ligne ajoutée au journal ci-dessous, type « bascule ».
+- [ ] **Décision notée** : le moteur bash peut être retiré, ou non, et
+      pourquoi. Tant que cette case n'est pas cochée, `ct/pgbk.sh` reste posé.
+
+### Ce que cet exercice ne couvre pas
+
+- **La restauration depuis GCS.** C'est l'exercice court qui la prouve ; ici on
+  restaure depuis un dépôt local fabriqué pour l'occasion.
+- **La restauration d'un service.** On rend une base à son propriétaire avec
+  ses ACL ; que Forgejo redémarre là-dessus est un autre plan.
+- **Le comportement sous charge.** L'exercice ferme des sessions qu'il a
+  ouvertes lui-même ; une base réellement occupée est un autre cas.
+
 ## Journal des exercices
 
 | Date | Type | Instantané joué | RTO mesuré | Anomalies | Corrigé dans |
 |---|---|---|---|---|---|
-| *(à remplir au premier exercice)* | | | | | |
+| *(à remplir au premier exercice)* | court / complet / bascule | | | | |
 
 ## Ce que l'exercice ne couvre pas
 

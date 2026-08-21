@@ -178,6 +178,9 @@ diagnostic et donne une procédure complète par scénario.
 - [ ] Ligne du locataire `forgejo` dans `pg_hba.conf` — dépend de son IP
       définitive. C'est le dernier geste que `pg-deploy.sh` ne fait pas.
 - [ ] Copier `postgresql.vars` dans ce dépôt après vérification des secrets.
+- [ ] **Jouer l'exercice de bascule**
+      ([doc/PRA-exercice.md](doc/PRA-exercice.md#exercice-de-bascule--valider-le-moteur-python)) —
+      c'est lui, et lui seul, qui autorise à retirer le moteur bash du CT.
 - [ ] **Jouer le premier exercice de PRA** ([doc/PRA-exercice.md](doc/PRA-exercice.md)) —
       tant qu'il ne l'a pas été, le RTO est inconnu et le plan n'est pas prouvé.
 - [x] Sauvegarde locale, `pgbk`, copie hors-site GCS, et pose complète par
