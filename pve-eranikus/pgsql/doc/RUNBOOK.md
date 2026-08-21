@@ -733,9 +733,26 @@ Le bash comptait autrement dans `pgbk list` (jours) et dans `prune`
 passage à l'heure d'hiver — l'epoch ignore les heures d'été, une implémentation
 calendaire se décalerait d'un cran ce jour-là.
 
-**Ce qui reste à faire avant la bascule** : le `--json` de `pg-backup.sh`, et
-surtout la répétition de restauration ([doc/PRA-exercice.md](PRA-exercice.md)).
-Tant qu'elle n'a pas été jouée, `ct/pgbk.sh` reste le moteur.
+**`pg-backup.sh --json`.** Le script reste en bash — c'est le seul dont un
+défaut coûte les sauvegardes sans que personne s'en aperçoive, et 176 lignes
+dont une dizaine de logique réelle ne justifient pas de le réécrire. Il gagne
+seulement une option : `--json` émet un objet sur la sortie standard, le
+journal humain basculant sur la sortie d'erreur, où `journalctl` le récupère
+exactement comme avant. Sans l'option, **rien ne change**.
+
+L'objet est émis **dans tous les cas** — succès, cluster vide, espace
+insuffisant, échec, interruption. Un appelant qui ne reçoit rien ne peut pas
+distinguer une panne d'un script qui n'a pas tourné. Les tailles y sont en
+octets et non en « 2.1K » : un consommateur qui compare des tailles n'a pas à
+défaire un arrondi d'affichage.
+
+Le script est testé pour de vrai, depuis `pytest`, avec `psql`, `pg_dumpall` et
+`pg_dump` bouchonnés et le reste des outils système réels — c'est la seule
+façon honnête de vérifier un script qu'on a décidé de ne pas porter.
+
+**Ce qui reste avant la bascule** : la répétition de restauration
+([doc/PRA-exercice.md](PRA-exercice.md)). Tant qu'elle n'a pas été jouée,
+`ct/pgbk.sh` reste le moteur.
 
 ### Ce que fait `pgbk restore`
 
