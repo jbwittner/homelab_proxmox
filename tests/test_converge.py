@@ -29,14 +29,18 @@ from core.converge import (
 class Etape:
     """Une étape de test : on lui dit quoi constater, elle note ce qu'on fait."""
 
+    # `detail=None` garde le motif générique historique ; le passer permet aux
+    # tests du résumé de fixer exactement ce qui doit — ou ne doit pas —
+    # remonter jusqu'à l'écran.
     def __init__(self, nom, *, section="A", state="ok", actions=(),
-                 requires=(), skip=None):
+                 requires=(), skip=None, detail=None):
         self.name = nom
         self.section = section
         self.requires = requires
         self._state = state
         self._actions = tuple(actions)
         self._skip = skip
+        self._detail = detail
         self.checks = 0
 
     def skip_if(self, ctx):
@@ -44,7 +48,9 @@ class Etape:
 
     def check(self, ctx):
         self.checks += 1
-        return Outcome(self._state, f"détail de {self.name}", self._actions)
+        motif = self._detail if self._detail is not None \
+            else f"détail de {self.name}"
+        return Outcome(self._state, motif, self._actions)
 
 
 def _action(nom, journal, **kw):
@@ -241,12 +247,17 @@ def test_une_action_a_secret_est_jouee_si_demandee():
 
 
 def test_le_resume_reprend_les_trois_verdicts_du_bash():
-    """OK / POSE / KO, une ligne par élément, dans l'ordre d'exécution."""
+    """OK / POSE / KO, une ligne par élément, dans l'ordre d'exécution.
+
+    Les motifs sont mis à vide ici : ce test porte sur les VERDICTS et leur
+    ordre. Ce qu'un échec ajoute derrière lui est le sujet des tests suivants.
+    """
     rapports = traverse(
         [
-            Etape("nesting"),
-            Etape("mp1", state="drift", actions=[Action("poser", lambda c: None)]),
-            Etape("rclone", state="error"),
+            Etape("nesting", detail=""),
+            Etape("mp1", state="drift", detail="",
+                  actions=[Action("poser", lambda c: None)]),
+            Etape("rclone", state="error", detail=""),
         ],
         _ctx(Mode.STATUS),
     )
@@ -270,6 +281,58 @@ def test_une_etape_inevaluable_compte_comme_KO():
     pose = Etape("fichiers", requires=("mp1",))
     rapports = traverse([montage, pose], _ctx(Mode.DRY_RUN))
     assert render_summary(rapports).splitlines()[1].split()[0] == "KO"
+
+
+def test_un_echec_porte_son_motif_jusque_dans_le_resume():
+    """Constaté le 21 août 2026, sur un `fj deploy` réel : le résumé annonçait
+
+        KO  connexion à la base (CT 200)
+
+    et rien d'autre. Le motif n'existait que dans `--status`, donc il fallait
+    relancer la commande pour savoir ce qui n'allait pas — après avoir déjà
+    appliqué. « Échouer bruyamment, avec un message qui dit quoi faire » ne
+    s'accommode pas d'un verdict muet.
+    """
+    rapports = traverse(
+        [Etape("base", state="error", detail="FATAL: aucune entrée pg_hba")],
+        _ctx(Mode.APPLY),
+    )
+    assert "FATAL: aucune entrée pg_hba" in render_summary(rapports)
+
+
+def test_ce_qui_va_bien_reste_muet_dans_le_resume():
+    """Le résumé se lit d'un coup d'œil ou il ne sert à rien. Un motif sur
+    chaque ligne le noierait — et c'est justement à quoi sert `--status`."""
+    rapports = traverse(
+        [
+            Etape("nesting", detail="nesting=1"),
+            Etape("mp1", state="drift", detail="à poser",
+                  actions=[Action("poser", lambda c: None)]),
+        ],
+        _ctx(Mode.STATUS),
+    )
+    rendu = render_summary(rapports)
+    assert "nesting=1" not in rendu
+    assert "à poser" not in rendu
+
+
+def test_un_echec_sans_motif_ne_traine_pas_de_tiret():
+    """Un séparateur suivi de rien se lit comme un motif tronqué."""
+    rapports = traverse(
+        [Etape("rclone", state="error", detail="")], _ctx(Mode.STATUS)
+    )
+    assert render_summary(rapports).rstrip().endswith("rclone")
+
+
+def test_un_motif_multiligne_est_rendu_entier():
+    """Les refus de ce dépôt tiennent souvent sur plusieurs lignes — la
+    seconde dit quoi taper. La couper reviendrait à retirer le remède."""
+    rapports = traverse(
+        [Etape("base", state="error",
+               detail="FATAL: rien\n         créer le locataire : pg deploy")],
+        _ctx(Mode.STATUS),
+    )
+    assert "créer le locataire" in render_summary(rapports)
 
 
 def test_une_etape_sautee_ne_figure_pas_au_resume():

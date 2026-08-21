@@ -366,12 +366,30 @@ def render_summary(rapports: Iterable[Report]) -> str:
 
     Les étapes sautées n'y figurent pas : le bash n'en parlait pas non plus, et
     une ligne « sauté » par drapeau noierait les trois verdicts qui comptent.
+
+    **CE QUI VA MAL PORTE SON MOTIF, ce qui va bien reste muet.** Le résumé se
+    lit d'un coup d'œil ou il ne sert à rien — un motif sur chaque ligne le
+    noierait, et c'est justement le rôle de `--status`. Mais un ÉCHEC muet
+    oblige à relancer la commande pour savoir ce qui n'allait pas, après
+    l'avoir déjà appliquée.
+
+    Constaté le 21 août 2026, sur un `fj deploy` réel :
+
+        KO       connexion à la base (CT 200)
+
+    et rien d'autre. Le `FATAL:` qui disait quoi corriger n'existait que dans
+    un second passage.
     """
     lignes = []
     for rapport in rapports:
         if rapport.state == SKIP:
             continue
-        lignes.append(f"  {VERDICTS[rapport.state]:<8} {rapport.step}")
+        ligne = f"  {VERDICTS[rapport.state]:<8} {rapport.step}"
+        # Le séparateur n'apparaît que s'il y a quelque chose derrière : un
+        # tiret suivi de rien se lit comme un motif tronqué.
+        if VERDICTS[rapport.state] == "KO" and rapport.detail:
+            ligne += f" — {rapport.detail}"
+        lignes.append(ligne)
     return "\n".join(lignes)
 
 
