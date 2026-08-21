@@ -51,8 +51,19 @@ def human_size(octets: int) -> str:
 
 
 def free_mb(chemin: Path) -> int:
-    """Mégaoctets disponibles, au sens de `df` : hors blocs réservés."""
-    return shutil.disk_usage(chemin).free // (KIO * KIO)
+    """Mégaoctets disponibles, au sens de `df -m`.
+
+    Deux détails, et les deux comptent pour que les sorties restent
+    comparables à celles du bash :
+
+      - « disponible » et non « libre » : `shutil.disk_usage().free` se fonde
+        sur les blocs disponibles à l'utilisateur, hors blocs réservés, comme
+        la colonne de `df` ;
+      - l'arrondi se fait AU-DESSUS. `df -m` compte des unités entamées ;
+        tronquer donne systématiquement une unité de moins.
+    """
+    mio = KIO * KIO
+    return -(-shutil.disk_usage(chemin).free // mio)
 
 
 # ─── delete ──────────────────────────────────────────────────────────────────

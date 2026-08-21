@@ -186,3 +186,38 @@ def test_show_affiche_le_manifeste_et_les_fichiers(store):
 def test_show_sans_manifeste_le_signale(store):
     _snap(store.dest, "20260820-093240", fichiers=("forge.dump",))
     assert "MANIFEST" in render_show(store, "20260820-093240")
+
+
+# ─── parité avec df et du ────────────────────────────────────────────────────
+
+
+def test_lespace_libre_sarrondit_au_dessus_comme_df(monkeypatch):
+    """`df -m` arrondit AU-DESSUS ; tronquer donne une unité de moins.
+
+    Constaté en production le 21 août 2026, à la comparaison des deux moteurs
+    sur le même dépôt :
+
+        bash   : 8 sauvegarde(s), 34K — 51200 Mo libres
+        python : 8 sauvegarde(s), 33K — 51199 Mo libres
+    """
+    import shutil as _shutil
+
+    from pgtool import engine
+
+    MIO = 1024 * 1024
+
+    class Usage:
+        def __init__(self, libre):
+            self.total = 100 * MIO
+            self.used = 0
+            self.free = libre
+
+    # 51199 Mo et un octet : df annoncerait 51200.
+    monkeypatch.setattr(engine.shutil, "disk_usage",
+                        lambda _p: Usage(51199 * MIO + 1))
+    assert engine.free_mb(_shutil.__file__) == 51200
+
+    # Un compte exact ne doit pas être gonflé pour autant.
+    monkeypatch.setattr(engine.shutil, "disk_usage",
+                        lambda _p: Usage(51200 * MIO))
+    assert engine.free_mb(_shutil.__file__) == 51200
