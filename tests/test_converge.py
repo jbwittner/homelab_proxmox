@@ -276,3 +276,50 @@ def test_une_etape_sautee_ne_figure_pas_au_resume():
     rapports = traverse([Etape("a"), Etape("b", skip="--no-offsite")],
                         _ctx(Mode.STATUS))
     assert len(render_summary(rapports).splitlines()) == 1
+
+
+# ─── filets du parcours ──────────────────────────────────────────────────────
+
+
+class EtapeQuiLeve:
+    name = "casse"
+    section = "F"
+    requires: tuple = ()
+
+    def skip_if(self, ctx):
+        return None
+
+    def check(self, ctx):
+        raise RuntimeError("pvesm a disparu")
+
+
+def test_une_etape_qui_leve_ne_abat_pas_le_parcours():
+    """En --status on perdrait le reste du bilan, et c'est justement le moment
+    où l'on veut tout voir. Le défaut est rapporté sur SA ligne."""
+    rapports = traverse([EtapeQuiLeve(), Etape("suivante")], _ctx(Mode.STATUS))
+    assert rapports[0].state == "error"
+    assert "pvesm a disparu" in rapports[0].detail
+    assert rapports[1].state == "ok", "la suite est quand même constatée"
+
+
+def test_un_prerequis_en_echec_rend_le_dependant_inevaluable_meme_en_apply():
+    """Un prérequis qui a ÉCHOUÉ n'a pas eu lieu, quel que soit le mode. Le
+    prétendre serait pire que de l'avouer."""
+    rapports = traverse(
+        [Etape("socle", state="error"), Etape("dessus", requires=("socle",))],
+        _ctx(Mode.APPLY),
+    )
+    assert rapports[1].state == "unknown"
+
+
+def test_un_prerequis_bloque_rend_le_dependant_inevaluable():
+    """Une action à secret non demandée bloque son étape ; ce qui en dépend
+    n'est pas plus évaluable."""
+    secrete = Etape("role", state="absent",
+                    actions=[Action("CREATE ROLE", lambda c: None,
+                                    generates_secret=True)])
+    rapports = traverse(
+        [secrete, Etape("locataire", requires=("role",))], _ctx(Mode.APPLY)
+    )
+    assert rapports[0].state == "blocked"
+    assert rapports[1].state == "unknown"

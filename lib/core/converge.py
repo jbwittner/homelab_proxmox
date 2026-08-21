@@ -198,11 +198,19 @@ def traverse(steps: Sequence[Step], ctx: Context) -> list[Report]:
 
         # Ce qui n'a pas été posé ne peut pas être constaté. En APPLY la
         # dépendance vient d'être appliquée, donc l'état est observable.
+        # Un prérequis qui a ÉCHOUÉ n'a pas eu lieu, quel que soit le mode :
+        # ce qui en dépend n'est pas évaluable, et le prétendre serait pire que
+        # de l'avouer.
+        en_echec = [
+            nom for nom in getattr(etape, "requires", ())
+            if nom in par_nom and par_nom[nom].state in ("error", BLOCKED, UNKNOWN)
+        ]
         en_attente = [
             nom for nom in getattr(etape, "requires", ())
             if nom in par_nom and _reste_a_faire(par_nom[nom])
         ]
-        if en_attente and not ctx.mode.applies:
+        if en_echec or (en_attente and not ctx.mode.applies):
+            en_attente = en_echec or en_attente
             rapport = Report(
                 etape.name, etape.section, UNKNOWN,
                 "non évaluable tant que " + ", ".join(en_attente) + " n'est pas posé",
@@ -211,7 +219,20 @@ def traverse(steps: Sequence[Step], ctx: Context) -> list[Report]:
             par_nom[etape.name] = rapport
             continue
 
-        resultat = etape.check(ctx)
+        try:
+            resultat = etape.check(ctx)
+        except Exception as exc:  # noqa: BLE001 - filet, volontaire
+            # Une étape qui lève ne doit pas abattre le parcours : en --status
+            # on perdrait le reste du bilan, et c'est justement le moment où
+            # l'on veut tout voir. Le défaut est rapporté sur SA ligne.
+            rapport = Report(
+                etape.name, etape.section, "error",
+                f"{type(exc).__name__}: {exc}".splitlines()[0],
+            )
+            rapports.append(rapport)
+            par_nom[etape.name] = rapport
+            continue
+
         rapport = Report(etape.name, etape.section, resultat.state, resultat.detail)
 
         secretes = [a for a in resultat.actions if a.generates_secret]
