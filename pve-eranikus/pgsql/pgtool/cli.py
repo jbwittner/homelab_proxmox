@@ -471,7 +471,11 @@ def _acheminer(args: argparse.Namespace, runner) -> int:
         # Le conteneur seul sait à quoi une référence correspond : « 20260819 »
         # désigne la plus récente de ce jour, qui peut être le dernier
         # instantané. --plan applique toutes les gardes et n'efface rien.
-        vise = delegue.plan(commande, ct_args)
+        #
+        # Le MÊME environnement que la suppression : résoudre contre un dépôt
+        # et effacer dans un autre désignerait un instantané et en supprimerait
+        # un second.
+        vise = delegue.plan(commande, ct_args, env=os.environ)
         if not vise:
             raise Refus("rien à supprimer")
         if args.plan:
@@ -494,7 +498,10 @@ def _acheminer(args: argparse.Namespace, runner) -> int:
         )
         oui = True
 
-    delegue.hand_over(commande, ct_args, yes=oui)
+    # `pct exec` n'hérite d'aucun environnement : ce qui doit traverser la
+    # frontière est transmis explicitement, sans quoi une variable posée ici
+    # serait perdue en silence et la commande viserait le dépôt par défaut.
+    delegue.hand_over(commande, ct_args, yes=oui, env=os.environ)
     return 0  # inatteignable : hand_over remplace le processus
 
 

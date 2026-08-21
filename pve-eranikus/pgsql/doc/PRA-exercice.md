@@ -291,6 +291,14 @@ qu'on peut se permettre de perdre.
 >
 > Le dépôt temporaire vit dans le CT, il est en `700`, et le démontage
 > l'efface.
+>
+> **La variable traverse la frontière depuis le 21 août 2026.** `pct exec`
+> n'hérite d'aucun environnement : avant, `PG_BACKUP_DEST=… pg restore` tapé
+> **depuis le nœud** visait le dépôt de production sans que rien ne le dise —
+> la commande réussissait, elle faisait autre chose. `pg` la transmet
+> désormais explicitement, et elle seule. Les étapes ci-dessous se jouent
+> depuis `pct enter 200`, où elle a toujours été locale au conteneur ; le
+> geste depuis le nœud fait maintenant ce qu'il annonce.
 
 Les deux garde-fous des autres exercices ne s'appliquent pas ici : on ne crée
 pas de conteneur, et on ne touche pas à `/etc/default/pgbk`.

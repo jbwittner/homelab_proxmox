@@ -104,6 +104,21 @@ def resolve_ctid(
     return int(brut)
 
 
+# Ce qui traverse la frontière du conteneur, et RIEN D'AUTRE.
+#
+# `pct exec` n'hérite d'aucun environnement : une variable posée sur le nœud
+# est silencieusement perdue, et « silencieusement » est le mot qui compte —
+# la commande réussit, elle fait simplement autre chose que ce qu'on a demandé.
+# C'est le garde-fou de l'exercice de bascule qui a révélé le cas :
+# « PG_BACKUP_DEST=/tmp/pra pg restore pra » tapé depuis le nœud visait le
+# dépôt de PRODUCTION.
+#
+# Une liste explicite plutôt que tout l'environnement : recopier le nôtre
+# porterait des secrets du nœud dans le conteneur, et les rendrait visibles
+# dans un `ps`.
+VARIABLES_TRANSMISES = ("PG_BACKUP_DEST",)
+
+
 @dataclass(frozen=True)
 class Delegate:
     """Achemine une commande vers le moteur du conteneur.
@@ -131,12 +146,40 @@ class Delegate:
                 f"{CT_PGBK} absent du CT {self.ctid} — le poser : pg deploy"
             )
 
-    def _argv(self, commande: str, args: Sequence[str], *extra: str) -> list[str]:
+    def _argv(
+        self,
+        commande: str,
+        args: Sequence[str],
+        *extra: str,
+        env: Mapping[str, str] | None = None,
+    ) -> list[str]:
+        """L'argv réel, avec ce qui doit traverser la frontière.
+
+        `env` en préfixe, jamais une chaîne shell : `pct exec` transmet un argv
+        qu'il n'interprète pas, et `env` est le moyen POSIX de poser des
+        variables devant une commande sans passer par un interpréteur.
+        """
+        passage = [
+            f"{nom}={valeur}"
+            for nom in VARIABLES_TRANSMISES
+            # Une valeur vide vaut « non posée ». La transmettre écraserait le
+            # défaut du moteur par une chaîne vide — et un chemin vide résout
+            # en répertoire courant, la faute que ce code traque ailleurs.
+            if (valeur := (env or {}).get(nom))
+        ]
+        prefixe = ["env", *passage] if passage else []
         return [
-            "pct", "exec", str(self.ctid), "--", CT_PGBK, commande, *args, *extra
+            "pct", "exec", str(self.ctid), "--", *prefixe,
+            CT_PGBK, commande, *args, *extra
         ]
 
-    def plan(self, commande: str, args: Sequence[str]) -> str:
+    def plan(
+        self,
+        commande: str,
+        args: Sequence[str],
+        *,
+        env: Mapping[str, str] | None = None,
+    ) -> str:
         """Le nom réellement visé, sans rien effacer.
 
         Contrat du moteur : la sortie standard ne porte QUE ce nom ; le détail
@@ -144,7 +187,8 @@ class Delegate:
         » — une garde a parlé — et son message est déjà passé à l'écran.
         """
         try:
-            res = self.runner.read(*self._argv(commande, args, "--plan"))
+            res = self.runner.read(
+                *self._argv(commande, args, "--plan", env=env))
         except CommandError as exc:
             # Recopié VERBATIM. Le moteur formate déjà ses lignes
             # (« HH:MM:SS [ERROR] … ») ; les repasser par error() les
@@ -157,7 +201,14 @@ class Delegate:
             raise Refus("") from exc
         return res.out
 
-    def hand_over(self, commande: str, args: Sequence[str], *, yes: bool) -> None:
+    def hand_over(
+        self,
+        commande: str,
+        args: Sequence[str],
+        *,
+        yes: bool,
+        env: Mapping[str, str] | None = None,
+    ) -> None:
         """Remplace ce processus par la commande du conteneur.
 
         Le terminal, l'entrée standard et le code de retour passent sans
@@ -166,7 +217,7 @@ class Delegate:
         les perdrait tous les trois.
         """
         extra = ("--yes",) if yes else ()
-        self.runner.exec_replace(*self._argv(commande, args, *extra))
+        self.runner.exec_replace(*self._argv(commande, args, *extra, env=env))
 
 
 # ─── Confirmations, posées là où il y a un terminal ──────────────────────────
