@@ -162,3 +162,43 @@ Ce qui reste vérifiable, et qui doit l'être avant de rendre :
   `--dry-run`, et **chaque cas de refus**. C'est ce qui a trouvé les vrais bugs
   (un `awk -F': *'` qui coupait un `volid` sur son deux-points, un timer armé
   sur un volume incertain).
+
+### Un défaut se reproduit AVANT d'être corrigé
+
+Dès qu'un défaut est constaté — en production, pendant une campagne sur le
+nœud, ou en relisant — l'ordre est **toujours** :
+
+1. écrire le test qui le reproduit, avec la **donnée exacte observée** : la
+   ligne de journal, le code de retour, la sortie brute ;
+2. lancer la suite et **le voir échouer** ;
+3. corriger ;
+4. le revoir passer.
+
+Jamais l'inverse. Un test écrit après le correctif n'a jamais échoué : rien ne
+prouve qu'il discrimine quoi que ce soit. Il peut passer pour une raison sans
+rapport avec le défaut, et donner l'illusion d'une protection le jour où la
+régression revient. **Voir le rouge est la seule preuve que le test parle du bon
+phénomène.**
+
+Constater l'échec après coup, en revenant en arrière avec `git checkout`, est un
+rattrapage — pas l'ordre correct. Le message de commit dit les deux : ce qui a
+été constaté, et que le test a été vu rouge d'abord.
+
+Vaut aussi pour les défauts trouvés en relisant, pas seulement pour ceux
+remontés par l'utilisateur.
+
+### Une campagne sur le nœud trouve ce que les stubs ne voient pas
+
+Les tests automatiques prouvent des décisions de code ; le banc à stubs prouve
+l'idempotence. Ni l'un ni l'autre ne regarde ce que la commande **affiche
+vraiment** ni le code qu'elle rend au shell. D'où une campagne de commandes
+réelles sur le nœud, **non destructive** — une protection se lit dans le refus
+qu'elle produit, jamais en effaçant.
+
+Trois défauts du 21 août 2026, invisibles autrement :
+
+| Constat | Pourquoi ça comptait |
+|---|---|
+| `pg offsite --foo` sortait en **2** | 2 veut dire « transfert en échec » dans la table : une faute de frappe se serait lue comme une panne de copie |
+| `09:20:34 [ERROR] 09:20:34 [ERROR] …` | le refus du moteur, repassé par la journalisation de la façade, était préfixé deux fois |
+| `terminé` au lieu de `terminé en 2s` | la durée avait disparu du verdict : une copie qui passe de 2 s à 40 min ne se voit plus |
