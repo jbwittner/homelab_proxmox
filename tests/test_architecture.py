@@ -206,15 +206,18 @@ def test_pytest_nest_jamais_importe_par_la_production():
         assert "pytest" not in _modules_importes(chemin), chemin.name
 
 
+# Seuls les outils RÉELLEMENT poussés dans un conteneur sont concernés.
+# `fjtool` n'y figure plus : depuis que la base de Forgejo est un locataire du
+# CT 200, aucune commande `fj` ne s'exécute dans le CT 400 — il n'y a donc plus
+# de moteur à y déposer. L'y tester donnerait une garantie sur un déploiement
+# qui n'existe pas.
 @pytest.mark.parametrize(
     "racine,paquet,modules",
     [
         (REPO / "pve-eranikus" / "pgsql", "pgtool",
          "pgtool.cli, pgtool.engine, pgtool.snapshots, pgtool.restore"),
-        (REPO / "pve-eranikus" / "forgejo", "fjtool",
-         "fjtool.cli, fjtool.backup, fjtool.version"),
     ],
-    ids=["pgtool", "fjtool"],
+    ids=["pgtool"],
 )
 def test_la_charge_utile_du_conteneur_simporte_seule(
     tmp_path, racine, paquet, modules

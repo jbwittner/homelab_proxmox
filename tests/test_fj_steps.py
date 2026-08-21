@@ -15,7 +15,6 @@ from core.runner import FakeRunner, Result
 from fjtool.deploy import Options, Paths, contexte
 from fjtool.steps import binaire as V
 from fjtool.steps import controles as C
-from fjtool.steps import postgres as P
 from fjtool.steps import retraits as H
 
 
@@ -31,49 +30,6 @@ def ctx(depot_forgejo):
 
 def _repond(ctx, fragment: str, sortie: str = "", code: int = 0):
     ctx.runner.when(fragment, Result((fragment,), code, sortie, ""))
-
-
-# ─── l'ACL, et la casse qui la décide ────────────────────────────────────────
-
-
-def test_un_datacl_vide_veut_dire_que_public_peut_se_connecter():
-    """C'est le piège de fond : l'ABSENCE d'ACL est le signal, autant que la
-    présence d'un droit. Une restauration rend `datacl` vide, la base remonte,
-    tout a l'air normal — et l'isolation n'est plus là."""
-    assert P.public_peut_se_connecter("") is True
-    assert P.public_peut_se_connecter("   ") is True
-
-
-def test_le_C_majuscule_nest_pas_le_c_minuscule():
-    """`C` = CREATE, `c` = CONNECT. Passer la chaîne en minuscules confond les
-    deux, et un PUBLIC qui peut CRÉER serait rapporté comme un PUBLIC qui peut
-    SE CONNECTER — une fausse alarme qui use la confiance dans le contrôle.
-
-    Défaut constaté sur le CT 200 le 21 août 2026.
-    """
-    assert P.public_peut_se_connecter("=C/postgres") is False
-    assert P.public_peut_se_connecter("=Tc/postgres") is True
-
-
-def test_un_droit_accorde_au_locataire_nest_pas_un_droit_a_public():
-    """Chercher la sous-chaîne « =Tc/ » n'importe où matcherait aussi
-    `forgejo=Tc/postgres` — le droit du locataire sur SA base, qui est
-    exactement ce qu'on veut. Le bénéficiaire doit être VIDE."""
-    acl = "=T/postgres forgejo=CTc/postgres"
-    assert P.public_peut_se_connecter(acl) is False
-
-
-def test_les_entrees_se_separent_par_espaces_ou_virgules():
-    """`array_to_string(datacl, ' ')` rend des espaces, un tableau brut rend
-    des virgules. Ne découper que sur la virgule ne verrait que l'entrée de
-    tête, et manquerait la perte d'isolation dès que l'ordre change."""
-    assert P.public_peut_se_connecter("{forgejo=CTc/postgres,=Tc/postgres}") is True
-    assert P.public_peut_se_connecter("forgejo=CTc/postgres =Tc/postgres") is True
-
-
-def test_l_isolation_posee_est_bien_reconnue():
-    """Ce que `init.sql` produit réellement doit être lu comme « isolé »."""
-    assert P.public_peut_se_connecter("=T/postgres forgejo=CTc/postgres") is False
 
 
 # ─── le proxy de confiance ───────────────────────────────────────────────────
@@ -185,29 +141,15 @@ def test_le_app_ini_du_depot_ferme_bien_les_deux_portes(depot_forgejo):
         assert reglages.get(cle, "").lower() == attendu, f"{cle} dans ct/app.ini"
     assert reglages["ALLOW_LOCALNETWORKS"].lower() == "false"
     assert reglages["DB_TYPE"] == "postgres"
-    assert reglages["HOST"] == "/var/run/postgresql", "socket Unix, jamais TCP"
-
-
-# ─── l'écoute TCP, qui ne doit pas exister ───────────────────────────────────
-
-
-def test_aucune_socket_tcp_est_le_verdict_attendu(ctx):
-    """L'inverse du CT 200, et c'est voulu : ce cluster ne sert qu'un
-    processus du même conteneur."""
-    ctx.runner.when("ss -lntp", Result(("ss",), 0, "", ""))
-    assert C.AucuneSocketTcp().check(ctx).state == "ok"
-
-
-def test_une_socket_tcp_sur_5432_est_une_alarme(ctx):
-    """`SHOW listen_addresses` dirait « vide » alors qu'un socket est ouvert :
-    seul `ss` fait foi, et c'est cette divergence-là qui compte."""
-    ctx.runner.when(
-        "ss -lntp",
-        Result(("ss",), 0, "LISTEN 0 244 0.0.0.0:5432 0.0.0.0:* users:(...)\n", ""),
+    # La base vit dans le CT 200 : TCP vers son IP, et SSL parce que le
+    # transport traverse le LAN.
+    assert reglages["HOST"] == "192.168.1.56:5432"
+    assert reglages["SSL_MODE"] == "require"
+    # Le mot de passe est SUBSTITUÉ à la pose : le gabarit du dépôt doit
+    # porter le marqueur, jamais une valeur.
+    assert reglages["PASSWD"] == "@@DB_PASSWORD@@", (
+        "aucun mot de passe en clair dans le dépôt"
     )
-    resultat = C.AucuneSocketTcp().check(ctx)
-    assert resultat.state == "error"
-    assert "joignable depuis le LAN" in resultat.detail
 
 
 # ─── la somme de contrôle ────────────────────────────────────────────────────

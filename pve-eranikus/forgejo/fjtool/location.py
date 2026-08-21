@@ -1,28 +1,29 @@
-"""Où tourne-t-on, et à qui déléguer.
+"""Où tourne-t-on, et sur quel conteneur.
 
-Le même exécutable sert des deux côtés du montage : sur le nœud il achemine,
-dans le conteneur il travaille. Cette décision gouverne tout le reste, d'où un
-module à part, lisible et testable seul.
+`fj` est un outil de NŒUD, et rien que de nœud. Il ne se pousse pas dans le
+conteneur et n'y délègue aucune commande : tout ce qu'il fait, il le fait par
+`pct exec`.
 
-`pct exec` n'alloue pas de TTY. Une question posée depuis le conteneur ne
-verrait jamais la saisie : les confirmations se posent donc **côté hôte**, là
-où le terminal existe, et le conteneur reçoit `--yes`.
+Ce ne fut pas toujours le cas. Une version antérieure poussait `fjtool` dans le
+CT 400 pour y faire tourner `fj backup` et `fj list` — sauvegarde locale et
+copie hors-site propres au conteneur. Ces commandes ont disparu quand la base
+est devenue un locataire du CT 200 : c'est `pg` qui sauvegarde la base, et
+`vzdump` qui emporte les dépôts. Sans commande à exécuter là-bas, il n'y a plus
+de moteur à y déposer, plus d'arbre d'import à y synchroniser, et plus de
+frontière à faire traverser à des variables d'environnement.
+
+Ce qui reste tient en trois fonctions : dire où l'on est, lire le CTID
+consigné, et refuser proprement.
 """
 
 from __future__ import annotations
 
 import re
-import sys
-from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Mapping
 
-from core.runner import CommandError, Runner
-
-# Chemin du moteur DANS le conteneur. Absolu : le PATH de `pct exec` est
-# minimal et n'inclut pas /usr/local/bin.
-CT_FJ = "/usr/local/bin/fj"
+from core.runner import Runner
 
 # Le CTID est consigné à un seul endroit, écrit par `fj deploy`.
 CONF = Path("/etc/default/fjbk")
@@ -38,8 +39,22 @@ class Refus(RuntimeError):
 
 
 def detect(runner: Runner) -> Where:
-    """Sur la présence de `pct` — un nœud Proxmox l'a, un conteneur Debian non."""
+    """Sur la présence de `pct` — un nœud Proxmox l'a, un conteneur Debian non.
+
+    `fj` n'a plus rien à faire dans un conteneur ; cette fonction sert donc à
+    REFUSER de continuer si on l'y lance par erreur, et non à répartir du
+    travail. Un `pct exec 400 -- fj deploy` échouerait autrement sur un
+    « pct: command not found » qui ne dit pas ce qui se passe.
+    """
     return Where.HOST if runner.which("pct") else Where.CONTAINER
+
+
+def exiger_le_noeud(runner: Runner) -> None:
+    if detect(runner) is Where.CONTAINER:
+        raise Refus(
+            "fj est un outil du NŒUD : il lui faut `pct`. Le jouer depuis le "
+            "dépôt sur pve-eranikus, pas dans le conteneur."
+        )
 
 
 def read_conf(chemin: Path = CONF) -> dict[str, str]:
@@ -70,7 +85,7 @@ def resolve_ctid(
     """`--ctid`, puis l'environnement, puis le fichier.
 
     Sans `defaut`, l'absence est un refus : deviner un CTID, c'est risquer de
-    restaurer la source de vérité dans le mauvais conteneur.
+    déployer la source de vérité dans le mauvais conteneur.
 
     Seul `fj deploy` en passe un, et pour une raison précise : il doit pouvoir
     amorcer une installation vierge, où `/etc/default/fjbk` n'existe pas encore
@@ -88,138 +103,3 @@ def resolve_ctid(
     if not re.fullmatch(r"[0-9]+", brut):
         raise Refus(f"CTID invalide : {brut}")
     return int(brut)
-
-
-# Ce qui traverse la frontière du conteneur, et RIEN D'AUTRE.
-#
-# `pct exec` n'hérite d'aucun environnement : une variable posée sur le nœud
-# est silencieusement perdue — et « silencieusement » est le mot qui compte,
-# la commande réussit, elle fait simplement autre chose que ce qu'on a demandé.
-# Le CT 200 a payé ce défaut pendant son exercice de bascule :
-# « PG_BACKUP_DEST=/tmp/pra pg restore pra » tapé depuis le nœud visait le
-# dépôt de PRODUCTION.
-#
-# Une liste explicite plutôt que tout l'environnement : recopier le nôtre
-# porterait des secrets du nœud dans le conteneur, et les rendrait visibles
-# dans un `ps`.
-VARIABLES_TRANSMISES = ("FJ_BACKUP_DEST",)
-
-
-@dataclass(frozen=True)
-class Delegate:
-    """Achemine une commande vers le moteur du conteneur.
-
-    Tout ce qui peut manquer est constaté AVANT de déléguer, avec un message
-    qui dit quoi faire — plutôt qu'un « command not found » venu de l'autre
-    côté du montage, que rien ne rattache à sa cause.
-    """
-
-    runner: Runner
-    ctid: int
-
-    def preflight(self) -> None:
-        if not self.runner.probe("pct", "config", str(self.ctid)):
-            raise Refus(f"CT {self.ctid} inexistant")
-        etat = self.runner.read("pct", "status", str(self.ctid), check=False)
-        if etat.out.split()[-1:] != ["running"]:
-            raise Refus(
-                f"CT {self.ctid} à l'arrêt — le démarrer : pct start {self.ctid}"
-            )
-        if not self.runner.probe(
-            "pct", "exec", str(self.ctid), "--", "test", "-x", CT_FJ
-        ):
-            raise Refus(
-                f"{CT_FJ} absent du CT {self.ctid} — le poser : fj deploy"
-            )
-
-    def _argv(
-        self,
-        commande: str,
-        args: Sequence[str],
-        *extra: str,
-        env: Mapping[str, str] | None = None,
-    ) -> list[str]:
-        """L'argv réel, avec ce qui doit traverser la frontière.
-
-        `env` en préfixe, jamais une chaîne shell : `pct exec` transmet un argv
-        qu'il n'interprète pas, et `env` est le moyen POSIX de poser des
-        variables devant une commande sans passer par un interpréteur.
-        """
-        passage = [
-            f"{nom}={valeur}"
-            for nom in VARIABLES_TRANSMISES
-            # Une valeur vide vaut « non posée ». La transmettre écraserait le
-            # défaut du moteur par une chaîne vide — et un chemin vide résout
-            # en répertoire courant.
-            if (valeur := (env or {}).get(nom))
-        ]
-        prefixe = ["env", *passage] if passage else []
-        return [
-            "pct", "exec", str(self.ctid), "--", *prefixe,
-            CT_FJ, commande, *args, *extra,
-        ]
-
-    def plan(
-        self,
-        commande: str,
-        args: Sequence[str],
-        *,
-        env: Mapping[str, str] | None = None,
-    ) -> str:
-        """Le nom réellement visé, sans rien effacer.
-
-        Contrat du moteur : la sortie standard ne porte QUE ce nom ; le détail
-        humain part sur la sortie d'erreur.
-        """
-        try:
-            res = self.runner.read(*self._argv(commande, args, "--plan", env=env))
-        except CommandError as exc:
-            # Recopié VERBATIM. Le moteur formate déjà ses lignes
-            # (« HH:MM:SS [ERROR] … ») ; les repasser par error() les
-            # préfixerait une seconde fois, et le journal porterait deux
-            # horodatages sur la même ligne — défaut constaté sur `pg` le
-            # 21 août 2026. La façade achemine, elle ne réécrit pas.
-            sortie = exc.result.stderr.rstrip("\n")
-            if sortie:
-                print(sortie, file=sys.stderr, flush=True)
-            raise Refus("") from exc
-        return res.out
-
-    def hand_over(
-        self,
-        commande: str,
-        args: Sequence[str],
-        *,
-        yes: bool,
-        env: Mapping[str, str] | None = None,
-    ) -> None:
-        """Remplace ce processus par la commande du conteneur.
-
-        Le terminal, l'entrée standard et le code de retour passent sans
-        intermédiaire : c'est ce qui fait que `fj restore` reste interactif et
-        que le code du CT devient celui de la commande.
-        """
-        extra = ("--yes",) if yes else ()
-        self.runner.exec_replace(*self._argv(commande, args, *extra, env=env))
-
-
-# ─── Confirmations, posées là où il y a un terminal ──────────────────────────
-
-
-def confirm(question: str, attendu: str, quoi: str, *, saisie=None) -> None:
-    """Exige la frappe exacte de `attendu`. Toute autre réponse annule.
-
-    Pas de « oui/non » : recopier le nom oblige à le lire, et c'est exactement
-    ce qu'on veut d'une commande qui écrase la base de la source de vérité.
-
-    La fonction de saisie est résolue à l'APPEL et non liée par défaut : une
-    valeur par défaut capturerait `input` au moment de l'import, et toute
-    substitution ultérieure — un banc d'essai, un enrobage — serait ignorée.
-    """
-    lire = saisie if saisie is not None else input
-    try:
-        reponse = lire(f"{question} [tapez {quoi} pour confirmer] : ")
-    except (EOFError, KeyboardInterrupt):
-        raise Refus("annulé") from None
-    if reponse != attendu:
-        raise Refus("annulé")

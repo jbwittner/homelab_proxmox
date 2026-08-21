@@ -8,6 +8,9 @@ arbre d'import (`core`, `proxmox`, `fjtool`), le CTID consigné, `rclone` et
 choix de télécharger sur le nœud : ce qui n'a pas été vérifié ne doit jamais
 toucher le disque du conteneur, donc le trousseau et le vérificateur vivent du
 côté qui télécharge.
+
+Pas de `rclone` : la copie hors-site des sauvegardes appartient au CT 200, qui
+porte la base. Ce service-ci n'a rien à envoyer.
 """
 
 from __future__ import annotations

@@ -12,14 +12,14 @@ section, c'est aussi corriger ces renvois-là.
 - [0. Retrait de l'instance 16.0 existante](#0-retrait-de-linstance-160-existante)
 - [1. Création du conteneur](#1-création-du-conteneur)
 - [2. Déploiement depuis l'hôte : `fj deploy`](#2-déploiement-depuis-lhôte--fj-deploy)
-- [3. PostgreSQL co-localisé](#3-postgresql-co-localisé)
+- [3. La base, locataire du CT 200](#3-la-base-locataire-du-ct-200)
 - [4. La version épinglée](#4-la-version-épinglée)
 - [5. Arborescence et configuration](#5-arborescence-et-configuration)
 - [6. Routage Traefik](#6-routage-traefik)
 - [7. Les secrets](#7-les-secrets)
 - [8. Durcissement git](#8-durcissement-git)
-- [9. Sauvegardes](#9-sauvegardes)
-- [10. Copie hors-site vers GCS](#10-copie-hors-site-vers-gcs)
+- [9. Sauvegardes — ce que ce conteneur ne fait pas](#9-sauvegardes--ce-que-ce-conteneur-ne-fait-pas)
+- [10. Restaurer](#10-restaurer)
 - [11. Miroir sortant vers GitHub](#11-miroir-sortant-vers-github)
 - [12. Vérifications de recette](#12-vérifications-de-recette)
 
@@ -112,16 +112,16 @@ pve-eranikus/forgejo/doc/RUNBOOK.md section 4.'
 pct start 400
 ```
 
-Puis, dans le conteneur, ce que `fj deploy` ne peut pas faire à sa place
-— il lui faut un `python3` et un `sudo` pour entrer :
+Puis `sudo`, seul paquet dont `fj deploy` a besoin pour travailler dedans :
 
 ```bash
 pct exec 400 -- apt-get update
-pct exec 400 -- apt-get install -y python3-minimal sudo
+pct exec 400 -- apt-get install -y sudo
 ```
 
-Le reste — paquets, utilisateur, arborescence, base, binaire, unités — est le
-travail de `fj deploy` ([§ 2](#2-déploiement-depuis-lhôte--fj-deploy)).
+**Pas de `python3` dans ce conteneur** : `fj` est un outil de nœud, rien n'y
+est poussé. Le reste — paquets, utilisateur, arborescence, binaire, unités —
+est le travail de `fj deploy` ([§ 2](#2-déploiement-depuis-lhôte--fj-deploy)).
 
 ### Pourquoi ces valeurs
 
@@ -131,14 +131,13 @@ travail de `fj deploy` ([§ 2](#2-déploiement-depuis-lhôte--fj-deploy)).
 | **non privilégié** | Forgejo exécute des hooks git écrits par les utilisateurs des dépôts. |
 | **`nesting=1`** | Obligatoire sur Debian 13 — voir ci-dessous. |
 | **IP statique** | Une source de vérité ne dépend pas du DHCP. Un bail perdu, et Traefik route vers le vide. |
-| **`onboot=1` + `startup order=1`** | Elle doit être debout **avant** que le reste ne cherche à se réconcilier. `onboot` dit *s'il* démarre, `startup` dit *dans quel ordre* : les deux sont indépendants, et un CT avec un ordre mais sans `onboot` ne démarre jamais. |
-| **2 Go / 2 vCPU** | Une instance à quelques utilisateurs, PostgreSQL compris. Les valeurs de `ct/10-forgejo.conf` sont dimensionnées pour cette RAM : la changer demande d'y toucher aussi. |
+| **`onboot=1` + `startup order=1`** | Elle doit être debout **avant** que le reste ne cherche à se réconcilier. `onboot` dit *s'il* démarre, `startup` dit *dans quel ordre* : les deux sont indépendants, et un CT avec un ordre mais sans `onboot` ne démarre jamais. **Attention** : le CT 200 porte la base, il doit donc avoir un ordre INFÉRIEUR — voir [§ 3](#lordre-de-démarrage-au-boot-du-nœud). |
+| **2 Go / 2 vCPU** | Une instance à quelques utilisateurs. La base tourne ailleurs (CT 200), donc ce conteneur ne porte que Forgejo lui-même. |
 
 ### Le piège du nesting
 
 Sans `nesting=1`, les unités qui montent un tmpfs pour les *credentials*
-systemd — ce que font `forgejo.service` et `fj-backup.service` avec
-`PrivateTmp=true` — échouent en :
+systemd — ce que fait `forgejo.service` avec `PrivateTmp=true` — échouent en :
 
 ```
 Failed to set up credentials: Permission denied
@@ -158,38 +157,43 @@ Un parcours, trois modes, un bilan. L'ordre des étapes est une **donnée**,
 lisible dans [`fjtool/plan.py`](../fjtool/plan.py), et non une suite d'appels.
 
 ```
-A  prérequis du conteneur      protection, nesting, onboot, mp1, mp2, startup
+A  prérequis du conteneur      protection, nesting, onboot, mp1, startup
    ── barrière : le CT redémarre ici, et nulle part ailleurs
-D  outillage du nœud           fj, arbre d'import, CTID consigné, gnupg, rclone
-B  pose dans le conteneur      paquets, utilisateur git, arborescence,
-                               configuration PostgreSQL, app.ini, unités, moteur
+D  outillage du nœud           fj, arbre d'import, CTID consigné, gnupg
+B  pose dans le conteneur      paquets, utilisateur git, arborescence, unité
    ── barrière : systemd relit ses unités
 V  installation binaire        version épinglée, clé, téléchargement vérifié
-P  la base                     base + rôle, ACL, connexion peer éprouvée
+P  la base (CT 200)            mot de passe déposé, connexion ÉPROUVÉE
+B  app.ini                     RENDU, avec le mot de passe substitué
 G  les secrets                 AVANT le premier démarrage
    ── barrière
-B  le service                  forgejo, fj-backup.timer
-G  première sauvegarde
-F  copie hors-site             clé GCP, rclone.conf, drop-in, unités, armement
+B  le service                  forgejo
 H  ce qui ne doit pas être là  orphelins, automatismes de mise à jour
 C  contrôles                   en dernier, sinon ils répondent sur l'état d'avant
 ```
+
+**Ce plan ne sauvegarde rien et ne copie rien hors-site.** La base est un
+locataire du CT 200 ; les dépôts partent par `vzdump`. Voir
+[§ 9](#9-sauvegardes--ce-que-ce-conteneur-ne-fait-pas).
 
 ### Les ordres qui comptent
 
 **Les secrets avant le premier démarrage.** C'est l'ordre le plus important du
 plan. Démarrer d'abord laisserait Forgejo générer ses secrets lui-même et
-tenter de réécrire un `app.ini` qui vient d'un montage en **lecture seule** —
-voir [§ 7](#7-les-secrets).
+tenter de réécrire un `app.ini` qu'il ne peut pas écrire — voir
+[§ 7](#7-les-secrets).
+
+**Le mot de passe avant `app.ini`.** La configuration le CONTIENT : la rendre
+avant que le secret soit déposé produirait un `app.ini` portant le marqueur
+`@@DB_PASSWORD@@` en guise de mot de passe, et un échec d'authentification qui
+ne dirait pas pourquoi.
 
 **L'outillage du nœud avant la section V.** C'est le nœud qui télécharge et qui
 vérifie ; sans `gnupg`, il n'y a rien à vérifier.
 
-**La base avant le service.** Sinon le premier démarrage n'est qu'une suite
-d'échecs de connexion, que quelqu'un lira comme une panne.
-
-**La première sauvegarde avant le hors-site.** Sinon la première copie n'a rien
-à transférer et sort en « environnement inutilisable ».
+**La connexion à la base avant le service.** Sinon le premier démarrage n'est
+qu'une suite d'échecs d'authentification, que quelqu'un lira comme une panne de
+Forgejo alors que c'est une ligne manquante dans le `pg_hba.conf` du CT 200.
 
 **Les contrôles en dernier.** Un contrôle joué au milieu répond sur l'état
 d'*avant* les poses qui le suivent.
@@ -199,106 +203,121 @@ d'*avant* les poses qui le suivent.
 | Geste | Pourquoi il reste manuel |
 |---|---|
 | Créer le conteneur | Geste unique — [§ 1](#1-création-du-conteneur) |
-| Déposer la clé GCP | C'est un secret — [§ 10](#10-copie-hors-site-vers-gcs) |
-| Déposer `ct/RELEASE-KEY.asc` | Un ancrage de confiance s'obtient hors du canal qu'il valide — [§ 4](#la-clé-de-publication) |
-| Renseigner l'IP de Traefik | Elle dépend de la machine ; le déploiement refuse un bilan vert tant que le marqueur `@@TRAEFIK_IP@@` est là |
+| Créer le locataire de la base | Une seule définition de « locataire », et elle est au CT 200 — [§ 3](#3-la-base-locataire-du-ct-200) |
+| Déposer le mot de passe de la base | C'est un secret, il vient d'OpenBao — [§ 3](#créer-le-locataire--sur-le-ct-200-pas-ici) |
+| Épingler la clé de signature | `fj key --fetch`, joué une fois — [§ 4](#la-clé-de-publication) |
 | Résoudre `ct/VERSION` | C'est une décision — [§ 4](#4-la-version-épinglée) |
 
 ---
 
-## 3. PostgreSQL co-localisé
+## 3. La base, locataire du CT 200
 
-### Pourquoi dans ce conteneur, et pas sur le CT 200
+Forgejo n'a pas de base à lui. Il est un **locataire du cluster mutualisé** du
+CT 200, comme n'importe quel autre service du nœud.
 
-Le cluster mutualisé du CT 200 est sur le **même nœud**. L'argument n'est donc
-pas la disponibilité — une panne de `pve-eranikus` emporte les deux de toute
-façon, et prétendre le contraire serait se raconter une histoire. Il est
-ailleurs, et il tient en trois points.
+### Pourquoi mutualisé, alors que le brief disait l'inverse
 
-**Les cycles de vie sont incompatibles.** Le CT 200 relève du tier 200–299 :
-il est posé et mis à jour par un script communautaire. Le CT 400 relève du
-tier 400–499 : sa version est gelée et ne bouge que sur décision. Faire
-dépendre un service dont on gèle la version d'un cluster qui, lui, se met à
-jour tout seul réintroduit par la bande exactement ce que l'épinglage
-empêche.
+Le brief demandait un cluster **co-localisé** dans le CT 400, et son argument
+était celui-ci : mutualiser créerait la chaîne `pve-eranikus → CT 200 →
+Forgejo → ArgoCD → cluster`, où une panne d'un nœud n'hébergeant même pas
+Forgejo bloquerait toute réconciliation GitOps.
 
-**Le rayon de panne.** Le CT 200 sert plusieurs locataires, donc ses fenêtres
-de maintenance sont celles du plus bruyant. Un `pg deploy` malheureux, un
-redémarrage du cluster, la restauration d'un autre locataire : chacun arrête
-la source de vérité d'ArgoCD — au moment précis où c'est elle qui doit
-permettre de réparer le reste.
+**Cet argument est tombé le jour où Forgejo a rejoint `pve-eranikus`.** Les
+deux conteneurs sont sur la même machine : ils tombent ensemble, et prétendre
+le contraire serait se raconter une histoire. Ce qui restait — cycles de vie
+distincts, rayon de panne d'un cluster partagé — ne valait pas un second
+cluster PostgreSQL à maintenir, qui aurait de surcroît été en majeure **17**
+(paquet Debian) face au **18** (PGDG) du CT 200.
 
-**La reprise tient dans un seul conteneur.** Restaurer Forgejo, c'est
-restaurer un CT : la base et les dépôts reviennent ensemble, depuis un dump et
-un vzdump du même objet. Avec la base ailleurs, il faudrait apparier deux
-conteneurs et deux jeux de sauvegardes — dont un mutualisé, qu'on ne peut pas
-restaurer sans toucher aux autres locataires.
+Ce qu'on gagne en mutualisant :
 
-Conséquence assumée : un second cluster PostgreSQL à faire vivre, à sauvegarder
-et à mettre à jour, sur la même machine que le premier. C'est le prix, et il
-est payé sciemment.
+- **une seule majeure PostgreSQL** sur le nœud, donc une seule migration à
+  jouer le jour venu ;
+- **la sauvegarde et le hors-site pour rien** : `pg-backup` dumpe déjà toutes
+  les bases du cluster, `pgbk-offsite` les emporte déjà. Forgejo en hérite
+  sans une ligne de code ;
+- `pg restore forgejo`, `pg verify forgejo`, `pg list` — l'outillage de
+  restauration existe et il est éprouvé.
 
-### Socket Unix, peer, et aucune écoute TCP
+Ce qu'on paie, et il faut le dire : **un mot de passe de base à faire vivre.**
+La connexion passe du socket Unix en `peer` — où le noyau atteste l'identité —
+au TCP en `scram-sha-256`. C'est exactement ce que la co-localisation évitait.
 
-```
-listen_addresses = ''        # ct/10-forgejo.conf
-HOST = /var/run/postgresql   # ct/app.ini, [database]
-```
-
-PostgreSQL n'ouvre **aucun** socket TCP — ni sur le LAN, ni sur la boucle
-locale. Le seul chemin d'entrée est la socket Unix, que seuls les processus de
-ce conteneur peuvent atteindre. Trois conséquences :
-
-1. **Aucun mot de passe de base à faire vivre**, à faire tourner, ni à perdre.
-2. **Le piège documenté pour le CT 200 ne peut pas se produire.** Là-bas,
-   `listen_addresses` doit valoir `'*'` et non une IP explicite : sinon
-   PostgreSQL peut démarrer avant que `eth0` ne porte son adresse, n'ouvrir que
-   la boucle locale, et se déclarer `active (running)` malgré tout. Ici on
-   n'écoute nulle part, donc il n'y a pas de course.
-3. Le contrôle `fj deploy` lit `ss -lntp` et **lève une alarme si une socket
-   TCP apparaît**. C'est l'inverse du contrôle du CT 200, et c'est voulu.
-
-### Le piège de `pg_ident`
-
-Forgejo tourne sous l'utilisateur système **`git`** et se connecte au rôle SQL
-**`forgejo`**. En authentification `peer`, PostgreSQL exige que les deux noms
-soient identiques — sauf si une correspondance le dit. Sans elle :
-
-```
-FATAL:  Peer authentication failed for user "forgejo"
-```
-
-C'est l'échec le plus probable d'un premier démarrage, et le message ne nomme
-**ni** `pg_hba.conf` **ni** `pg_ident.conf`. Les deux fichiers travaillent
-ensemble :
-
-```
-# ct/pg_hba.conf
-local     forgejo     forgejo     peer  map=forgejo
-
-# ct/pg_ident.conf
-# MAPNAME   SYSTEM-USERNAME   PG-USERNAME
-forgejo     git               forgejo
-```
-
-`fj deploy` **éprouve** cette connexion pour de bon — il se connecte sous
-`git`, comme le service le fera — plutôt que de se contenter de lire les
-fichiers. Un fichier juste et non rechargé donnerait un bilan vert et un
-service en échec.
-
-### Rejouer l'initialisation à la main
-
-`ct/init.sql` est **idempotent** : chaque ordre est gardé, rien n'est détruit.
+### Créer le locataire — sur le CT 200, pas ici
 
 ```bash
-pct exec 400 -- sudo -u postgres psql -v ON_ERROR_STOP=1 \
-     -f /etc/forgejo-git/init.sql
+# Sur le nœud
+pve-eranikus/pgsql/pg deploy --tenant forgejo
 ```
 
-C'est aussi le remède quand les ACL ont disparu — voir
-[§ 9](#les-acl-ne-sont-pas-dans-le-dump).
+Le mot de passe s'affiche **une seule fois**. Le ranger dans OpenBao
+immédiatement, puis le déposer dans le CT 400 :
 
----
+```bash
+bao kv get -field=db_password homelab/forgejo \
+  | pct exec 400 -- sh -c 'umask 027 && cat > /etc/forgejo/secrets/db_password'
+pct exec 400 -- chown root:git /etc/forgejo/secrets/db_password
+```
+
+Reste **un** geste manuel, celui que `pg deploy` ne fait pas : ajouter la ligne
+du locataire dans le `pg_hba.conf` du CT 200, **avant** la règle `reject`, puis
+rejouer `pg deploy`. Elle est déjà écrite :
+
+```
+hostssl   forgejo     forgejo       192.168.1.57/32         scram-sha-256
+```
+
+### Ce que `fj deploy` fait, et ne fait pas
+
+Il ne crée **rien** dans la base. Il constate :
+
+  - que `/etc/forgejo/secrets/db_password` existe, n'est pas vide, et est en
+    `0640 root:git` ;
+  - que la connexion **fonctionne réellement**, éprouvée depuis le CT 400 avec
+    ce mot de passe, en SSL.
+
+Deux outils qui créeraient la même base finiraient par la créer de deux façons
+— les ACL d'un côté, pas de l'autre — et personne ne saurait laquelle fait foi.
+
+### Les trois échecs, et ce qu'ils veulent dire
+
+Aucun ne nomme sa cause. Le contrôle rend la première ligne du refus telle
+quelle, parce que c'est elle qui tranche :
+
+| Message | Cause | Remède |
+|---|---|---|
+| `no pg_hba.conf entry for host "192.168.1.57"` | la ligne du locataire manque, ou est après le `reject` | l'ajouter sur le CT 200, puis `pg deploy` |
+| `password authentication failed for user "forgejo"` | le mot de passe déposé n'est pas celui du rôle | le reprendre dans OpenBao, ou `ALTER ROLE` depuis la porte `peer` du CT 200 |
+| `database "forgejo" does not exist` | le locataire n'a jamais été créé | `pg deploy --tenant forgejo` |
+
+### L'ordre de démarrage au boot du nœud
+
+Le CT 200 doit remonter **avant** le CT 400, sinon Forgejo démarre sur une base
+injoignable. Ce n'est pas `forgejo.service` qui le garantit — la base n'est pas
+dans son conteneur, un `After=` local ne dirait rien d'un service distant.
+C'est `startup` de Proxmox :
+
+```bash
+pct config 200 | grep startup     # doit être un ordre INFÉRIEUR
+pct config 400 | grep startup
+```
+
+Forgejo sait attendre sa base et réessaie ; l'ordre évite surtout un journal
+rempli d'échecs au démarrage du nœud, que quelqu'un lirait comme une panne.
+
+### L'isolation de la base
+
+`REVOKE CONNECT … FROM PUBLIC` **n'est pas contrôlé par `fj`**. La base
+appartient au CT 200, et l'outil qui en juge est le sien :
+
+```bash
+pg verify forgejo
+```
+
+Le redoubler ici demanderait d'analyser une sortie faite pour des humains — ce
+que ce dépôt s'interdit — et donnerait deux définitions de « isolé », dont
+l'une finirait par mentir. À jouer après toute restauration : **les ACL ne sont
+ni dans le dump ni dans `globals.sql`**, elles disparaissent en silence.
 
 ## 4. La version épinglée
 
@@ -485,7 +504,10 @@ téléchargement tronqué — mais le remède est le même : rejouer, ne pas for
 
 1. Lire les notes de publication de la version visée. Chercher explicitement
    les migrations de schéma et les changements de configuration.
-2. **Jouer une sauvegarde** : `fj backup`, puis un `vzdump` du CT.
+2. **Jouer les DEUX sauvegardes** : `pg backup` sur le CT 200 pour la
+   base, puis un `vzdump` du CT 400 pour les dépôts et le binaire actuel.
+   C'est le vzdump qui permet de revenir en arrière si la migration de
+   schéma se passe mal — elle est irréversible.
 3. `fj version --resolve` (dans la branche) ou éditer `ct/VERSION` à la main
    (changement de branche — c'est une décision, elle se commite avec sa raison).
 4. `fj deploy --dry-run`, lire ce qui serait fait.
@@ -501,10 +523,9 @@ téléchargement tronqué — mais le remède est le même : rejouer, ne pas for
 | `/opt/forgejo/` | `root:root` | 755 | le binaire — ce que l'unité lance |
 | `/usr/local/bin/forgejo` | — | lien | confort humain uniquement |
 | `/etc/forgejo/` | `root:git` | 750 | `app.ini` |
-| `/etc/forgejo/app.ini` | `root:git` | **640** | configuration, sans secret |
-| `/etc/forgejo/secrets/` | `root:git` | **700** | les quatre secrets |
+| `/etc/forgejo/app.ini` | `root:git` | **640** | configuration **rendue**, mot de passe de la base compris |
+| `/etc/forgejo/secrets/` | `root:git` | **700** | les quatre secrets **et** `db_password` |
 | `/var/lib/forgejo/` | `git:git` | 750 | dépôts, LFS, pièces jointes, sessions |
-| `/var/backups/forgejo/` | — | — | volume `mp2`, les dumps |
 | `/etc/forgejo-git/` | — | **ro** | le dépôt monté |
 
 Les trois attributs comptent **ensemble**. `/etc/forgejo/secrets` en 0755
@@ -512,14 +533,25 @@ laisserait n'importe quel processus du conteneur lire la clé qui chiffre les
 jetons d'accès, et rien ne le signalerait. `fj deploy` vérifie mode et
 propriétaire dans le même aller-retour que l'existence.
 
-### `app.ini` est une COPIE, pas un symlink
+### `app.ini` est RENDU, pas copié
 
-Contrairement aux fichiers de PostgreSQL, qui sont liés au montage et suivent
-un `git pull` seuls. La raison est en [§ 7](#7-les-secrets).
+C'est la seule exception du dépôt, et elle tient à une valeur. `ct/app.ini` est
+un **gabarit** : il porte le marqueur `@@DB_PASSWORD@@`, que `fj deploy`
+remplace par le contenu de `/etc/forgejo/secrets/db_password`. Le fichier servi
+ne peut donc pas exister dans le dépôt — un mot de passe n'y a pas sa place.
 
-Conséquence pratique : **un `git pull` ne suffit pas** à changer `app.ini` dans
-le conteneur, il faut rejouer `fj deploy`. C'est le geste normal de toute
-façon.
+Le rendu se fait **entièrement dans le conteneur**, en un seul `sh -c` dont le
+script est constant : le secret ne traverse ni un argv, ni un fichier du nœud.
+Un `ps` pendant l'opération ne montre rien. Le mot de passe est passé à `awk`
+par `-v`, donc il ne traverse jamais une expression rationnelle — aucun
+caractère ne peut y changer le sens du remplacement.
+
+La comparaison porte sur **l'empreinte du résultat**, pas sur le gabarit. C'est
+ce qui permet à « zéro modification sur un état conforme » de tenir alors même
+que le fichier servi n'est identique à aucun fichier du dépôt.
+
+Conséquence pratique : **un `git pull` ne suffit jamais**, il faut rejouer
+`fj deploy`. C'est le geste normal de toute façon.
 
 ### Le montage est en lecture seule, et c'est vérifié
 
@@ -620,10 +652,14 @@ erreur visible ailleurs que dans quelques lignes de journal.
 C'est pour cela que :
 
 - les **quatre** sont pré-déposés ;
-- `app.ini` est une **copie** et non un symlink, ce qui rend au moins le
-  fichier réparable sans toucher au montage ;
+- `app.ini` est **rendu** dans `/etc/forgejo`, en `root:git`, donc réparable
+  sans toucher au montage ;
 - un contrôle (`journal de forgejo`) relit le journal du service et **cherche
   explicitement** ce symptôme.
+
+Un cinquième fichier vit dans le même répertoire sans être de la même nature :
+`db_password`, le mot de passe du locataire du CT 200. Il n'est pas généré ici
+— c'est `pg deploy --tenant` qui le produit ([§ 3](#3-la-base-locataire-du-ct-200)).
 
 ### Les générer
 
@@ -646,7 +682,7 @@ Ils **s'affichent une fois**, et il faut les ranger dans OpenBao immédiatement.
 > Ce qu'on observe si l'un d'eux a changé de nom : Forgejo **ignore** la clé
 > inconnue, considère le secret comme absent, le génère lui-même, et tente
 > d'écrire `app.ini`. Le symptôme est donc celui du [cas C du
-> PRA](PRA.md#cas-c--secrets-éphémères-sessions-qui-sautent-jetons-cassés) —
+> PRA](PRA.md#cas-c--secrets-éphémères) —
 > et le contrôle `journal de forgejo` de `fj deploy` le rend visible dès le
 > premier `--status`.
 >
@@ -716,173 +752,95 @@ pct exec 400 -- git config --system --list | grep fsck
 
 ---
 
-## 9. Sauvegardes
+## 9. Sauvegardes — ce que ce conteneur ne fait pas
 
-### Deux moitiés, et il faut les deux
+**Ce conteneur ne sauvegarde rien lui-même.** C'est une décision, pas un
+oubli : deux filets pour un même objet, c'est un filet que personne ne
+surveille.
+
+### Deux moitiés, deux propriétaires
 
 ```
-la BASE      → fj-backup.timer, 02:45, dans le CT      → /var/backups/forgejo/
-les DÉPÔTS   → vzdump du CT 400                        → stockage de sauvegarde
+la BASE      → cluster mutualisé du CT 200
+               pg-backup.timer 02:30, puis pgbk-offsite 03:30 vers GCS
+les DÉPÔTS   → vzdump du CT 400
+               planification de sauvegarde du nœud
 ```
 
 **Restaurer Forgejo demande LES DEUX**, pris à des instants proches. Une base
 qui référence un dépôt absent du disque — ou l'inverse — donne une instance qui
 démarre et se comporte n'importe comment.
 
-### Pourquoi les dépôts ne sont pas dans la sauvegarde logique
+### La base : rien à faire, elle est déjà couverte
 
-`/var/lib/forgejo` pèse des dizaines de gigaoctets (dépôts, LFS, pièces
-jointes). Le tarer chaque nuit à côté d'une base de quelques centaines de
-mégaoctets remplirait le volume `mp2` en quelques jours, pour une redondance
-que `vzdump` assure déjà.
+`pg-backup` dumpe **toutes** les bases du cluster, `forgejo` comprise, dès que
+le locataire existe. `pgbk-offsite` les emporte vers GCS. Aucune configuration
+propre à Forgejo n'est nécessaire — c'est le principal bénéfice de la
+mutualisation ([§ 3](#3-la-base-locataire-du-ct-200)).
 
-### Les dépôts partent par vzdump
-
-**À faire une fois** : ajouter le CTID 400 à la sélection de sauvegarde du
-nœud, et à la liste de ce qui part vers GCS Nearline. Tant que ce n'est pas
-fait, **les dépôts n'ont aucune copie**.
-
-Le volume `mp2` porte `backup=0` : les `vzdump` du CT ne l'embarquent donc pas.
-Sans ce drapeau, chaque sauvegarde du conteneur emporterait tous les dumps
-précédents, et doublerait de taille à chaque passage.
-
-### Le manifeste, et à quoi il sert
-
-Chaque instantané porte un `MANIFEST` :
-
-```
-STAMP=20260821-024500
-FORGEJO_VERSION=v15.0.3
-DATABASE=forgejo
-DUMP_BYTES=41943040
-REPOS_COUNT=12
-REPOS_BYTES=987654321
-REPOS_LAST_MTIME=1755000000
-```
-
-Les trois lignes `REPOS_*` décrivent l'arborescence des dépôts **au moment du
-dump**. En reprise, c'est ce qui permet de dire si le `vzdump` retenu
-correspond au dump retenu — au lieu de l'espérer.
-
-Trois nombres et non une empreinte : hacher des dizaines de gigaoctets à 2h45
-coûterait plus que la sauvegarde elle-même, et ces trois-là suffisent à
-répondre « non » quand c'est non, ce qui est le sens utile.
-
-### Atomicité
-
-Tout est écrit dans `<stamp>.part/`, renommé en `<stamp>/` seulement si
-l'exécution va au bout. Un répertoire présent est donc, **par construction**,
-une sauvegarde complète. Une exécution interrompue ne laisse rien qu'une copie
-hors-site pourrait prendre pour bonne.
-
-### Rétention
-
-14 jours par défaut, et **jamais le dernier instantané** — quelle que soit la
-rétention. Une rétention réglée à 0 par erreur, ou une horloge qui saute,
-effacerait sinon tout ce qui reste. Une source de vérité sans aucune
-sauvegarde est le seul état dont on ne se relève pas.
-
-### Les ACL ne sont pas dans le dump
-
-Ni dans le dump, ni dans un `globals.sql`. Après une restauration, `PUBLIC`
-retrouve `CONNECT` sur la base et **l'isolation disparaît en silence** : la
-base remonte, tout a l'air normal.
-
-Le remède est de rejouer `ct/init.sql`, qui est idempotent — c'est le même
-fichier qui pose l'isolation et qui la rétablit, donc il n'existe pas deux
-définitions de ce qu'« isolé » veut dire :
+Vérifier, **sur le nœud** :
 
 ```bash
-pct exec 400 -- sudo -u postgres psql -v ON_ERROR_STOP=1 \
-     -f /etc/forgejo-git/init.sql
-pct exec 400 -- sudo -u postgres psql -c '\l forgejo'   # doit afficher =T/... forgejo=CTc/...
+pg status                    # les trois maillons de la sauvegarde
+pg list                      # forgejo doit figurer dans les instantanés
+pg show 20260821-023000      # le MANIFEST et les fichiers
 ```
 
-`fj deploy` contrôle cette ACL **deux fois** : une fois en section P, une fois
-en fin de parcours après que Forgejo a créé ses tables. Seule la seconde
-répond à la question telle qu'elle se pose vraiment.
+### Les dépôts : à faire une fois
 
----
+**Ajouter le CTID 400 à la sélection de sauvegarde du nœud**, et à ce qui part
+vers GCS Nearline. Tant que ce n'est pas fait, **les dépôts n'ont aucune
+copie** — la base seule ne restaure rien d'utile.
 
-## 10. Copie hors-site vers GCS
+Ce qui est dans le `vzdump` du CT 400 :
 
-### Installation
-
-La clé du compte de service est un **secret** : elle n'est pas dans le dépôt et
-`fj deploy` ne peut pas la fabriquer. Elle se dépose à la main :
-
-```bash
-install -m 600 -D /chemin/vers/cle.json /root/.config/rclone/pgsql-backups.json
-```
-
-Le bucket est celui des sauvegardes PostgreSQL, **réutilisé à dessein** : mêmes
-règles de cycle de vie (Nearline à 30 j, Coldline à 90 j, suppression à 365 j),
-même compte de service aux droits volontairement incomplets. Son nom parle de
-« pgsql » pour des raisons historiques ; le sous-chemin distingue les services :
-
-```
-gs://homelab-pgsql-backups-dc93212a/pve-eranikus/forgejo/<stamp>/
-```
-
-### Droits volontairement incomplets
-
-Le compte de service est `objectViewer` + `objectCreator` : il liste, lit et
-crée, **il n'écrase ni ne supprime**. Un nœud compromis ne peut donc pas
-détruire l'historique.
-
-Conséquences directes, et elles ne sont pas des limitations à contourner :
-
-- le transfert est en `--ignore-existing` ;
-- `core.commands.Rclone` n'expose ni `sync` ni `delete` — cette absence **est**
-  la garantie ;
-- un objet distant qui diverge est **signalé**, jamais réparé d'ici.
-
-### Le piège de l'accès uniforme (UBLA)
-
-Sans `bucket_policy_only = true` dans `rclone.conf`, rclone joint une ACL
-héritée à chaque objet et le transfert échoue :
-
-```
-Error 400: Cannot insert legacy ACL for an object when uniform bucket-level
-access is enabled
-```
-
-Zéro octet écrit. Constaté sur `pve-eranikus` le 20 août 2026. Le drapeau
-`--gcs-bucket-policy-only` est posé **en plus** de la ligne de configuration, à
-dessein : le code doit marcher sur une configuration reconstruite à la va-vite.
-
-### Objet distant divergent
-
-```
-code 3 — au moins un objet distant diverge, intervention humaine
-```
-
-Le compte de service ne peut pas écraser : personne ne peut réparer cela depuis
-le nœud, et surtout pas en boucle. C'est presque toujours un objet partiel
-laissé par un transfert interrompu.
-
-Le remède demande un compte **humain** ayant le droit de supprimer :
-
-```bash
-gcloud storage rm gs://homelab-pgsql-backups-dc93212a/pve-eranikus/forgejo/<stamp>/<fichier>
-fj offsite        # qui le retransférera
-```
-
-### Codes de retour
-
-| Code | Sens |
+| Contenu | Dedans ? |
 |---|---|
-| 0 | tout est en ligne |
-| 1 | environnement inutilisable — rclone, clé, bucket, aucune sauvegarde |
-| 2 | au moins un transfert a échoué (sera retenté demain) |
-| 3 | au moins un objet distant diverge — **intervention humaine** |
-| 130 | interrompu par signal |
+| `/var/lib/forgejo` — dépôts, LFS, pièces jointes | oui |
+| `/etc/forgejo` — `app.ini` **et les secrets** | oui |
+| `/opt/forgejo` — le binaire épinglé | oui |
+| la base | **non** — elle est dans le CT 200 |
 
-Une faute de frappe sort en **1**, pas en 2 : sinon systemd la consignerait
-comme une panne de transfert, et elle se lirait comme telle trois semaines plus
-tard.
+La deuxième ligne mérite d'être remarquée : **le vzdump contient les secrets**.
+C'est une bonne nouvelle en reprise ([§ 7](#7-les-secrets)), et une raison de
+plus pour que le stockage de sauvegarde ne soit pas plus lisible que le
+conteneur.
+
+### Apparier un vzdump et un dump
+
+C'est la seule difficulté de ce découpage. Les deux sauvegardes ne sont pas
+prises au même instant — 02:30 pour la base, l'heure du vzdump pour les
+dépôts — et rien ne les relie automatiquement.
+
+En reprise, retenir **le dump le plus proche du vzdump, et de préférence
+POSTÉRIEUR** : une base plus récente que les dépôts référence au pire quelques
+dépôts absents, ce qui se voit et se corrige. Une base plus ancienne ignore des
+dépôts présents sur le disque, ce qui ne se voit pas — ils sont simplement
+invisibles dans l'interface, et on les croit perdus.
 
 ---
+
+## 10. Restaurer
+
+Trois cas, du plus courant au plus lourd. Le détail par scénario est dans le
+[PRA](PRA.md) ; ce qui suit est la carte.
+
+| Ce qui est perdu | Qui restaure | Où |
+|---|---|---|
+| La base seule | `pg restore forgejo` sur le CT 200 | [PRA § 1](PRA.md#1--la-base-est-perdue-ou-corrompue) |
+| Le conteneur | `pct restore` du vzdump, puis `fj deploy` | [PRA § 3](PRA.md#3--le-conteneur-est-détruit) |
+| Le nœud | tout, depuis GCS et les miroirs | [PRA § 4](PRA.md#4--le-nœud-est-perdu) |
+
+### Après TOUTE restauration de la base
+
+```bash
+pg verify forgejo
+```
+
+**Les ACL ne sont ni dans le dump ni dans `globals.sql`.** Après une
+restauration, `PUBLIC` retrouve `CONNECT` et l'isolation disparaît **en
+silence** : la base remonte, tout a l'air normal. `pg verify` est ce qui le
+dit, et il ne le dit que si on le joue.
 
 ## 11. Miroir sortant vers GitHub
 
@@ -915,21 +873,22 @@ est exactement ce dont ArgoCD a besoin pour repartir.
 ## 12. Vérifications de recette
 
 À jouer après la première pose, et à rejouer après tout changement de version.
-Les six premières sont automatisées — `fj deploy --status` les rend toutes ;
+La plupart sont automatisées — `fj deploy --status` et `fj status` les rendent ;
 les deux dernières demandent une main.
 
 | # | Ce qu'on vérifie | Comment |
 |---|---|---|
 | 1 | La version installée est bien une 15.0.x | `pct exec 400 -- /opt/forgejo/forgejo --version` |
-| 2 | Aucune écoute TCP côté PostgreSQL | `pct exec 400 -- ss -lntp` — rien sur 5432 |
-| 3 | `REVOKE CONNECT` toujours effectif | `pct exec 400 -- sudo -u postgres psql -c '\l forgejo'` |
+| 2 | La connexion à la base fonctionne | `fj status` — le maillon « base (CT 200) » |
+| 3 | `REVOKE CONNECT` toujours effectif | `pg verify forgejo` **sur le CT 200** |
 | 4 | L'inscription publique est refusée | ouvrir `https://forgejo.lan.wittner.tech/user/sign_up` — doit refuser |
 | 5 | Les trois `fsck` sont posés | `pct exec 400 -- git config --system --list \| grep fsck` |
 | 6 | Le montage est en lecture seule vu du CT | `pct exec 400 -- grep forgejo-git /proc/mounts` — doit porter `ro` |
-| 7 | **Le CT remonte seul après redémarrage** | `pct reboot 400`, attendre, puis `fj status` |
-| 8 | **Clone HTTPS et SSH depuis l'extérieur** | voir ci-dessous |
+| 7 | Le mot de passe n'est lisible que par `git` | `pct exec 400 -- stat -c "%a %U:%G" /etc/forgejo/app.ini` — `640 root:git` |
+| 8 | **Le CT remonte seul après redémarrage** | `pct reboot 400`, attendre, puis `fj status` |
+| 9 | **Clone HTTPS et SSH depuis l'extérieur** | voir ci-dessous |
 
-### 7. Le redémarrage
+### 8. Le redémarrage
 
 C'est la vérification qu'aucun contrôle automatique ne peut faire à votre
 place : elle demande de couper pour de bon.
@@ -940,11 +899,15 @@ pct reboot 400
 fj status
 ```
 
-Les quatre maillons doivent répondre, **sans aucune intervention**. Un service
+Les trois maillons doivent répondre, **sans aucune intervention**. Un service
 qui ne remonte pas seul est un service qui ne remontera pas après une coupure
 de courant — c'est-à-dire exactement quand on en a besoin.
 
-### 8. Le clone, dans les deux protocoles
+C'est aussi le seul moment où l'ordre de démarrage se vérifie pour de bon : au
+redémarrage du NŒUD, le CT 200 doit remonter avant le CT 400
+([§ 3](#lordre-de-démarrage-au-boot-du-nœud)).
+
+### 9. Le clone, dans les deux protocoles
 
 Depuis une machine du LAN, **pas depuis le nœud** : le but est d'éprouver le
 chemin complet, Traefik compris.

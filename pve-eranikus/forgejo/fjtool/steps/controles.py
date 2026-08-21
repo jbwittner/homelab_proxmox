@@ -2,35 +2,31 @@
 
 Aucune étape de cette section ne propose d'action. Ce n'est pas un oubli : ces
 contrôles constatent des choses qu'on ne peut pas « poser » — un service qui
-ne répond pas, une socket qui ne devrait pas exister, un journal qui se plaint.
+ne répond pas, une configuration jamais renseignée, un journal qui se plaint.
 Le remède demande de regarder, pas d'appliquer.
 
 CETTE SECTION EST LA LISTE DE VÉRIFICATION DU SERVICE, RENDUE EXÉCUTABLE. Une
 liste dans un document se lit une fois, à l'installation ; celle-ci repasse à
 chaque `fj deploy --status`, c'est-à-dire les jours où quelque chose a bougé.
 
-QUATRE PIÈGES SONT ENCODÉS ICI.
+CE QUI N'EST PAS ICI, ET POURQUOI. L'isolation de la base — le
+`REVOKE CONNECT … FROM PUBLIC` — n'est pas contrôlée ici. La base appartient au
+cluster mutualisé du CT 200, et `pg verify forgejo` est l'outil qui en juge.
+Le redoubler d'ici demanderait d'analyser une sortie faite pour des humains, ce
+que ce dépôt s'interdit, et donnerait deux définitions de « isolé » dont l'une
+finirait par mentir. Voir doc/RUNBOOK.md section 3.
 
-**`SHOW listen_addresses` ment.** Il renvoie ce que la configuration demande,
-pas ce que le processus a obtenu. Ici on attend l'inverse du CT 200 : **zéro**
-socket TCP sur 5432. Une socket qui apparaît veut dire que le drop-in n'a pas
-été relu, et que la base est joignable depuis le LAN.
+DEUX PIÈGES SONT ENCODÉS ICI.
 
-**Forgejo réécrit `app.ini` quand il lui manque un secret.** Le montage étant
-en lecture seule, cette écriture échoue — et Forgejo continue quand même, en
+**Forgejo réécrit `app.ini` quand il lui manque un secret.** Le fichier
+appartenant à root, cette écriture échoue — et Forgejo continue quand même, en
 laissant une ligne dans son journal. Sans contrôle, l'instance tourne avec des
 secrets éphémères qui changent à chaque redémarrage, ce qui invalide toutes
 les sessions et tous les jetons sans que rien ne le dise.
 
-**Les ACL ne survivent pas à une migration de schéma mal comprise.** Le
-`REVOKE CONNECT` est reposé en section P ; on le RELIT en fin de parcours,
-après que Forgejo a créé ses tables — c'est le seul moment qui prouve qu'il
-tient toujours.
-
-**Les deux timers ne vivent pas sur la même machine.** `fj-backup.timer` est
-dans le conteneur, `fjbk-offsite.timer` sur le nœud. Les interroger au mauvais
-endroit répond sur la mauvaise machine, et c'est la confusion la plus facile à
-faire dans tout ce montage.
+**Un joker dans les proxys de confiance annule les journaux d'audit.** Avec
+`*`, n'importe quel client du LAN se déclare n'importe quelle adresse par un
+en-tête `X-Forwarded-For`.
 """
 
 from __future__ import annotations
@@ -39,7 +35,6 @@ from core.commands import Systemd
 from core.converge import Outcome
 from fjtool import version as V
 from fjtool.deploy import CT_APP_INI, CT_BINAIRE
-from fjtool.steps.postgres import BASE, public_peut_se_connecter
 
 # Une configuration qui porte encore un marqueur de gabarit n'a pas été
 # renseignée. Le motif est volontairement improbable dans une vraie valeur.
@@ -57,62 +52,6 @@ class Controle:
 
     def _ct(self, ctx):
         return ctx.runner.for_container(ctx.opts.ctid)
-
-
-class AucuneSocketTcp(Controle):
-    """PostgreSQL ne doit ouvrir AUCUNE socket TCP.
-
-    C'est l'inverse du contrôle du CT 200, et c'est voulu : là-bas le cluster
-    est mutualisé et doit être joignable ; ici il ne sert qu'un processus du
-    même conteneur, donc `listen_addresses = ''`.
-
-    Le contrôle porte sur `ss -lntp`, jamais sur `SHOW listen_addresses` : le
-    second dit ce qui a été demandé, le premier ce qui a été obtenu. Les deux
-    divergent exactement quand ça compte — quand le drop-in n'a pas été relu.
-    """
-
-    name = "aucune écoute TCP (5432)"
-
-    def check(self, ctx) -> Outcome:
-        res = self._ct(ctx).read("ss", "-lntp", check=False)
-        sockets = [ligne for ligne in res.lines if ":5432" in ligne]
-        if not sockets:
-            return Outcome("ok", "aucune socket TCP — socket Unix uniquement")
-        return Outcome(
-            "error",
-            f"{len(sockets)} socket(s) TCP sur 5432 alors que "
-            f"listen_addresses doit être vide — la base est joignable depuis "
-            f"le LAN ; le drop-in a-t-il été relu ? "
-            f"(pct exec {ctx.opts.ctid} -- systemctl restart postgresql)",
-        )
-
-
-class AclApresMigration(Controle):
-    """`REVOKE CONNECT … FROM PUBLIC`, relu APRÈS que le schéma existe.
-
-    Le contrôle de la section P se fait avant que Forgejo n'ait migré son
-    schéma. Celui-ci se fait après, et c'est le seul qui réponde à la question
-    telle qu'elle se pose vraiment : « l'isolation est-elle encore là
-    maintenant que l'application a travaillé ? »
-    """
-
-    name = "ACL (après initialisation)"
-
-    def check(self, ctx) -> Outcome:
-        from core.commands import Psql
-        from core.runner import CommandError
-
-        try:
-            acl = Psql(self._ct(ctx)).database_acl(BASE)
-        except CommandError:
-            return Outcome("error", "base illisible — PostgreSQL répond-il ?")
-        if not public_peut_se_connecter(acl):
-            return Outcome("ok", acl)
-        return Outcome(
-            "error",
-            f"PUBLIC peut se connecter à {BASE} (datacl : {acl or 'vide'}) — "
-            "rejouer fj deploy pour rétablir les REVOKE",
-        )
 
 
 class InscriptionFermee(Controle):
@@ -238,45 +177,6 @@ class JournalForgejo(Controle):
             f"Forgejo n'arrive pas à écrire app.ini — il tourne alors avec des "
             f"secrets éphémères. Vérifier {CT_APP_INI} et les quatre fichiers "
             f"de /etc/forgejo/secrets : « {suspectes[0].strip()[:120]} »",
-        )
-
-
-class TimerSauvegarde(Controle):
-    """`fj-backup.timer`, DANS le conteneur.
-
-    Le nom porte « état » : la section B a une étape qui ARME ce timer, et deux
-    étapes homonymes rendraient une dépendance ambiguë et le bilan illisible.
-    """
-
-    name = "fj-backup.timer (état)"
-
-    def check(self, ctx) -> Outcome:
-        if Systemd(self._ct(ctx)).is_enabled("fj-backup.timer"):
-            return Outcome("ok", "actif")
-        return Outcome(
-            "error",
-            "inactif — la source de vérité reste sans filet, "
-            "aucune sauvegarde ne partira",
-        )
-
-
-class TimerHorsSite(Controle):
-    """`fjbk-offsite.timer`, SUR LE NŒUD."""
-
-    name = "fjbk-offsite.timer (état)"
-
-    def skip_if(self, ctx) -> str | None:
-        if not ctx.opts.do_offsite:
-            return "--no-offsite"
-        return None
-
-    def check(self, ctx) -> Outcome:
-        if Systemd(ctx.runner).is_enabled("fjbk-offsite.timer"):
-            return Outcome("ok", "actif")
-        return Outcome(
-            "error",
-            "inactif — aucune copie hors-site ne partira, "
-            "vérifier la clé GCP et le volume mp2",
         )
 
 

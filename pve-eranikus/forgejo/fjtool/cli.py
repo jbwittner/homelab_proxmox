@@ -1,12 +1,19 @@
 """`fj` — point d'entrée unique de l'outillage Forgejo.
 
-Les sous-commandes sont importées **paresseusement**, au moment de la
-répartition. C'est un invariant du conteneur : il ne reçoit que `core/` et
-`fjtool/`, jamais `proxmox/`, et un import en tête de fichier ferait échouer
-`fj backup` dans le CT sur un `ImportError` sans rapport avec ce qu'on demande.
+**Un outil de NŒUD, et rien d'autre.** Il ne se pousse pas dans le conteneur
+et n'y délègue aucune commande : tout passe par `pct exec`. Quatre verbes, et
+ils se répartissent en deux familles :
 
-UN FICHIER, DEUX RÔLES. Sur le nœud, `fj` achemine ; dans le conteneur, il
-travaille. C'est la présence de `pct` qui tranche, et rien d'autre.
+    deploy, status      parlent au conteneur
+    version, key        ne parlent qu'au dépôt et à internet
+
+Les seconds se jouent donc très bien depuis un poste de développement, au
+moment de commiter un épinglage.
+
+Les sous-commandes restent importées **paresseusement**. Ce n'est plus pour
+protéger un import dans le conteneur — il n'y en a plus — mais pour que
+`fj version` ne charge ni `proxmox` ni le moteur de convergence pour lire un
+fichier de quinze lignes.
 """
 
 from __future__ import annotations
@@ -14,7 +21,6 @@ from __future__ import annotations
 import argparse
 import signal
 import sys
-import time
 from typing import Sequence
 
 from core.log import error
@@ -25,26 +31,16 @@ from core.log import error
 # du dépôt). Forgejo prend le premier.
 CTID_PAR_DEFAUT = 400
 
-# Commandes acheminées vers le moteur du conteneur, avec leurs positionnels.
-DELEGUEES: dict[str, list[tuple[str, bool]]] = {
-    "backup": [],
-    "list": [],
-}
-
-AIDE = {
-    "backup": "déclenche une sauvegarde immédiate (dump + manifeste)",
-    "list": "instantanés disponibles : âge, taille, version",
-}
-
 
 class Parser(argparse.ArgumentParser):
     """Un usage fautif sort en 1, pas en 2.
 
-    `argparse` sort en 2 sur une erreur d'arguments. Dans la table de
-    `fj offsite`, 2 veut dire « au moins un transfert a échoué » : une faute de
-    frappe serait consignée par systemd comme une panne de transfert, et se
-    lirait comme telle trois semaines plus tard. Une erreur d'usage appartient
-    à la famille « environnement inutilisable », soit 1.
+    `argparse` sort en 2 sur une erreur d'arguments, et 2 est un code qui veut
+    dire autre chose dans ce homelab : « au moins un transfert a échoué », dans
+    la table de `pg offsite`. Une faute de frappe consignée par systemd se
+    lirait alors comme une panne de transfert, trois semaines plus tard. Une
+    erreur d'usage appartient à la famille « environnement inutilisable »,
+    soit 1 — c'est aussi ce que font les scripts bash de ce dépôt.
 
     `--help` continue de sortir en 0 : ce n'est pas une erreur.
     """
@@ -226,13 +222,8 @@ def _contexte_deploy(args: argparse.Namespace, *, ctid: int, runner, src):
         opts=Options(
             ctid=ctid,
             do_container=not args.no_container,
-            do_offsite=not args.no_offsite,
             do_install=not args.no_install,
-            do_first_run=not args.no_first_run,
-            force_restart=args.restart,
             admin=args.admin,
-            mp2_storage=args.mp2_storage,
-            mp2_size=args.mp2_size,
         ),
         mode=mode,
         # Deux drapeaux, deux natures de secret : `--secrets` pose les clés de
@@ -299,7 +290,7 @@ def _status(args: argparse.Namespace) -> int:
 
     from core.log import detail, error as journal_erreur, info, step
     from core.runner import Runner
-    from fjtool.deploy import Options
+    from fjtool.deploy import Options, Paths
     from fjtool.etat import alarmes, code_de_sortie, relever, render_etat
     from fjtool.location import Refus, read_conf, resolve_ctid
 
@@ -307,9 +298,12 @@ def _status(args: argparse.Namespace) -> int:
         raise Refus("à lancer en root sur le nœud (pct l'exige)")
 
     ctid = resolve_ctid(flag=args.ctid, env=os.environ, conf=read_conf())
+    # `paths` sert au seul contrôle qui lise le dépôt : la version épinglée,
+    # que l'on compare à celle réellement servie.
     ctx = SimpleNamespace(
         runner=Runner(),
-        opts=Options(ctid=ctid, do_offsite=not args.no_offsite),
+        opts=Options(ctid=ctid),
+        paths=Paths(src=_source_du_depot(args)),
     )
     etat = relever(ctx)
 
@@ -321,69 +315,8 @@ def _status(args: argparse.Namespace) -> int:
     for maillon in alarmes(etat):
         journal_erreur(f"{maillon.nom} : {maillon.detail}")
     if not alarmes(etat):
-        info("les quatre maillons répondent")
+        info("les trois maillons répondent")
     return code_de_sortie(etat)
-
-
-# ─── fj offsite ──────────────────────────────────────────────────────────────
-
-
-def _offsite(args: argparse.Namespace) -> int:
-    import os
-
-    from core.runner import Runner
-    from fjtool.offsite import OffsiteConfig, Preflight, run
-
-    hostname = os.uname().nodename.split(".")[0]
-    try:
-        cfg = OffsiteConfig.from_env(os.environ, hostname=hostname)
-    except Preflight as refus:
-        error(str(refus))
-        return 1
-    return run(cfg, Runner(), dry_run=args.dry_run, now=time.time())
-
-
-# ─── répartition nœud / conteneur ────────────────────────────────────────────
-
-
-def _deleguer(args: argparse.Namespace) -> int:
-    """Un seul fichier, deux rôles, et c'est la présence de `pct` qui tranche."""
-    from core.runner import Runner
-    from fjtool.location import Where, detect
-
-    runner = Runner()
-    if detect(runner) is Where.CONTAINER:
-        return _moteur(args, runner)
-    return _acheminer(args, runner)
-
-
-def _moteur(args: argparse.Namespace, runner) -> int:
-    """Mode moteur : on est DANS le conteneur, on fait le travail."""
-    import os
-
-    from fjtool.backup import Config, executer, instantanes, rendre_liste
-    from core.log import detail
-
-    cfg = Config.from_env(os.environ)
-    if args.commande == "backup":
-        return executer(cfg, runner)
-    if args.commande == "list":
-        detail(rendre_liste(cfg.dest))
-        return 0 if instantanes(cfg.dest) else 1
-    raise AssertionError(f"commande non acheminée : {args.commande}")
-
-
-def _acheminer(args: argparse.Namespace, runner) -> int:
-    """Mode façade : on est sur le NŒUD, on passe la main au conteneur."""
-    import os
-
-    from fjtool.location import Delegate, read_conf, resolve_ctid
-
-    ctid = resolve_ctid(flag=args.ctid, env=os.environ, conf=read_conf())
-    delegate = Delegate(runner, ctid)
-    delegate.preflight()
-    delegate.hand_over(args.commande, [], yes=True, env=os.environ)
-    return 0  # pragma: no cover - exec_replace ne rend pas la main
 
 
 # ─── le parseur ──────────────────────────────────────────────────────────────
@@ -425,22 +358,12 @@ def construire_parseur() -> Parser:
                      help="annonce ce qui serait fait, effets compris")
     dep.add_argument("--no-container", action="store_true",
                      help="ne touche pas au CT")
-    dep.add_argument("--no-offsite", action="store_true",
-                     help="saute la copie hors-site")
     dep.add_argument("--no-install", action="store_true",
                      help="n'installe aucun paquet ni binaire")
-    dep.add_argument("--no-first-run", action="store_true",
-                     help="ne déclenche pas la première sauvegarde")
-    dep.add_argument("--restart", action="store_true",
-                     help="force un restart de PostgreSQL au lieu d'un reload")
     dep.add_argument("--secrets", action="store_true",
                      help="autorise la génération des secrets manquants")
     dep.add_argument("--admin", metavar="NOM",
                      help="crée un compte d'administration (affiché une fois)")
-    dep.add_argument("--mp2-storage", default="data",
-                     help="stockage du volume de sauvegarde (défaut : data)")
-    dep.add_argument("--mp2-size", type=int, default=20,
-                     help="taille en Go à la CRÉATION du volume (défaut : 20)")
     dep.set_defaults(fonction=_deploy)
 
     # -- version ---------------------------------------------------------
@@ -466,27 +389,8 @@ def construire_parseur() -> Parser:
     # -- status ----------------------------------------------------------
     sta = sous.add_parser("status", help="les maillons du montage, ensemble")
     ctid_local(sta)
-    sta.add_argument("--no-offsite", action="store_true",
-                     help="ne regarde pas le hors-site")
+    sta.add_argument("--src", help="racine du service dans le dépôt")
     sta.set_defaults(fonction=_status)
-
-    # -- offsite ---------------------------------------------------------
-    off = sous.add_parser("offsite", help="copie hors-site vers GCS (nœud)")
-    ctid_local(off)
-    off.add_argument("--dry-run", action="store_true",
-                     help="ce qui partirait, sans rien transférer")
-    off.set_defaults(fonction=_offsite)
-
-    # -- commandes acheminées vers le conteneur --------------------------
-    for nom, positionnels in DELEGUEES.items():
-        p = sous.add_parser(nom, help=AIDE[nom])
-        ctid_local(p)
-        for arg, facultatif in positionnels:
-            p.add_argument(arg, nargs="?" if facultatif else None)
-        # Reçu du nœud, jamais tapé à la main : `pct exec` n'alloue pas de TTY,
-        # les confirmations se posent côté hôte.
-        p.add_argument("--yes", action="store_true", help=argparse.SUPPRESS)
-        p.set_defaults(fonction=_deleguer)
 
     return parseur
 

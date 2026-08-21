@@ -19,13 +19,17 @@ Ce fichier ne porte que **ce qu'on tape**. Le reste est dans `doc/` :
 | IP | 192.168.1.57/24, passerelle 192.168.1.254 |
 | Nœud | `pve-eranikus` (192.168.1.11), Debian 13 |
 | Forgejo | branche **15.0 LTS**, fin de support **15 juillet 2027** — version exacte dans [`ct/VERSION`](ct/VERSION) |
-| PostgreSQL | **co-localisé dans le CT**, socket Unix + peer, aucune écoute TCP |
+| Base de données | **locataire du CT 200** (`192.168.1.56`), TCP + SSL + scram |
 | Ingress | Traefik (CT 201) → `forgejo.lan.wittner.tech`, SSH en 2222 |
 | Base système | 32 Go minimum |
-| Sauvegardes | `mp2` → `/var/backups/forgejo`, 20 Go, 14 j — **base seulement** |
-| Dépôts | par `vzdump` du CT — **pas** dans la sauvegarde logique |
-| Hors-site | `gs://homelab-pgsql-backups-dc93212a/pve-eranikus/forgejo/`, 03:50 |
+| Sauvegarde de la base | par le CT 200 — `pg backup`, `pg list`, `pgbk-offsite` |
+| Sauvegarde des dépôts | par `vzdump` du CT 400 |
 | Dépôt monté | `/root/homelab_proxmox/pve-eranikus/forgejo/ct` → `/etc/forgejo-git` (ro) |
+
+> **Ce conteneur ne sauvegarde rien lui-même**, et c'est voulu. Sa base est un
+> locataire du cluster mutualisé : elle est sauvegardée et copiée hors-site par
+> [l'outillage du CT 200](../pgsql/README.md). Ses dépôts partent par `vzdump`.
+> Deux filets pour un même objet, c'est un filet que personne ne surveille.
 
 > **Ce conteneur ne se met jamais à jour tout seul.** Ni par timer, ni par
 > script communautaire. Passer en 16 ou 17 est une décision qui se prend en
@@ -47,11 +51,10 @@ L'enchaîner à chaque `git pull` est le geste normal : les scripts, les unités
 et `app.ini` sont des **copies**, pas des symlinks, et ne suivent pas le
 `git pull` seuls.
 
-Elle installe les paquets manquants, pose les points de montage — dont le
-volume des sauvegardes —, crée l'utilisateur `git` et l'arborescence, pose la
-configuration de PostgreSQL, crée la base et son rôle, **télécharge et vérifie
-le binaire épinglé**, dépose les secrets, arme les unités, déclenche la
-première sauvegarde et la première copie hors-site. Détail :
+Elle installe les paquets manquants, pose le point de montage du dépôt, crée
+l'utilisateur `git` et l'arborescence, **télécharge et vérifie le binaire
+épinglé**, éprouve la connexion à la base du CT 200, rend `app.ini`, dépose les
+secrets et arme le service. Détail :
 [runbook § 2](doc/RUNBOOK.md#2-déploiement-depuis-lhôte--fj-deploy).
 
 ```bash
@@ -60,11 +63,8 @@ fj deploy --dry-run       # annonce ce qui serait fait, effets compris
 fj deploy --ctid 401      # cible un autre conteneur, et le consigne
 fj deploy --secrets       # autorise la génération des secrets manquants
 fj deploy --admin jbwittner   # crée un compte d'administration
-fj deploy --restart       # force un restart de PostgreSQL au lieu d'un reload
 fj deploy --no-container  # ne touche pas au CT
-fj deploy --no-offsite    # saute la copie hors-site
 fj deploy --no-install    # n'installe ni paquet ni binaire (nœud sans réseau)
-fj deploy --no-first-run  # ne déclenche pas la première sauvegarde
 ```
 
 Sur un CT déjà conforme, `--dry-run` doit annoncer **zéro modification**.
@@ -85,12 +85,14 @@ sont bien dans le `PATH` du nœud.
 | Geste | Pourquoi il reste à part |
 |---|---|
 | Créer le conteneur | Geste unique — [§ 1](doc/RUNBOOK.md#1-création-du-conteneur) |
-| Déposer la clé du compte de service GCP | C'est un secret — [§ 10](doc/RUNBOOK.md#10-copie-hors-site-vers-gcs) |
+| Créer le locataire de la base | C'est `pg deploy --tenant forgejo`, sur le CT 200 — [§ 3](doc/RUNBOOK.md#3-la-base-locataire-du-ct-200) |
 | Récupérer la clé de signature Forgejo | C'est `fj key --fetch`, joué une fois — [§ 4](doc/RUNBOOK.md#la-clé-de-publication) |
 
-Le dernier n'est pas une corvée : **récupérer et vérifier sont deux gestes**,
-et c'est ce qui permet à `fj deploy` de n'interroger personne. Il compare la
-clé du dépôt à l'empreinte du dépôt, et refuse si elle a changé.
+Les deux derniers ne sont pas des corvées. **Créer la base ailleurs qu'ici est
+la seule façon de n'avoir qu'une définition de ce qu'est un locataire** : deux
+outils qui créeraient la même base finiraient par la créer de deux façons, dont
+une sans ses ACL. Et pour la clé, **récupérer et vérifier sont deux gestes**,
+ce qui permet à `fj deploy` de n'interroger personne.
 
 ## La version épinglée
 
@@ -140,66 +142,64 @@ bonne chose au mauvais endroit.
 Tout se tape **sur le nœud**, pas dans le CT.
 
 ```bash
-fj status                          # les maillons du montage — À COMMENCER PAR LÀ
-fj list                            # instantanés : âge, taille, version
-fj backup                          # sauvegarde immédiate
-fj offsite --dry-run               # ce qui partirait hors-site
-fj offsite                         # ce que fait le timer de 03:50
+fj status         # les maillons du montage — À COMMENCER PAR LÀ
+fj version        # ce qui est épinglé
+fj key            # la clé de signature épinglée
 ```
 
 **`fj status` est la commande à taper quand on se demande si tout va bien.**
-Elle regarde ensemble les quatre maillons qui peuvent se rompre en silence :
-le service, la sauvegarde locale, le timer qui la déclenche dans le CT, et la
-copie hors-site armée sur le nœud. `fj deploy --status` répond à une autre
-question — celle de savoir si les fichiers sont en place.
+Elle regarde ensemble les trois maillons qui peuvent se rompre en silence : le
+service, la version réellement servie, et la base du CT 200 **vue depuis ce
+conteneur-ci**. Ce dernier point compte : la base peut très bien répondre au
+CT 200 lui-même et refuser celui-ci, faute d'une ligne dans son `pg_hba.conf`.
 
-Elle sort en 1 dès qu'une alarme est levée, et **un maillon non constaté est
-une alarme**, pas un silence.
+`fj deploy --status` répond à une autre question — celle de savoir si les
+fichiers sont en place. Et `fj status` sort en 1 dès qu'une alarme est levée :
+**un maillon non constaté est une alarme**, pas un silence.
+
+La sauvegarde, elle, se regarde **sur le CT 200** :
+
+```bash
+pg status                          # les trois maillons de la sauvegarde
+pg list                            # instantanés : âge, taille, bases
+pg verify forgejo                  # ACL et propriétaires de NOTRE base
+```
 
 Journaux :
 
 ```bash
 pct exec 400 -- journalctl -u forgejo -n 50 --no-pager      # le service
-pct exec 400 -- journalctl -u fj-backup -n 50 --no-pager    # sauvegarde locale
-journalctl -u fjbk-offsite -n 50 --no-pager                 # copie hors-site
-journalctl -u fjbk-offsite -p warning                       # anomalies seules
+pct exec 400 -- journalctl -u forgejo -p warning            # anomalies seules
+pct exec 200 -- journalctl -u pg-backup -n 50 --no-pager    # sauvegarde de la base
 ```
 
 ## Où va chaque fichier
 
-Ce répertoire porte des fichiers pour **deux machines**, et le découpage le dit.
-**`ct/` est la charge utile du montage** — lui seul est monté en
-`/etc/forgejo-git`, en lecture seule. **`host/`** est ce qui s'installe sur le
-nœud, et que le conteneur ne voit pas : ni le nom du bucket, ni le chemin de la
-clé GCS.
+**`fj` est un outil de NŒUD, et rien d'autre.** Il n'y a plus de `host/` dans
+ce répertoire, et rien n'est poussé dans le conteneur : depuis que la base est
+un locataire du CT 200, aucune commande `fj` ne s'exécute là-bas. Tout passe
+par `pct exec`.
 
-| Fichier | Tourne sur | Installé en |
+**`ct/` est la charge utile du montage** — lui seul est monté en
+`/etc/forgejo-git`, en lecture seule.
+
+| Fichier | Lu par | Installé en |
 |---|---|---|
-| `fj`, `fjtool/` + `lib/` (racine du dépôt) | **hôte** | `/usr/local/sbin/fj`, arbre d'import en `/usr/local/lib/fjtool` |
-| `fjtool/` + `lib/core/` poussés par `pct push` | **CT 400** | `/usr/local/lib/fjtool/`, lanceur en `/usr/local/bin/fj` |
-| `ct/app.ini` | **CT 400** | **copie** en `/etc/forgejo/app.ini` (0640 root:git) |
-| `ct/VERSION`, `ct/RELEASE-KEY.asc`, `ct/RELEASE-KEY.fingerprint` | lus par l'**hôte** | rien — ils gouvernent ce qui est téléchargé, et ce qui est refusé |
-| `ct/forgejo.service` | **CT 400** | `/etc/systemd/system/` du CT |
-| `ct/fj-backup.service` / `.timer` | **CT 400** | `/etc/systemd/system/` du CT |
-| `ct/10-forgejo.conf`, `ct/pg_hba.conf`, `ct/pg_ident.conf` | **CT 400** | symlinks depuis `/etc/forgejo-git` |
-| `ct/init.sql` | **CT 400** | joué par `fj deploy` |
-| `host/fjbk-offsite.service` / `.timer` | **hôte** | `/etc/systemd/system/` de l'hôte |
+| `fj`, `fjtool/` + `lib/` (racine du dépôt) | **nœud** | `/usr/local/sbin/fj`, arbre d'import en `/usr/local/lib/fjtool` |
+| `ct/app.ini` | **CT 400** | **rendu** en `/etc/forgejo/app.ini` (0640 root:git) |
+| `ct/forgejo.service` | **CT 400** | copie en `/etc/systemd/system/` |
+| `ct/VERSION` | **nœud** | rien — il gouverne ce qui est téléchargé |
+| `ct/RELEASE-KEY.asc`, `ct/RELEASE-KEY.fingerprint` | **nœud** | rien — ils gouvernent ce qui est refusé |
 
 Les chemins **`/etc/forgejo-git/<fichier>`** sont stables : c'est le contrat du
-montage. `app.ini` est une **copie** et non un symlink, contrairement aux
-fichiers de PostgreSQL — Forgejo réécrit sa configuration s'il lui manque un
-secret, et cette écriture sur un montage en lecture seule échoue d'une façon
-illisible ([runbook § 7](doc/RUNBOOK.md#7-les-secrets)).
+montage.
 
-Le volume de sauvegarde porte **deux noms selon le point de vue**, et c'est la
-confusion la plus facile à faire ici :
-
-| Vu du CT | Vu de l'hôte |
-|---|---|
-| `/var/backups/forgejo` | `/data/subvol-400-disk-0` |
-
-`fj backup` écrit dans le premier, `fj offsite` lit le second. Ce sont les
-mêmes octets.
+**`app.ini` est RENDU, pas copié.** C'est la seule exception du dépôt, et elle
+tient à une valeur : le mot de passe de la base, substitué au marqueur
+`@@DB_PASSWORD@@` depuis `/etc/forgejo/secrets/db_password`. Le fichier servi
+ne peut donc pas exister dans le dépôt. Conséquence pratique : **un `git pull`
+ne suffit jamais**, il faut rejouer `fj deploy`
+([runbook § 5](doc/RUNBOOK.md#5-arborescence-et-configuration)).
 
 ## En cas de pépin
 
@@ -207,20 +207,19 @@ mêmes octets.
 [PRA](doc/PRA.md#trouver-son-scénario) : il commence par une table de
 diagnostic et donne une procédure complète par scénario.
 
-Avant de chercher : **`fj status`** dit lequel des quatre maillons est rompu.
+Avant de chercher : **`fj status`** dit lequel des trois maillons est rompu.
 
 | Symptôme | Où regarder |
 |---|---|
 | `fj deploy` refuse : « ne porte aucune version » | `ct/VERSION` non résolu, [§ 4](doc/RUNBOOK.md#4-la-version-épinglée) |
-| `fj deploy` refuse : « clé de publication absente » | [§ 4](doc/RUNBOOK.md#la-clé-de-publication) — geste manuel, une fois |
+| `fj key` refuse : la clé ne correspond plus | **ne rien installer**, [§ 4](doc/RUNBOOK.md#quand-la-vérification-échoue) |
 | `signature GPG NON vérifiée` | **ne rien installer**, [§ 4](doc/RUNBOOK.md#quand-la-vérification-échoue) |
-| `Peer authentication failed for user "forgejo"` | `pg_ident.conf`, [§ 3](doc/RUNBOOK.md#3-postgresql-co-localisé) |
+| `no pg_hba.conf entry for host "192.168.1.57"` | ligne manquante sur le CT 200, [§ 3](doc/RUNBOOK.md#3-la-base-locataire-du-ct-200) |
+| `password authentication failed for user "forgejo"` | mot de passe déposé ≠ celui du rôle, [§ 3](doc/RUNBOOK.md#3-la-base-locataire-du-ct-200) |
+| `database "forgejo" does not exist` | locataire jamais créé, [§ 3](doc/RUNBOOK.md#3-la-base-locataire-du-ct-200) |
 | Forgejo tourne mais les sessions sautent | secrets non déposés, [§ 7](doc/RUNBOOK.md#7-les-secrets) |
 | Le clone SSH est refusé | routeur TCP Traefik, [§ 6](doc/RUNBOOK.md#6-routage-traefik) |
-| Une socket TCP apparaît sur 5432 | drop-in non relu, [§ 3](doc/RUNBOOK.md#3-postgresql-co-localisé) |
-| Après restauration, isolation disparue | les ACL ne sont pas dans le dump, [§ 9](doc/RUNBOOK.md#les-acl-ne-sont-pas-dans-le-dump) |
-| `fjbk-offsite` sort en code 3 | objet distant divergent, [§ 10](doc/RUNBOOK.md#objet-distant-divergent) |
-| `fjbk-offsite.timer` reste inactif | le bilan de `fj deploy` nomme le prérequis manquant |
+| Après restauration, isolation disparue | les ACL ne sont pas dans le dump — `pg verify forgejo` sur le CT 200 |
 | CT en `243/CREDENTIALS` | nesting, [§ 1](doc/RUNBOOK.md#le-piège-du-nesting) |
 
 ## Reste à faire
@@ -243,9 +242,12 @@ Avant de chercher : **`fj status`** dit lequel des quatre maillons est rompu.
       minimum les manifests ArgoCD) — [§ 11](doc/RUNBOOK.md#11-miroir-sortant-vers-github).
 - [ ] **Ajouter le CTID 400 aux sauvegardes vzdump** sélectionnées vers GCS
       Nearline — les dépôts n'ont pas d'autre copie
-      ([§ 9](doc/RUNBOOK.md#les-dépôts-partent-par-vzdump)).
-- [ ] **Retirer la ligne `forgejo` de `pg_hba.conf` du CT 200** : la base est
-      co-localisée, ce locataire n'existera jamais là-bas.
+      ([§ 9](doc/RUNBOOK.md#les-dépôts--à-faire-une-fois)).
+- [ ] **Créer le locataire sur le CT 200** : `pg deploy --tenant forgejo`,
+      ranger le mot de passe dans OpenBao, le déposer dans le CT 400, et
+      vérifier que la ligne `hostssl` est bien **avant** le `reject`
+      ([§ 3](doc/RUNBOOK.md#3-la-base-locataire-du-ct-200)). Sans ça,
+      `fj deploy` refuse au maillon « connexion à la base ».
 - [ ] **Jouer le premier exercice de PRA**
       ([doc/PRA-exercice.md](doc/PRA-exercice.md)) — tant qu'il ne l'a pas été,
       le RTO est inconnu et le plan n'est pas prouvé.

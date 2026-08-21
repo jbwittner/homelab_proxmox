@@ -34,10 +34,8 @@ def _analyser(*argv):
         ("deploy", "--ctid", "400"),
         ("--ctid", "400", "deploy"),
         ("status", "--ctid", "400"),
-        ("offsite", "--ctid", "400"),
-        ("backup", "--ctid", "400"),
-        ("list", "--ctid", "400"),
         ("version", "--ctid", "400"),
+        ("key", "--ctid", "400"),
     ],
 )
 def test_le_ctid_est_accepte_avant_comme_apres_la_sous_commande(argv):
@@ -162,19 +160,13 @@ def test_les_drapeaux_no_desactivent_une_pose_pas_un_controle(depot_forgejo):
     d'étapes."""
     from fjtool import plan
 
-    ctx = _contexte(depot_forgejo, "--no-install", "--no-offsite")
+    ctx = _contexte(depot_forgejo, "--no-install", "--no-container")
     assert ctx.opts.do_install is False
-    assert ctx.opts.do_offsite is False
+    assert ctx.opts.do_container is False
     # La liste d'étapes ne change pas : ce sont les étapes qui se déclarent
     # sautées, et le bilan les compte.
     complet = _contexte(depot_forgejo)
     assert len(plan.etapes(ctx)) == len(plan.etapes(complet))
-
-
-def test_le_stockage_du_volume_se_nomme(depot_forgejo):
-    ctx = _contexte(depot_forgejo, "--mp2-storage", "nvme", "--mp2-size", "40")
-    assert ctx.opts.mp2_storage == "nvme"
-    assert ctx.opts.mp2_size == 40
 
 
 # ─── la racine du dépôt ──────────────────────────────────────────────────────
@@ -230,39 +222,32 @@ def test_une_etape_bloquee_ne_fait_pas_echouer_le_deploiement():
     assert cli._code_de_sortie([Report("a", "G", BLOCKED)]) == 0
 
 
-# ─── ce qui traverse la frontière du conteneur ───────────────────────────────
+# ─── fj est un outil de NŒUD, et rien d'autre ────────────────────────────────
 
 
-def test_seule_une_liste_explicite_traverse_pct_exec():
-    """Recopier tout l'environnement porterait des secrets du nœud dans le
-    conteneur, et les rendrait visibles dans un `ps`."""
-    from fjtool.location import VARIABLES_TRANSMISES
-
-    assert VARIABLES_TRANSMISES == ("FJ_BACKUP_DEST",)
-
-
-def test_une_variable_vide_ne_traverse_pas():
-    """Une valeur vide vaut « non posée ». La transmettre écraserait le défaut
-    du moteur par une chaîne vide — et un chemin vide résout en répertoire
-    courant."""
+def test_fj_refuse_de_tourner_dans_un_conteneur():
+    """Aucune commande ne s'exécute plus dans le CT 400 depuis que la base est
+    un locataire du CT 200. Lancé là-bas par habitude, `fj` doit le DIRE —
+    sans ce refus, il échouerait sur un « pct: command not found » qui ne
+    rattache rien à sa cause."""
     from core.runner import FakeRunner
-    from fjtool.location import Delegate
+    from fjtool.location import Refus, exiger_le_noeud
 
-    argv = Delegate(FakeRunner(), 400)._argv(
-        "backup", [], env={"FJ_BACKUP_DEST": ""}
-    )
-    assert "env" not in argv
+    class SansPct(FakeRunner):
+        def which(self, binary):
+            return None
+
+    with pytest.raises(Refus) as capture:
+        exiger_le_noeud(SansPct())
+    assert "outil du NŒUD" in str(capture.value)
 
 
-def test_une_variable_posee_traverse_par_env():
-    """`env` en préfixe, jamais une chaîne shell : `pct exec` transmet un argv
-    qu'il n'interprète pas."""
+def test_fj_accepte_de_tourner_sur_le_noeud():
     from core.runner import FakeRunner
-    from fjtool.location import Delegate
+    from fjtool.location import exiger_le_noeud
 
-    argv = Delegate(FakeRunner(), 400)._argv(
-        "backup", [], env={"FJ_BACKUP_DEST": "/tmp/pra"}
-    )
-    assert argv[:4] == ["pct", "exec", "400", "--"]
-    assert "env" in argv
-    assert "FJ_BACKUP_DEST=/tmp/pra" in argv
+    class AvecPct(FakeRunner):
+        def which(self, binary):
+            return "/usr/sbin/pct"
+
+    exiger_le_noeud(AvecPct())  # ne lève pas

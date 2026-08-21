@@ -1,181 +1,164 @@
-"""Section P — la base de Forgejo, dans le cluster CO-LOCALISÉ du CT.
+"""Section P — la base de Forgejo, LOCATAIRE DU CLUSTER MUTUALISÉ (CT 200).
 
-POURQUOI CO-LOCALISÉ, ET PAS SUR LE CLUSTER MUTUALISÉ DU CT 200. Les deux sont
-sur le même nœud : l'argument n'est donc pas la disponibilité. Il est que les
-CYCLES DE VIE sont incompatibles — le CT 200 se met à jour par script
-communautaire, le CT 400 a sa version gelée — et que le RAYON DE PANNE d'un
-cluster mutualisé est celui de son locataire le plus bruyant. Un redémarrage
-décidé pour un autre service arrêterait la source de vérité d'ArgoCD au moment
-où c'est elle qui doit permettre de réparer le reste. Voir doc/RUNBOOK.md
-section 3.
+CETTE SECTION NE CRÉE RIEN, et c'est le point. La base et le rôle sont créés
+par l'outillage du CT 200 :
 
-Deux étapes, et la seconde n'est pas un doublon de la première.
+    pve-eranikus/pgsql/pg deploy --tenant forgejo
 
-`BaseEtRole` crée ce qui manque, en jouant `init.sql` depuis le montage.
+Ce déploiement-ci ne fait que **constater** que le locataire existe et qu'il
+répond depuis le CT 400. Deux outils qui créeraient la même base de deux
+façons finiraient par la créer de deux façons différentes — les ACL d'un côté,
+pas de l'autre — et personne ne saurait laquelle fait foi.
 
-`AclConnect` vérifie que `REVOKE CONNECT … FROM PUBLIC` est TOUJOURS en
-vigueur — et c'est le contrôle le plus utile de ce module, parce que les ACL
-ne sont **ni dans un dump ni dans `globals.sql`** : une restauration les fait
-disparaître en silence, la base remonte, tout a l'air normal, et l'isolation
-n'est plus là. Le CT 200 a payé cette leçon ; on ne la repaie pas ici.
+POURQUOI MUTUALISÉ ET NON CO-LOCALISÉ. La première version co-localisait un
+cluster dans le CT 400, au motif qu'une panne d'un nœud n'hébergeant pas
+Forgejo ne devait pas bloquer la réconciliation GitOps. **Cet argument est
+tombé quand Forgejo a rejoint `pve-eranikus`** : les deux conteneurs sont
+désormais sur la même machine et tombent ensemble. Il ne restait que des
+raisons secondaires, et elles ne valaient pas un second cluster PostgreSQL à
+maintenir — d'autant qu'il aurait été en majeure 17 (Debian) face au 18 (PGDG)
+du CT 200.
+
+CE QUE LA MUTUALISATION COÛTE, ET IL FAUT LE DIRE : la connexion passe du
+socket Unix en `peer` au TCP en `scram-sha-256`. Il y a donc désormais **un mot
+de passe de base à faire vivre**, là où l'authentification par le noyau n'en
+demandait aucun. Il est produit par `pg deploy --tenant`, rangé dans OpenBao,
+et déposé dans `/etc/forgejo/secrets/db_password` — jamais dans le dépôt.
 """
 
 from __future__ import annotations
 
-from core.commands import Psql
-from core.converge import Action, Outcome
-from fjtool.deploy import MP
+from core.converge import Outcome
+from fjtool.deploy import CT_SECRETS
 from fjtool.steps.conteneur import SENTINELLE
 
 BASE = "forgejo"
 ROLE = "forgejo"
 
-NOM_BASE = "base forgejo"
+# Le cluster mutualisé. L'IP est celle du CT 200, et elle est écrite ICI comme
+# dans `ct/app.ini` : deux endroits, mais un contrôle les compare (voir
+# `steps/controles.py`), plutôt qu'une constante partagée que le conteneur ne
+# pourrait pas lire.
+HOTE_PG = "192.168.1.56"
+PORT_PG = "5432"
 
-# Droits d'une base dans un ACL PostgreSQL. LA CASSE EST SIGNIFIANTE :
-#   C = CREATE      T = TEMPORARY      c = CONNECT
-# « C » et « c » sont deux droits différents que seule la casse sépare. Passer
-# la chaîne en minuscules les confond, et un PUBLIC qui peut CRÉER serait
-# rapporté comme un PUBLIC qui peut SE CONNECTER. Défaut constaté sur le
-# CT 200 le 21 août 2026.
-DROIT_CONNECT = "c"
+MOT_DE_PASSE = f"{CT_SECRETS}/db_password"
 
-
-def public_peut_se_connecter(acl: str) -> bool:
-    """Un `datacl` vide vaut « privilèges par défaut », donc PUBLIC connecté.
-
-    Sinon on cherche une entrée dont le bénéficiaire est vide — la façon dont
-    PostgreSQL écrit PUBLIC : `=Tc/postgres`. Chercher la sous-chaîne « =Tc/ »
-    n'importe où matcherait aussi `forgejo=Tc/postgres`, un droit accordé au
-    locataire lui-même, et conclurait à une perte d'isolation inexistante.
-
-    Les entrées arrivent séparées par des ESPACES — c'est ce que produit
-    `array_to_string(datacl, ' ')` — ou par des virgules si le tableau est
-    rendu tel quel. Les deux sont acceptés : ne découper que sur la virgule ne
-    verrait que l'entrée de tête, et manquerait une perte d'isolation dès que
-    l'ordre change.
-    """
-    if not acl.strip():
-        return True
-    for entree in acl.strip().strip("{}").replace(",", " ").split():
-        beneficiaire, _, droits = entree.partition("=")
-        if beneficiaire == "" and DROIT_CONNECT in droits.split("/")[0]:
-            return True
-    return False
+NOM_CONNEXION = "connexion à la base (CT 200)"
 
 
 class EtapeP:
     section = "P"
-    requires: tuple[str, ...] = (SENTINELLE, "cluster PostgreSQL")
+    requires: tuple[str, ...] = (SENTINELLE,)
 
     def skip_if(self, ctx) -> str | None:
         return None
 
-    def _psql(self, ctx) -> Psql:
-        return Psql(ctx.runner.for_container(ctx.opts.ctid))
+    def _ct(self, ctx):
+        return ctx.runner.for_container(ctx.opts.ctid)
 
 
-def _jouer_init(ctx) -> None:
-    """`init.sql` DEPUIS LE MONTAGE, jamais recopié en ordres isolés.
+class MotDePasseBase(EtapeP):
+    """Le mot de passe du locataire, déposé — jamais généré ici.
 
-    Le fichier utilise `\\connect` et `\\gexec` : le découper en `-c` séparés
-    changerait sa sémantique, et c'est justement la partie qui pose les REVOKE.
-    """
-    Psql(ctx.runner.for_container(ctx.opts.ctid)).run_file(f"{MP}/init.sql")
-
-
-class BaseEtRole(EtapeP):
-    """La base et son rôle. La BASE fait foi, pas le rôle.
-
-    Un rôle sans base n'est pas une installation ; c'est la base qui porte les
-    ACL, et c'est elle que Forgejo cherche au démarrage.
+    Le générer serait le générer une seconde fois : c'est `pg deploy --tenant`
+    qui le produit, sur le CT 200, et lui seul sait ce que le rôle porte
+    réellement. En fabriquer un ici donnerait deux vérités, dont une fausse.
     """
 
-    name = NOM_BASE
+    name = "mot de passe de la base"
+    requires = (SENTINELLE, CT_SECRETS)
 
     def check(self, ctx) -> Outcome:
-        psql = self._psql(ctx)
-        if psql.database_exists(BASE):
-            proprietaire = psql.database_owner(BASE)
-            if proprietaire != ROLE:
-                return Outcome(
-                    "error",
-                    f"la base {BASE} appartient à « {proprietaire} » et non à "
-                    f"« {ROLE} » — Forgejo ne pourra pas migrer son schéma ; "
-                    f"corriger à la main : ALTER DATABASE {BASE} OWNER TO {ROLE}",
-                )
-            return Outcome("ok", f"{BASE}, propriétaire {proprietaire}")
-        return Outcome(
-            "absent",
-            f"la base {BASE} n'existe pas",
-            (
-                Action(
-                    f"psql -f {MP}/init.sql",
-                    _jouer_init,
+        ct = self._ct(ctx)
+        # Présence ET taille : un `touch` de dépannage laisse un fichier vide,
+        # qui passerait un simple test d'existence et produirait un échec
+        # d'authentification sans rapport apparent.
+        vu = ct.read(
+            "sh", "-c",
+            'test -s "$1" && stat -c "%a %U:%G" "$1" || true',
+            "sh", MOT_DE_PASSE,
+            check=False,
+        ).out
+        if not vu:
+            return Outcome(
+                "error",
+                f"{MOT_DE_PASSE} absent ou vide — c'est un secret : le créer "
+                "sur le CT 200 avec « pg deploy --tenant forgejo », le ranger "
+                "dans OpenBao, puis le déposer ici "
+                "(doc/RUNBOOK.md section 3)",
+            )
+        if vu != "640 root:git":
+            return Outcome(
+                "drift",
+                f"{MOT_DE_PASSE} est en {vu}, attendu 640 root:git",
+                (
+                    _corriger_mode(),
                 ),
-            ),
-        )
+            )
+        return Outcome("ok", f"{MOT_DE_PASSE} (640 root:git)")
 
 
-class AclConnect(EtapeP):
-    """`REVOKE CONNECT … FROM PUBLIC`, toujours en vigueur.
+def _corriger_mode():
+    from core.converge import Action
 
-    Se répare en rejouant `init.sql`, qui est idempotent : c'est le même
-    fichier qui pose l'isolation et qui la rétablit, donc il n'existe pas deux
-    définitions de ce qu'« isolé » veut dire.
+    return Action(
+        f"chown root:git && chmod 640 {MOT_DE_PASSE} (CT)",
+        lambda c: _appliquer_mode(c),
+    )
+
+
+def _appliquer_mode(ctx) -> None:
+    ct = ctx.runner.for_container(ctx.opts.ctid)
+    ct.write("chown", "root:git", MOT_DE_PASSE)
+    ct.write("chmod", "0640", MOT_DE_PASSE)
+
+
+class ConnexionBase(EtapeP):
+    """Forgejo peut-il RÉELLEMENT joindre sa base ?
+
+    On l'éprouve pour de bon, depuis le conteneur, sous l'utilisateur `git`
+    et avec le mot de passe déposé — exactement comme le service le fera.
+    Tout le reste peut être vert sans que ce soit vrai : une ligne manquante
+    dans le `pg_hba.conf` du CT 200, un locataire jamais créé, un pare-feu.
+
+    L'échec est alors l'un de ceux-ci, et aucun ne nomme sa cause :
+
+        FATAL:  no pg_hba.conf entry for host "192.168.1.57"
+        FATAL:  password authentication failed for user "forgejo"
+        FATAL:  database "forgejo" does not exist
+
+    Le message rend la première ligne du refus telle quelle : c'est elle qui
+    dit lequel des trois est en cause, et le reformuler la ferait perdre.
     """
 
-    name = "ACL de la base"
-    requires = (SENTINELLE, "cluster PostgreSQL", NOM_BASE)
+    name = NOM_CONNEXION
+    requires = (SENTINELLE, "utilisateur git", "mot de passe de la base",
+                "postgresql-client (CT)")
 
     def check(self, ctx) -> Outcome:
-        acl = self._psql(ctx).database_acl(BASE)
-        if not public_peut_se_connecter(acl):
-            return Outcome("ok", acl)
-        return Outcome(
-            "drift",
-            f"PUBLIC peut se connecter à {BASE} — isolation absente "
-            f"(datacl : {acl or 'vide'}) ; les ACL ne sont pas dans un dump, "
-            "une restauration vient peut-être de les effacer",
-            (
-                Action(
-                    f"psql -f {MP}/init.sql (rétablit les REVOKE)",
-                    _jouer_init,
-                ),
-            ),
-        )
-
-
-class ConnexionForgejo(EtapeP):
-    """Forgejo peut-il RÉELLEMENT se connecter ?
-
-    Toutes les étapes précédentes peuvent être vertes sans que ce soit vrai :
-    il suffit que `pg_ident.conf` ne soit pas chargé, ou que la ligne `map=`
-    manque de `pg_hba.conf`. L'échec ressemble alors à ceci, et ne nomme aucun
-    des deux fichiers :
-
-        FATAL:  Peer authentication failed for user "forgejo"
-
-    On l'éprouve donc pour de bon, en se connectant SOUS L'UTILISATEUR `git`,
-    exactement comme le service le fera. Une lecture (`SELECT 1`) : la
-    connexion est ce qu'on teste, pas le droit d'écrire.
-    """
-
-    name = "connexion peer git → forgejo"
-    requires = (SENTINELLE, "cluster PostgreSQL", NOM_BASE, "utilisateur git")
-
-    def check(self, ctx) -> Outcome:
-        ct = ctx.runner.for_container(ctx.opts.ctid)
+        ct = self._ct(ctx)
+        # Le mot de passe passe par PGPASSFILE, jamais par l'argv ni par
+        # PGPASSWORD : un `ps` pendant l'opération le montrerait.
         res = ct.read(
-            "sudo", "-u", "git", "psql", "-d", BASE, "-U", ROLE,
-            "-h", "/var/run/postgresql", "-tAc", "SELECT 1",
+            "sh", "-c",
+            'p=$(cat "$1") || exit 1; '
+            'f=$(mktemp) || exit 1; '
+            'chmod 600 "$f"; '
+            'printf "%s:%s:%s:%s:%s\\n" "$2" "$3" "$4" "$5" "$p" > "$f"; '
+            'PGPASSFILE="$f" psql "sslmode=require host=$2 port=$3 '
+            'dbname=$4 user=$5" -tAc "SELECT 1"; '
+            'rc=$?; rm -f "$f"; exit $rc',
+            "sh", MOT_DE_PASSE, HOTE_PG, PORT_PG, BASE, ROLE,
             check=False,
         )
         if res.ok and res.out == "1":
-            return Outcome("ok", f"git → {ROLE}@{BASE} par socket Unix")
+            return Outcome("ok", f"{ROLE}@{HOTE_PG}:{PORT_PG}/{BASE}, SSL")
+
+        premiere = (res.stderr.strip().splitlines() or [""])[0]
         return Outcome(
             "error",
-            "l'utilisateur git ne peut pas se connecter — vérifier la ligne "
-            f"« map=forgejo » de {MP}/pg_hba.conf et la correspondance de "
-            f"{MP}/pg_ident.conf : " + (res.stderr.strip().splitlines() or [""])[0],
+            f"Forgejo ne joint pas sa base sur le CT 200 — {premiere or 'aucun message'}\n"
+            "         créer le locataire : pg deploy --tenant forgejo (CT 200)\n"
+            "         puis la ligne hostssl dans son pg_hba.conf, avant le reject",
         )

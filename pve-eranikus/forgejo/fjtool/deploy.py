@@ -127,18 +127,8 @@ class Options:
 
     ctid: int
     do_container: bool = True
-    do_offsite: bool = True
     do_install: bool = True
-    do_first_run: bool = True
-    force_restart: bool = False
     admin: str | None = None
-
-    # Le volume des sauvegardes, sur un disque DISTINCT de celui des dépôts.
-    # La taille ne sert qu'à la CRÉATION : après, c'est Proxmox qui décide du
-    # nom du volume, et l'agrandir est un geste séparé (`pct resize`).
-    mp2_mount: str = "/var/backups/forgejo"
-    mp2_storage: str = "data"
-    mp2_size: int = 20
 
 
 @dataclass

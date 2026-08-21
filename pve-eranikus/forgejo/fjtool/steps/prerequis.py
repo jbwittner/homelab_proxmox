@@ -32,7 +32,7 @@ from typing import Iterator
 from core.converge import Action, Outcome
 from core.log import info
 from fjtool.deploy import MP
-from proxmox import Container, MountPoint, Storage
+from proxmox import Container, MountPoint
 
 EFFET_REBOOT = "ct.reboot"
 
@@ -219,66 +219,6 @@ class Mp1Depot(PointDeMontage):
             f"{actuel or 'absent'} → attendu {voulu.render()}",
             (self._action(ctx, voulu),),
         )
-
-
-class Mp2Sauvegardes(PointDeMontage):
-    """Le volume des sauvegardes, sur un disque DISTINCT de celui des dépôts.
-
-    C'est toute la raison d'être de ce second montage : une panne du disque qui
-    porte `/var/lib/forgejo` ne doit pas emporter les dumps avec elle.
-
-    S'il est monté AILLEURS, on n'y touche pas — il porte des données. On pose
-    le fait « divergent », et le hors-site refusera de s'armer dessus.
-    """
-
-    name = "mp2"
-
-    def check(self, ctx) -> Outcome:
-        actuel = self._ct(ctx).config().get("mp2", "")
-        cible = ctx.opts.mp2_mount
-
-        if not actuel:
-            # Le stockage est VÉRIFIÉ avant d'être proposé : `pct set` sur un
-            # stockage inconnu échoue au milieu du parcours, protection déjà
-            # levée. Mieux vaut refuser en le nommant, avec la liste de ce qui
-            # existe — deviner « data » parce que l'autre nœud l'a serait la
-            # faute exacte que ce dépôt évite ailleurs.
-            connus = Storage(ctx.runner).status()
-            if ctx.opts.mp2_storage not in connus:
-                return Outcome(
-                    "error",
-                    f"stockage « {ctx.opts.mp2_storage} » inconnu sur ce nœud "
-                    f"(connus : {', '.join(sorted(connus)) or 'aucun'}) — "
-                    "le nommer : fj deploy --mp2-storage <nom>",
-                )
-            voulu = MountPoint(
-                2,
-                f"{ctx.opts.mp2_storage}:{ctx.opts.mp2_size}",
-                cible,
-                backup=False,
-            )
-            return Outcome(
-                "absent",
-                f"aucun volume de sauvegarde — {ctx.opts.mp2_size} Go à créer",
-                (self._action(ctx, voulu),),
-            )
-
-        # Comparaison par SOUS-CHAÎNE : Proxmox réécrit la spécification en
-        # volid généré (`data:subvol-400-disk-0`), on ne peut donc pas comparer
-        # à ce qu'on avait demandé.
-        if f"mp={cible}" not in actuel:
-            ctx.facts["mp2_state"] = "divergent"
-            return Outcome(
-                "error",
-                f"monté ailleurs : {actuel} — il porte des sauvegardes, "
-                "on n'y touche pas ; le hors-site ne sera pas armé",
-            )
-
-        ctx.facts["mp2_state"] = "ok"
-        detail = f"{actuel}"
-        if "backup=0" not in actuel:
-            detail += " — sans backup=0, les vzdump emporteront les dumps"
-        return Outcome("ok", detail)
 
 
 class Startup(EtapeA):

@@ -4,14 +4,14 @@ Documentation=file:///root/homelab_proxmox/pve-eranikus/forgejo/doc/RUNBOOK.md
 After=network-online.target
 Wants=network-online.target
 
-# PostgreSQL est CO-LOCALISÉ dans ce conteneur, et la connexion se fait par
-# socket Unix. Sans cet ordre, Forgejo démarre avant que la socket n'existe :
-# il réessaie, mais le journal se remplit d'échecs de connexion au premier
-# démarrage du conteneur, et un opérateur y lit une panne qui n'en est pas
-# une. « After » suffit — un « Requires » ferait de tout incident PostgreSQL
-# un arrêt de Forgejo, alors que Forgejo sait attendre sa base.
-After=postgresql.service
-Wants=postgresql.service
+# PAS de « After=postgresql.service » : la base n'est pas dans ce conteneur.
+# Elle vit dans le CT 200, joignable par le réseau — d'où le seul
+# network-online ci-dessus. Un ordre de démarrage local ne dirait rien de la
+# disponibilité d'un service qui tourne ailleurs, et le poser donnerait
+# l'illusion d'une garantie.
+#
+# Au démarrage du NŒUD, c'est « startup order » de Proxmox qui compte : le
+# CT 200 doit remonter avant le CT 400. Voir doc/RUNBOOK.md section 3.
 
 [Service]
 Type=simple
@@ -49,7 +49,7 @@ ProtectControlGroups=true
 RestrictSUIDSGID=true
 # ProtectSystem=full met /usr et /etc en lecture seule : les deux répertoires
 # où Forgejo écrit doivent être rouverts explicitement.
-ReadWritePaths=/var/lib/forgejo /var/backups/forgejo
+ReadWritePaths=/var/lib/forgejo
 
 # Les dépôts, les objets LFS et les pièces jointes tiennent beaucoup de
 # fichiers ouverts à la fois. La valeur par défaut du conteneur suffit tant

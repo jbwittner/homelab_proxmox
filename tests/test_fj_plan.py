@@ -5,9 +5,14 @@ ne se vérifie que par relecture, et on relit ce qu'on croit avoir écrit.
 
 Ces tests défendent les invariants du parcours, pas le détail de chaque
 étape : qu'aucun nom ne soit ambigu, qu'aucun prérequis n'arrive après ce qui
-en dépend, et surtout que les DEUX ordres sur lesquels repose ce montage
-tiennent — les secrets avant le premier démarrage, la sauvegarde avant la
-copie hors-site.
+en dépend, et surtout que les ordres sur lesquels repose ce montage tiennent —
+le mot de passe avant la configuration qui le porte, les secrets et la base
+avant le premier démarrage.
+
+Un test y veille aussi à ce qui NE DOIT PLUS être là : depuis que la base est
+un locataire du CT 200, ce déploiement ne sauvegarde rien et ne copie rien
+hors-site. Une étape qui réapparaîtrait donnerait deux filets pour un même
+objet, dont un que personne ne surveille.
 """
 
 from __future__ import annotations
@@ -92,18 +97,33 @@ def test_les_secrets_sont_poses_avant_le_premier_demarrage(etapes):
     assert _position(etapes, "secrets Forgejo") < _position(etapes, "forgejo (armement)")
 
 
-def test_la_base_est_posee_avant_le_premier_demarrage(etapes):
-    """Sinon le premier démarrage n'est qu'une suite d'échecs de connexion,
-    que quelqu'un lira comme une panne."""
-    assert _position(etapes, "base forgejo") < _position(etapes, "forgejo (armement)")
-
-
-def test_la_premiere_sauvegarde_precede_le_hors_site(etapes):
-    """Sans elle, la première copie hors-site n'a rien à transférer — et sort
-    en « environnement inutilisable » au premier déploiement."""
-    assert _position(etapes, "première sauvegarde") < _position(
-        etapes, "fjbk-offsite.timer (armement)"
+def test_la_connexion_a_la_base_precede_le_premier_demarrage(etapes):
+    """Sinon le premier démarrage n'est qu'une suite d'échecs
+    d'authentification, que quelqu'un lira comme une panne de Forgejo alors
+    que c'est une ligne manquante dans le `pg_hba.conf` du CT 200."""
+    assert _position(etapes, "connexion à la base (CT 200)") < _position(
+        etapes, "forgejo (armement)"
     )
+
+
+def test_le_mot_de_passe_precede_la_configuration_qui_le_porte(etapes):
+    """`app.ini` est RENDU avec le mot de passe substitué. Le rendre avant que
+    le secret soit là produirait une configuration portant le marqueur
+    `@@DB_PASSWORD@@` en guise de mot de passe — et un échec
+    d'authentification qui ne dirait pas pourquoi."""
+    assert _position(etapes, "mot de passe de la base") < _position(
+        etapes, "app.ini"
+    )
+
+
+def test_aucune_etape_ne_sauvegarde_ni_ne_copie_hors_site(etapes):
+    """La base est un locataire du CT 200 : `pg` la sauvegarde et l'emporte
+    hors-site. Les dépôts partent par `vzdump`. Une étape de sauvegarde ici
+    donnerait deux filets pour un même objet, dont un que personne ne
+    surveille."""
+    noms = " ".join(_noms(etapes)).lower()
+    for interdit in ("sauvegarde", "hors-site", "offsite", "backup"):
+        assert interdit not in noms, f"« {interdit} » n'a plus lieu d'être ici"
 
 
 def test_l_outillage_du_noeud_precede_l_installation_binaire(etapes):
@@ -116,7 +136,7 @@ def test_le_montage_est_constate_avant_toute_pose(etapes):
     """La sentinelle d'abord : un `mpN` n'est lu qu'au démarrage, et poser
     depuis un montage absent copie du néant, sans erreur."""
     sentinelle = _position(etapes, "montage /etc/forgejo-git")
-    for nom in ("app.ini", "forgejo.service", "pg_hba.conf"):
+    for nom in ("app.ini", "forgejo.service", "/etc/forgejo"):
         assert sentinelle < _position(etapes, nom), f"{nom} posé avant la sentinelle"
 
 
@@ -124,7 +144,7 @@ def test_les_controles_ferment_le_parcours(etapes):
     """Un contrôle joué au milieu répond sur l'état d'AVANT les poses qui le
     suivent, et rend donc un verdict sur un montage qui n'existe plus."""
     sections = [etape.section for etape in etapes]
-    derniers = sections[-8:]
+    derniers = sections[-4:]
     assert set(derniers) == {"C"}, f"la fin du parcours n'est pas la section C : {derniers}"
 
 
@@ -149,79 +169,6 @@ def test_le_montage_du_depot_est_en_lecture_seule(etapes, depot_forgejo):
         "seul ct/ est monté : le conteneur n'a pas à voir host/ ni doc/"
     )
 
-
-PVESM = (
-    "Name             Type     Status   Total   Used  Available    %\n"
-    "data          zfspool   active  100000  20000      80000  20%\n"
-    "local             dir   active   50000  10000      40000  20%\n"
-)
-
-
-def _ctx_avec_stockages(depot_forgejo, sortie=PVESM):
-    from core.runner import Result
-
-    runner = FakeRunner()
-    runner.when("pvesm status", Result(("pvesm", "status"), 0, sortie, ""))
-    return contexte(
-        runner=runner,
-        paths=Paths(src=depot_forgejo),
-        opts=Options(ctid=400),
-        mode=Mode.STATUS,
-    )
-
-
-def test_le_volume_de_sauvegarde_est_hors_vzdump(etapes, depot_forgejo):
-    """`backup=0` tient les dumps hors des `vzdump` du conteneur : sans lui,
-    chaque sauvegarde du CT embarquerait toutes les précédentes, et le volume
-    doublerait de taille à chaque passage."""
-    ctx = _ctx_avec_stockages(depot_forgejo)
-    mp2 = next(e for e in etapes if e.name == "mp2")
-    resultat = mp2.check(ctx)
-    # Sur un CT sans mp2, l'étape propose de le créer : c'est cette proposition
-    # qui doit porter backup=0.
-    assert resultat.actions, "mp2 absent devrait proposer une création"
-    assert "backup=0" in resultat.actions[0].label
-
-
-def test_un_stockage_inconnu_est_refuse_et_non_devine(etapes, depot_forgejo):
-    """`data` existe sur `pve-eranikus` — mais rien dans le code ne le sait.
-
-    Le service pourrait être redéployé ailleurs, ou le pool renommé. Un
-    `pct set` sur un stockage inconnu échouerait au MILIEU du parcours,
-    protection déjà levée. Le refus nomme ce qui existe, pour que la
-    correction se tape sans aller chercher ailleurs.
-    """
-    ctx = _ctx_avec_stockages(
-        depot_forgejo,
-        "Name        Type    Status  Total  Used  Available    %\n"
-        "local        dir    active  50000 10000      40000  20%\n",
-    )
-    mp2 = next(e for e in etapes if e.name == "mp2")
-    resultat = mp2.check(ctx)
-    assert resultat.state == "error"
-    assert not resultat.actions, "rien ne doit être tenté sur un stockage inconnu"
-    assert "local" in resultat.detail, "le refus doit nommer ce qui existe"
-    assert "--mp2-storage" in resultat.detail, "le refus doit dire quoi taper"
-
-
-def test_le_moteur_pousse_dans_le_ct_nemporte_jamais_proxmox(etapes, depot_forgejo):
-    """Le conteneur n'a pas `pct` et n'a rien à en faire. L'y pousser ferait
-    passer les tests du nœud à un import qui n'échouerait que dans le CT."""
-    ctx = contexte(
-        runner=FakeRunner(),
-        paths=Paths(src=depot_forgejo),
-        opts=Options(ctid=400),
-        mode=Mode.STATUS,
-    )
-    moteur = next(e for e in etapes if e.name == "moteur (CT)")
-    sources = moteur._sources(ctx)
-    assert sources, "le moteur doit trouver des modules à pousser"
-    assert not [rel for rel in sources if rel.startswith("proxmox/")]
-    assert any(rel.startswith("core/") for rel in sources)
-    assert any(rel.startswith("fjtool/") for rel in sources)
-
-
-# ─── les effets ──────────────────────────────────────────────────────────────
 
 
 def test_tout_effet_declare_a_un_gestionnaire(etapes, depot_forgejo):

@@ -7,19 +7,19 @@ depuis là-dedans copierait du néant. La première étape vérifie donc que le
 montage est visible, et toutes les autres en dépendent : le parcours les
 déclare non évaluables plutôt que de les laisser conclure dans le vide.
 
-COPIE OU LIEN, SELON QUI ÉCRIT. Les fichiers de configuration de PostgreSQL
-sont des **symlinks** vers le montage : personne d'autre que nous ne les
-écrit, et ils suivent un `git pull` tout seuls. `app.ini`, lui, est une
-**copie** — Forgejo réécrit sa configuration s'il lui manque un secret qu'il
-sait générer, et cette écriture sur un lien vers un montage en lecture seule
-échoue d'une façon illisible. Les scripts et les unités sont des copies aussi,
-parce qu'un montage en lecture seule ne peut pas porter le bit d'exécution.
+RIEN N'EST LIÉ AU MONTAGE, TOUT EN EST COPIÉ. Les unités systemd parce qu'un
+montage en lecture seule ne porte pas le bit d'exécution ; `app.ini` pour deux
+raisons qui se renforcent :
 
-DEUX RAFRAÎCHISSEMENTS, ET LE PLUS FORT L'EMPORTE. Reposer un symlink de
-configuration PostgreSQL demande un **restart** : `listen_addresses` ne se
-relit pas à chaud. Le reste se contente d'un **reload**, demandé
-systématiquement — les configurations étant des symlinks, leur contenu a pu
-changer avec un `git pull` sans qu'aucun `check()` puisse s'en apercevoir.
+  - Forgejo réécrit sa configuration s'il lui manque un secret qu'il sait
+    générer, et cette écriture sur un lien vers un montage en lecture seule
+    échoue d'une façon illisible ;
+  - `app.ini` n'est plus une copie conforme du dépôt de toute façon : le mot
+    de passe de la base y est SUBSTITUÉ à la pose (voir `AppIni`). Le fichier
+    servi ne peut donc pas exister dans le dépôt.
+
+Conséquence à retenir : **un `git pull` ne suffit jamais**, il faut rejouer
+`fj deploy`. C'est le geste normal de ce dépôt.
 """
 
 from __future__ import annotations
@@ -30,15 +30,12 @@ from pathlib import Path
 from core.commands import Systemd
 from core.converge import Action, Outcome
 from fjtool.deploy import MP
-from proxmox import Container, diff_tree
+from proxmox import Container
 
 EFFET_DAEMON_RELOAD = "ct.daemon-reload"
-EFFET_PG_RESTART = "ct.postgresql.restart"
-EFFET_PG_REFRESH = "ct.postgresql.refresh"
 EFFET_FORGEJO_RESTART = "ct.forgejo.restart"
 
 SENTINELLE = "montage /etc/forgejo-git"
-PYTHON_CT = "python3-minimal (CT)"
 UTILISATEUR = "utilisateur git"
 
 
@@ -237,78 +234,6 @@ class Repertoire(EtapeCT):
         )
 
 
-class ClusterDetecte(EtapeCT):
-    """Où vit la configuration PostgreSQL. Découvert, jamais codé en dur.
-
-    Debian 13 livre PostgreSQL 17 ; la majeure suivante déplacera le
-    répertoire. Le déduire de `pg_lsclusters` évite d'y penser ce jour-là.
-    """
-
-    name = "cluster PostgreSQL"
-    # `pg_lsclusters` vient du paquet : l'interroger avant l'installation
-    # rendrait « aucun cluster » là où la vraie réponse est « pas encore ».
-    requires = (SENTINELLE, "postgresql (CT)")
-
-    def check(self, ctx) -> Outcome:
-        lignes = self._ct(ctx).read("pg_lsclusters", "-h", check=False).lines
-        clusters = [ligne.split()[:2] for ligne in lignes if ligne.split()]
-        if not clusters:
-            return Outcome(
-                "error",
-                f"aucun cluster PostgreSQL dans le CT {ctx.opts.ctid}",
-            )
-        if len(clusters) > 1:
-            noms = ", ".join("/".join(c) for c in clusters)
-            return Outcome("error", f"plusieurs clusters, cible ambiguë : {noms}")
-        version, nom = clusters[0]
-        chemin = f"/etc/postgresql/{version}/{nom}"
-        ctx.facts["cluster_dir"] = chemin
-        ctx.facts["cluster_version"] = version
-        return Outcome("ok", f"{version}/{nom} ({chemin})")
-
-
-class SymlinkConf(EtapeCT):
-    """Un fichier de configuration PostgreSQL, lié au montage plutôt que copié.
-
-    Le lien fait suivre un `git pull` sans redéploiement. Reposer ce lien
-    demande en revanche un **restart** : `listen_addresses` ne se relit pas à
-    chaud, et la première pose serait sans effet.
-    """
-
-    requires = (SENTINELLE, "cluster PostgreSQL")
-
-    def __init__(self, nom: str, sous_dossier: str = "") -> None:
-        self.nom = nom
-        self.sous_dossier = sous_dossier
-        self.name = nom
-
-    def _cible(self, ctx) -> str:
-        base = ctx.facts["cluster_dir"]
-        if self.sous_dossier:
-            return f"{base}/{self.sous_dossier}/{self.nom}"
-        return f"{base}/{self.nom}"
-
-    def check(self, ctx) -> Outcome:
-        cible = self._cible(ctx)
-        attendu = f"{MP}/{self.nom}"
-        vu = self._ct(ctx).read("readlink", "-f", cible, check=False).out
-        if vu == attendu:
-            return Outcome("ok", cible)
-        etat = "drift" if vu else "absent"
-        return Outcome(
-            etat,
-            f"{cible} → {vu or 'rien'}, attendu {attendu}",
-            (
-                Action(
-                    f"ln -sfn {attendu} {cible} (CT)",
-                    lambda c, a=attendu, d=cible: c.runner.for_container(
-                        c.opts.ctid).write("ln", "-sfn", a, d),
-                    effects=frozenset({EFFET_PG_RESTART}),
-                ),
-            ),
-        )
-
-
 class FichierCT(EtapeCT):
     """Un script ou une unité, COPIÉ depuis le montage vers le conteneur.
 
@@ -364,34 +289,95 @@ class FichierCT(EtapeCT):
         )
 
 
-class TimerSauvegardeArme(EtapeCT):
-    """`fj-backup.timer`, armé dans le conteneur.
+class AppIni(EtapeCT):
+    """`/etc/forgejo/app.ini`, RENDU depuis le gabarit du dépôt.
 
-    Contrairement au hors-site, aucun prérequis externe ne conditionne son
-    armement : une sauvegarde locale n'a besoin ni de clé ni de réseau.
+    Une seule valeur est substituée — le mot de passe de la base — et c'est
+    justement celle qui ne peut pas vivre dans un dépôt. Tout le reste vient
+    de `ct/app.ini` tel quel.
+
+    LE SECRET NE PASSE NI PAR UN ARGV NI PAR UN FICHIER DU NŒUD. Il est lu
+    dans le conteneur, le rendu s'y fait aussi, et le tout tient dans un seul
+    `sh -c` dont le script est CONSTANT. Un `ps` pendant l'opération ne montre
+    donc rien, et rien n'est écrit hors de `/etc/forgejo`.
+
+    LA COMPARAISON PORTE SUR LE RÉSULTAT, pas sur le gabarit : c'est ce qui
+    permet à « zéro modification sur un état conforme » de tenir alors même
+    que le fichier servi ne peut être identique à aucun fichier du dépôt.
     """
 
-    name = "fj-backup.timer (armement)"
-    # L'unité ET le moteur qu'elle appelle : armer un timer dont l'ExecStart
-    # n'existe pas produit un échec par nuit, à 2h45, que personne ne regarde.
-    requires = (SENTINELLE, "fj-backup.timer", "fj (CT)")
+    name = "app.ini"
+    requires = (SENTINELLE, "/etc/forgejo", "mot de passe de la base")
+
+    CIBLE = "/etc/forgejo/app.ini"
+    MARQUEUR = "@@DB_PASSWORD@@"
+
+    # Le rendu et sa comparaison, en un aller-retour. `$1` gabarit, `$2` mot
+    # de passe, `$3` cible. `awk` avec une variable passée par -v : le mot de
+    # passe ne traverse jamais une expression rationnelle, donc aucun
+    # caractère ne peut y changer le sens du remplacement.
+    _RENDU = (
+        'awk -v p="$(cat "$2")" '
+        '\'{ gsub(/@@DB_PASSWORD@@/, p); print }\' "$1"'
+    )
+
+    def _empreinte_voulue(self, ctx) -> str:
+        ct = self._ct(ctx)
+        from fjtool.steps.postgres import MOT_DE_PASSE
+
+        return ct.read(
+            "sh", "-c", f"{self._RENDU} | sha256sum | cut -d' ' -f1",
+            "sh", f"{MP}/app.ini", MOT_DE_PASSE,
+            check=False,
+        ).out
 
     def check(self, ctx) -> Outcome:
-        systemd = Systemd(self._ct(ctx))
-        if systemd.is_enabled("fj-backup.timer"):
-            return Outcome("ok", "actif")
+        ct = self._ct(ctx)
+        voulue = self._empreinte_voulue(ctx)
+        if not voulue:
+            return Outcome(
+                "error",
+                f"impossible de rendre {MP}/app.ini — le gabarit ou le mot de "
+                "passe manque",
+            )
+
+        vue = ct.read(
+            "sh", "-c",
+            'sha256sum "$1" 2>/dev/null | cut -d" " -f1; '
+            'stat -c "%a %U:%G" "$1" 2>/dev/null',
+            "sh", self.CIBLE,
+            check=False,
+        ).lines
+
+        if vue[:2] == [voulue, "640 root:git"]:
+            return Outcome("ok", f"{self.CIBLE} (640 root:git)")
+
         return Outcome(
-            "absent",
-            "inactif — la source de vérité reste sans filet",
+            "drift" if vue else "absent",
+            f"{self.CIBLE} — mot de passe de la base substitué",
             (
                 Action(
-                    "systemctl enable --now fj-backup.timer (CT)",
-                    lambda c: Systemd(
-                        c.runner.for_container(c.opts.ctid)
-                    ).enable_now("fj-backup.timer"),
+                    f"rendre {MP}/app.ini → {self.CIBLE} (640 root:git)",
+                    _rendre_app_ini,
+                    effects=frozenset({EFFET_FORGEJO_RESTART}),
                 ),
             ),
         )
+
+
+def _rendre_app_ini(ctx) -> None:
+    from fjtool.steps.postgres import MOT_DE_PASSE
+
+    ct = ctx.runner.for_container(ctx.opts.ctid)
+    # umask AVANT la redirection : créer en 0644 puis corriger laisserait une
+    # fenêtre où le mot de passe de la base est lisible par tout le conteneur.
+    ct.write(
+        "sh", "-c",
+        f'umask 027 && {AppIni._RENDU} > "$3"',
+        "sh", f"{MP}/app.ini", MOT_DE_PASSE, AppIni.CIBLE,
+    )
+    ct.write("chown", "root:git", AppIni.CIBLE)
+    ct.write("chmod", "0640", AppIni.CIBLE)
 
 
 class ServiceForgejoArme(EtapeCT):
@@ -402,8 +388,8 @@ class ServiceForgejoArme(EtapeCT):
     """
 
     name = "forgejo (armement)"
-    requires = (SENTINELLE, "forgejo.service", "base forgejo",
-                "secrets Forgejo")
+    requires = (SENTINELLE, "forgejo.service", "app.ini",
+                "connexion à la base (CT 200)", "secrets Forgejo")
 
     def check(self, ctx) -> Outcome:
         systemd = Systemd(self._ct(ctx))
@@ -435,75 +421,6 @@ def _empreinte(chemin: Path) -> str:
     return hashlib.sha256(chemin.read_bytes()).hexdigest()
 
 
-class MoteurCT:
-    """L'arbre d'import de `fj` DANS le conteneur : `core` et `fjtool`.
-
-    **Poussé par `pct push`, jamais monté.** Le montage est vivant : un
-    `git pull` pendant qu'une sauvegarde tourne à 2h45 livrerait un arbre à
-    moitié à jour, ou un `ImportError` sur un module supprimé en cours
-    d'exécution.
-
-    **Le conteneur ne reçoit jamais `proxmox`.** Il n'a pas `pct` et n'a rien à
-    en faire.
-
-    **Ce qui n'est plus dans le dépôt est RETIRÉ.** Sans élagage, un module
-    renommé laisse son ancêtre en place, et cet ancêtre continue de s'importer.
-    """
-
-    name = "moteur (CT)"
-    section = "B"
-    requires: tuple[str, ...] = (PYTHON_CT,)
-
-    def skip_if(self, ctx) -> str | None:
-        return None
-
-    def _sources(self, ctx) -> dict[str, Path]:
-        """Chemin relatif → fichier source. DEUX paquets, pas trois."""
-        racines = [ctx.paths.lib_src / "core", ctx.paths.fjtool_src]
-        trouves: dict[str, Path] = {}
-        for racine in racines:
-            if not racine.is_dir():
-                continue
-            for fichier in sorted(racine.rglob("*.py")):
-                rel = f"{racine.name}/{fichier.relative_to(racine)}"
-                trouves[rel] = fichier
-        return trouves
-
-    def check(self, ctx) -> Outcome:
-        sources = self._sources(ctx)
-        racine = str(ctx.paths.ct_lib)
-        conteneur = Container(ctx.runner, ctx.opts.ctid)
-        distant = conteneur.digests(racine)
-        local = {rel: _empreinte(chemin) for rel, chemin in sources.items()}
-        a_poser, a_retirer = diff_tree(local, distant)
-
-        if not a_poser and not a_retirer:
-            return Outcome("ok", f"{racine} — {len(sources)} module(s)")
-
-        actions = [
-            Action(
-                f"pct push {ctx.opts.ctid} {rel} → {racine}/{rel}",
-                lambda c, r=rel, s=sources[rel], d=racine:
-                    pousser(c, s, f"{d}/{r}"),
-            )
-            for rel in a_poser
-        ]
-        actions += [
-            Action(
-                f"rm {racine}/{rel} (CT — absent du dépôt)",
-                lambda c, r=rel, d=racine: Container(
-                    c.runner, c.opts.ctid).exec("rm", "-f", f"{d}/{r}"),
-            )
-            for rel in a_retirer
-        ]
-        etat = "drift" if distant else "absent"
-        return Outcome(
-            etat,
-            f"{len(a_poser)} à pousser, {len(a_retirer)} à retirer",
-            tuple(actions),
-        )
-
-
 def pousser(ctx, source: Path, cible: str, perms: str = "0644") -> None:
     """`pct push` ne crée pas les répertoires intermédiaires."""
     conteneur = Container(ctx.runner, ctx.opts.ctid)
@@ -512,42 +429,3 @@ def pousser(ctx, source: Path, cible: str, perms: str = "0644") -> None:
     conteneur.push(source, cible, perms=perms)
 
 
-class LanceurCT:
-    """`/usr/local/bin/fj` dans le conteneur.
-
-    Poussé en 0755 : le lanceur n'est PAS dans `ct/`, il vit à la racine du
-    service, et un montage en lecture seule ne porterait de toute façon pas le
-    bit d'exécution.
-    """
-
-    name = "fj (CT)"
-    section = "B"
-    requires: tuple[str, ...] = (PYTHON_CT, "moteur (CT)")
-
-    def skip_if(self, ctx) -> str | None:
-        return None
-
-    def check(self, ctx) -> Outcome:
-        source = ctx.paths.launcher
-        cible = str(ctx.paths.ct_fj)
-        conteneur = Container(ctx.runner, ctx.opts.ctid)
-        # Le mode part avec l'empreinte : un fichier juste mais non exécutable
-        # ne se voit qu'à l'usage.
-        vu = conteneur.exec(
-            "sh", "-c",
-            'sha256sum "$1" 2>/dev/null | cut -d" " -f1; stat -c %a "$1" 2>/dev/null',
-            "sh", cible,
-            check=False,
-        ).lines
-        if vu[:2] == [_empreinte(source), "755"]:
-            return Outcome("ok", cible)
-        return Outcome(
-            "drift" if vu else "absent",
-            cible,
-            (
-                Action(
-                    f"pct push {ctx.opts.ctid} {source} {cible} --perms 0755",
-                    lambda c, s=source, d=cible: pousser(c, s, d, "0755"),
-                ),
-            ),
-        )

@@ -203,15 +203,18 @@ sort en 1 s'il y en a un.
 - [ ] **Constater la parité de `pg <commande>`** avec `pgbk` dans le CT, puis
       retirer `ct/pgbk.sh` — il reste installé exprès, c'est le filet du
       conteneur tant que la restauration Python n'a pas été éprouvée.
-- [ ] **Retirer** la ligne du locataire `forgejo` de `ct/pg_hba.conf`, et sa
-      base si elle a été créée. Elle n'a plus d'objet : Forgejo a désormais
-      **son propre cluster, co-localisé dans le CT 400** — sur ce nœud-ci, mais
-      hors de ce conteneur-ci. Le motif n'est pas la disponibilité, c'est que
-      ce cluster-ci se met à jour par script communautaire là où le CT 400 a sa
-      version gelée, et que ses fenêtres de maintenance sont celles de son
-      locataire le plus bruyant — voir
-      [../forgejo/doc/RUNBOOK.md § 3](../forgejo/doc/RUNBOOK.md#3-postgresql-co-localisé).
-      Tant qu'elle est là, elle décrit un accès qui ne servira jamais.
+- [ ] **Créer le locataire `forgejo`** (`pg deploy --tenant forgejo`), ranger
+      son mot de passe dans OpenBao, puis le déposer dans le CT 400. La ligne
+      `hostssl forgejo forgejo 192.168.1.57/32` de `ct/pg_hba.conf` était déjà
+      écrite pour lui : **la garder**, elle est le chemin d'accès de la source
+      de vérité d'ArgoCD.
+      Voir [../forgejo/doc/RUNBOOK.md § 3](../forgejo/doc/RUNBOOK.md#3-la-base-locataire-du-ct-200).
+
+      > Ce cluster porte donc désormais la base d'un service dont la
+      > disponibilité conditionne toute réconciliation GitOps. Concrètement :
+      > un redémarrage de PostgreSQL décidé pour un autre locataire arrête
+      > aussi Forgejo. Ce n'est pas bloquant — Forgejo réessaie — mais ça vaut
+      > d'être su avant de planifier une fenêtre de maintenance.
 - [ ] Copier `postgresql.vars` dans ce dépôt après vérification des secrets.
 - [ ] **Jouer l'exercice de bascule**
       ([doc/PRA-exercice.md](doc/PRA-exercice.md#exercice-de-bascule--valider-le-moteur-python)) —

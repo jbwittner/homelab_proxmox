@@ -27,7 +27,7 @@ plus silencieusement, et le seul remède est de l'avoir rangé avant.
 
 from __future__ import annotations
 
-from core.commands import Systemd
+
 from core.converge import Action, Outcome
 from core.log import info, warn
 from core.runner import Secret
@@ -214,50 +214,3 @@ def _creer_admin(ctx, nom: str) -> None:
     )
     info(f"  {nom} / {motdepasse}")
     warn("  mot de passe de TRANSIT : il est à changer à la première connexion")
-
-
-class PremiereSauvegarde(EtapeG):
-    """Déclenchée seulement s'il n'existe aucune sauvegarde.
-
-    Elle passe AVANT le hors-site dans l'ordre des étapes, et ce n'est pas
-    cosmétique : sans elle, la première copie n'aurait rien à transférer.
-    """
-
-    name = "première sauvegarde"
-    requires = (SENTINELLE, "fj (CT)", "forgejo (armement)")
-
-    def check(self, ctx) -> Outcome:
-        ct = self._ct(ctx)
-        # Script CONSTANT, chemin en argument.
-        compte = ct.read(
-            "sh", "-c",
-            "find \"$1\" -mindepth 1 -maxdepth 1 -type d -name '20*' "
-            "! -name '*.part' 2>/dev/null | wc -l",
-            "sh", ctx.opts.mp2_mount,
-            check=False,
-        ).out
-        try:
-            nombre = int(compte or 0)
-        except ValueError:
-            nombre = 0
-
-        if nombre > 0:
-            return Outcome("ok", f"{nombre} sauvegarde(s) présente(s)")
-        if not ctx.opts.do_first_run:
-            return Outcome(
-                "error",
-                "aucune sauvegarde et --no-first-run — "
-                "la source de vérité reste sans filet",
-            )
-        return Outcome(
-            "absent",
-            "aucune sauvegarde — sans elle, rien à copier hors-site ni à restaurer",
-            (
-                Action(
-                    "systemctl start fj-backup.service (CT)",
-                    lambda c: Systemd(
-                        c.runner.for_container(c.opts.ctid)
-                    ).start("fj-backup.service"),
-                ),
-            ),
-        )

@@ -2,38 +2,31 @@
 
 `fj deploy --status` répond à « les fichiers sont-ils en place ». Celui-ci
 répond à une autre question, et c'est celle qu'on se pose vraiment un matin :
-**est-ce que ça marche ?** Un déploiement peut être vert de partout pendant
-qu'aucune sauvegarde ne part depuis trois semaines.
+**est-ce que ça marche ?**
 
-QUATRE MAILLONS, ET ILS PEUVENT SE ROMPRE CHACUN EN SILENCE :
+TROIS MAILLONS, ET ILS PEUVENT SE ROMPRE CHACUN EN SILENCE :
 
-    le service       Forgejo répond-il, et sur la version épinglée ?
-    la sauvegarde    y en a-t-il une, et de quand ?
-    le timer local   celui du CONTENEUR, qui la déclenche
-    le hors-site     celui du NŒUD, qui l'emporte ailleurs
+    le service       Forgejo répond-il ?
+    la version       est-ce bien celle qui est épinglée qui tourne ?
+    la base          le locataire du CT 200 répond-il depuis ce conteneur ?
 
-**UN MAILLON NON CONSTATÉ EST UNE ALARME, pas un silence.** Un bucket qui n'a
-pas répondu ne vaut pas un bucket cohérent, et un timer qu'on n'a pas pu
-interroger ne vaut pas un timer actif. C'est la règle qui manquait au CT 200
-et qui lui a valu un hors-site armé sur un volume jamais vérifié.
+CE QUI N'EST PAS ICI, ET CE N'EST PAS UN OUBLI. Ni la sauvegarde, ni la copie
+hors-site : la base de Forgejo est un locataire du cluster mutualisé, donc
+c'est `pg status` qui en juge, sur le CT 200. Les dépôts, eux, partent par
+`vzdump` du CT 400 et relèvent de la planification du nœud. Redoubler ces
+contrôles ici donnerait deux verdicts sur un même objet, et le jour où ils
+divergeraient personne ne saurait lequel croire.
 
-LES SEUILS VIENNENT DES UNITÉS. La sauvegarde tourne à 02:45, donc au-delà de
-26 heures une exécution a été manquée. Les écrire en dur ici les ferait
-diverger de l'unité le jour où l'horaire change.
+**UN MAILLON NON CONSTATÉ EST UNE ALARME, pas un silence.** Un conteneur qui
+n'a pas répondu ne vaut pas un conteneur sain.
 """
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 
 from core.commands import Systemd
 from core.runner import CommandError
-
-# 24 h de période, plus une marge pour le RandomizedDelaySec et un démarrage
-# tardif du nœud. Au-delà, une exécution a été sautée.
-SEUIL_SAUVEGARDE_H = 26
-SEUIL_HORSSITE_H = 27
 
 
 @dataclass
@@ -59,92 +52,87 @@ class Etat:
         self.maillons.append(Maillon(nom, ok, detail))
 
 
-def relever(ctx, *, maintenant: float | None = None) -> Etat:
-    """Interroge les quatre maillons. Ne modifie rien."""
-    maintenant = maintenant if maintenant is not None else time.time()
+def relever(ctx) -> Etat:
+    """Interroge les trois maillons. Ne modifie rien."""
     etat = Etat()
     ct = ctx.runner.for_container(ctx.opts.ctid)
 
     _service(etat, ct)
-    _sauvegarde(etat, ct, ctx, maintenant)
-    _timer_local(etat, ct)
-    _timer_horssite(etat, ctx)
+    _version(etat, ct, ctx)
+    _base(etat, ct)
     return etat
 
 
 def _service(etat: Etat, ct) -> None:
-    from fjtool import version as V
-    from fjtool.deploy import CT_BINAIRE
-
     try:
         actif = Systemd(ct).is_active("forgejo")
     except CommandError as exc:
         etat.ajouter("service Forgejo", None,
                      f"non constaté : {exc.result.stderr.strip()[:80]}")
         return
-    if not actif:
-        etat.ajouter("service Forgejo", False,
-                     "inactif — la source de vérité ne répond pas")
-        return
+    etat.ajouter(
+        "service Forgejo", actif,
+        "actif" if actif else "inactif — la source de vérité ne répond pas",
+    )
+
+
+def _version(etat: Etat, ct, ctx) -> None:
+    """La version SERVIE, comparée à l'épinglage du dépôt.
+
+    Deux façons d'échouer, et elles ne se confondent pas : le binaire ne
+    répond pas (installation cassée), ou il répond autre chose que ce que le
+    dépôt épingle (quelqu'un a posé une version à la main).
+    """
+    from fjtool import version as V
+    from fjtool.deploy import CT_BINAIRE
+
     res = ct.read(CT_BINAIRE, "--version", check=False)
-    posee = V.version_installee(res.stdout) if res.ok else None
-    etat.ajouter("service Forgejo", True, f"actif, {posee or 'version inconnue'}")
+    servie = V.version_installee(res.stdout) if res.ok else None
+    if servie is None:
+        etat.ajouter("version servie", None, f"{CT_BINAIRE} muet ou absent")
+        return
+
+    epinglee = V.lire(ctx.paths.version_file) if ctx.paths else None
+    if epinglee is None:
+        etat.ajouter("version servie", None, f"{servie} — aucun épinglage à comparer")
+        return
+    if servie == epinglee:
+        etat.ajouter("version servie", True, f"{servie} (épinglée)")
+        return
+    etat.ajouter(
+        "version servie", False,
+        f"{servie} servie, {epinglee} épinglée — rejouer fj deploy",
+    )
 
 
-def _sauvegarde(etat: Etat, ct, ctx, maintenant: float) -> None:
-    # `stat -c %Y` sur le lien RÉSOLU : `latest` est un symlink, et sa propre
-    # date ne dit rien de celle de la sauvegarde qu'il désigne.
+def _base(etat: Etat, ct) -> None:
+    """Le locataire du CT 200, éprouvé DEPUIS ce conteneur.
+
+    C'est le seul endroit d'où la question a un sens : la base peut très bien
+    répondre au CT 200 lui-même et refuser celui-ci, faute d'une ligne dans
+    `pg_hba.conf`.
+    """
+    from fjtool.steps.postgres import BASE, HOTE_PG, MOT_DE_PASSE, PORT_PG, ROLE
+
     res = ct.read(
-        "sh", "-c", 'stat -Lc %Y "$1/latest" 2>/dev/null || true',
-        "sh", ctx.opts.mp2_mount,
+        "sh", "-c",
+        'p=$(cat "$1" 2>/dev/null) || exit 1; '
+        'f=$(mktemp) || exit 1; '
+        'chmod 600 "$f"; '
+        'printf "%s:%s:%s:%s:%s\\n" "$2" "$3" "$4" "$5" "$p" > "$f"; '
+        'PGPASSFILE="$f" psql "sslmode=require host=$2 port=$3 dbname=$4 '
+        'user=$5" -tAc "SELECT 1"; '
+        'rc=$?; rm -f "$f"; exit $rc',
+        "sh", MOT_DE_PASSE, HOTE_PG, PORT_PG, BASE, ROLE,
         check=False,
     )
-    if not res.out:
-        etat.ajouter(
-            "sauvegarde locale", False,
-            f"aucune sauvegarde dans {ctx.opts.mp2_mount}",
-        )
+    if res.ok and res.out == "1":
+        etat.ajouter("base (CT 200)", True, f"{ROLE}@{HOTE_PG}/{BASE}, SSL")
         return
-    try:
-        age_h = int((maintenant - int(res.out)) // 3600)
-    except ValueError:
-        etat.ajouter("sauvegarde locale", None, f"date illisible : {res.out}")
-        return
-    if age_h > SEUIL_SAUVEGARDE_H:
-        etat.ajouter(
-            "sauvegarde locale", False,
-            f"{age_h} h — au-delà de {SEUIL_SAUVEGARDE_H} h, "
-            "une exécution a été manquée",
-        )
-        return
-    etat.ajouter("sauvegarde locale", True, f"{age_h} h")
-
-
-def _timer_local(etat: Etat, ct) -> None:
-    try:
-        arme = Systemd(ct).is_enabled("fj-backup.timer")
-    except CommandError as exc:
-        etat.ajouter("fj-backup.timer (CT)", None,
-                     f"non constaté : {exc.result.stderr.strip()[:80]}")
-        return
+    premiere = (res.stderr.strip().splitlines() or [""])[0]
     etat.ajouter(
-        "fj-backup.timer (CT)", arme,
-        "actif" if arme else "inactif — plus aucune sauvegarde ne partira",
-    )
-
-
-def _timer_horssite(etat: Etat, ctx) -> None:
-    if not ctx.opts.do_offsite:
-        return
-    try:
-        arme = Systemd(ctx.runner).is_enabled("fjbk-offsite.timer")
-    except CommandError as exc:
-        etat.ajouter("fjbk-offsite.timer (nœud)", None,
-                     f"non constaté : {exc.result.stderr.strip()[:80]}")
-        return
-    etat.ajouter(
-        "fjbk-offsite.timer (nœud)", arme,
-        "actif" if arme else "inactif — plus aucune copie hors-site ne partira",
+        "base (CT 200)", False,
+        premiere or "injoignable, sans message — le CT 200 tourne-t-il ?",
     )
 
 
@@ -165,9 +153,7 @@ def render_etat(etat: Etat) -> str:
     coller ce tableau dans un ticket sans traîner des horodatages.
     """
     largeur = max((len(m.nom) for m in etat.maillons), default=10)
-    lignes = []
-    for maillon in etat.maillons:
-        lignes.append(
-            f"  {maillon.verdict:<3} {maillon.nom:<{largeur}}  {maillon.detail}"
-        )
-    return "\n".join(lignes)
+    return "\n".join(
+        f"  {m.verdict:<3} {m.nom:<{largeur}}  {m.detail}"
+        for m in etat.maillons
+    )
