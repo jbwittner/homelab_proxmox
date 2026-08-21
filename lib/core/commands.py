@@ -68,6 +68,12 @@ class Psql:
     def run_sql(self, sql: str, *, db: str | None = None, **params: str) -> Result:
         """Joue du SQL avec des variables psql, sans passer par un fichier.
 
+        Le SQL part sur l'ENTRÉE STANDARD, jamais avec `-c`. psql ne substitue
+        `:"var"` que lorsqu'il lit depuis un fichier ou depuis son entrée
+        standard ; avec `-c`, la chaîne est transmise telle quelle au serveur,
+        qui répond « syntax error at or near ":" ». C'est ce que faisait le
+        heredoc du bash, et il avait raison.
+
         Même garantie que `run_file` : les identifiants arrivent par `-v` et
         c'est psql qui les cite. Rien n'est interpolé dans le texte SQL, donc
         un nom de rôle exotique ne peut pas en changer le sens.
@@ -76,8 +82,8 @@ class Psql:
         for key, value in params.items():
             pair = f"{key}={value}"
             extra += ["-v", Secret(pair) if isinstance(value, Secret) else pair]
-        extra += ["-q", "-c", sql]
-        return self.runner.write(*self._argv(db, extra))
+        extra += ["-q"]
+        return self.runner.write(*self._argv(db, extra), stdin=sql)
 
     def run_file(self, path: str, *, db: str | None = None, **params: str) -> Result:
         """Joue un script SQL avec des variables psql.

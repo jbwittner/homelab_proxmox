@@ -214,3 +214,47 @@ def test_core_ne_connait_pas_proxmox():
     assert not hasattr(commands, "Pct")
     source = Path(commands.__file__).read_text(encoding="utf-8")
     assert "pct " not in source.replace("pct n'existe pas", "")
+
+
+# ─── variables psql : jamais avec -c ─────────────────────────────────────────
+
+
+def test_run_sql_envoie_le_sql_sur_lentree_standard():
+    """psql ne substitue `:"var"` que sur l'entrée standard ou dans un fichier.
+    Avec `-c`, la chaîne part telle quelle au serveur, qui répond :
+
+        ERROR:  syntax error at or near ":"
+        LINE 1: REVOKE CONNECT ON DATABASE :"cible" FROM PUBLIC;
+
+    Constaté en production le 21 août 2026, pendant l'exercice de bascule, sur
+    la réapplication des ACL — l'étape dont l'absence ne produit sinon aucun
+    message.
+    """
+    r = FakeRunner()
+    sql = 'REVOKE CONNECT ON DATABASE :"cible" FROM PUBLIC;'
+    Psql(r).run_sql(sql, cible="forge")
+    argv = r.calls[-1]
+    assert "-c" not in argv, "avec -c, psql ne substitue rien"
+    assert r.stdins[-1] == sql
+    assert "-v" in argv and "cible=forge" in argv
+
+
+def test_run_sql_choisit_la_base_de_connexion():
+    """`db=` sélectionne la connexion ; les autres mots-clés sont des variables.
+    Les confondre ferait jouer le SQL sur la mauvaise base."""
+    r = FakeRunner()
+    Psql(r).run_sql("SELECT 1", db="forge", proprietaire="forge")
+    argv = r.calls[-1]
+    assert "-d" in argv and argv[argv.index("-d") + 1] == "forge"
+    assert "proprietaire=forge" in argv
+    assert "db=forge" not in argv, "db n'est pas une variable psql"
+
+
+def test_run_file_garde_le_fichier():
+    """`-f` substitue les variables lui aussi : c'est ainsi que tenant.sql
+    fonctionne depuis le début."""
+    r = FakeRunner()
+    Psql(r).run_file("/etc/pgsql-git/tenant.sql", name="forge")
+    argv = r.calls[-1]
+    assert "-f" in argv and argv[argv.index("-f") + 1] == "/etc/pgsql-git/tenant.sql"
+    assert "-c" not in argv

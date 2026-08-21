@@ -65,7 +65,14 @@ def _cluster(*, base_existe: bool, role_existe: bool = True,
 
 
 def _sql_envoye(runner: FakeRunner) -> str:
-    return "\n".join(" ".join(argv) for argv in runner.calls)
+    """Tout ce qui est parti vers psql, argv ET entrée standard.
+
+    Les ordres qui portent des variables psql passent par l'entrée standard :
+    avec `-c`, psql ne substituerait pas `:"var"`.
+    """
+    argvs = "\n".join(" ".join(argv) for argv in runner.calls)
+    entrees = "\n".join(e for e in runner.stdins if e)
+    return argvs + "\n" + entrees
 
 
 def _indice(runner: FakeRunner, binaire: str) -> int:
@@ -86,14 +93,17 @@ def _indice(runner: FakeRunner, binaire: str) -> int:
 def _indice_sql(runner: FakeRunner, fragment: str) -> int:
     """Rang du premier ordre SQL contenant `fragment`.
 
-    Cherché dans le seul argument qui suit `-c`, pour ne pas retomber sur un
-    chemin de fichier qui contiendrait les mêmes mots.
+    Cherché dans l'argument qui suit `-c` OU dans l'entrée standard, jamais
+    dans le reste de l'argv : un chemin de fichier peut contenir les mêmes
+    mots. Les deux canaux sont légitimes — une interrogation simple passe par
+    `-c`, un ordre à variables passe par l'entrée standard.
     """
     for i, argv in enumerate(runner.calls):
-        if "-c" in argv:
-            sql = argv[argv.index("-c") + 1]
-            if fragment in sql:
-                return i
+        if "-c" in argv and fragment in argv[argv.index("-c") + 1]:
+            return i
+        entree = runner.stdins[i]
+        if entree and fragment in entree:
+            return i
     return -1
 
 

@@ -430,6 +430,10 @@ class FakeRunner(Runner):
         self.responses = responses or {}
         self.matchers = matchers or []
         self.calls: list[tuple[str, ...]] = []
+        # Ce qui a été poussé sur l'entrée standard, appel par appel. Certaines
+        # commandes se pilotent par là et non par leur argv — psql substitue
+        # ses variables sur l'entrée standard, jamais avec -c.
+        self.stdins: list[str | None] = []
 
     def when(self, predicate, result: Result) -> "FakeRunner":
         """Ajoute un prédicat. `predicate` reçoit l'argv en tuple.
@@ -465,6 +469,7 @@ class FakeRunner(Runner):
     ) -> Result:
         argv = tuple(argv)
         self.calls.append(argv)
+        self.stdins.append(stdin)
         found = self._lookup(_mask(argv))
         result = found if found is not None else Result(_mask(argv), 0, "", "")
         if check and not result.ok:
