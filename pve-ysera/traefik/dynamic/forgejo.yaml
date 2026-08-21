@@ -1,0 +1,54 @@
+http:
+  routers:
+    forgejo:
+      rule: "Host(`forgejo.lan.wittner.tech`)"
+      entryPoints:
+        - websecure
+      service: forgejo
+      tls: {}
+
+  services:
+    forgejo:
+      loadBalancer:
+        # Le CT 400 sert en HTTP simple sur son IP : le LAN entre Traefik et
+        # le conteneur n'a pas de secret à protéger, et un certificat
+        # auto-signé de plus serait un certificat de plus à faire vivre.
+        servers:
+          - url: "http://192.168.1.57:3000"
+        # OBLIGATOIRE. Forgejo construit ses URL de redirection à partir de
+        # l'en-tête Host ; sans lui, une connexion réussie renvoie vers
+        # « http://192.168.1.57:3000/ » et le navigateur sort du TLS.
+        passHostHeader: true
+
+# ─── SSH ─────────────────────────────────────────────────────────────────────
+#
+# Le clone SSH passe par un routeur TCP sur un entryPoint dédié (2222, déclaré
+# dans ../traefik.yaml). Deux conséquences voulues :
+#
+#   - UN SEUL NOM D'HÔTE pour les deux protocoles. Les URL de clone que Forgejo
+#     affiche (ssh://git@forgejo.lan.wittner.tech:2222/…) sont alors justes
+#     sans entrée DNS supplémentaire, et ne portent pas d'IP — donc elles
+#     survivent à un changement d'adresse du conteneur.
+#   - LE PORT 22 DU CONTENEUR RESTE À L'ADMINISTRATION. C'est le serveur SSH
+#     INTERNE de Forgejo (Go) qui écoute sur 2222 ; les clés publiques des
+#     utilisateurs restent gérées par Forgejo seul et ne touchent jamais
+#     l'authorized_keys du compte d'administration.
+#
+# Ce chemin dépend de Traefik, comme le HTTPS : il n'ajoute donc AUCUNE
+# dépendance nouvelle à la source de vérité. Si Traefik est absent, le clone
+# reste possible en visant directement le conteneur — voir doc/PRA.md.
+tcp:
+  routers:
+    forgejo-ssh:
+      # HostSNI(`*`) : SSH n'émet pas de SNI, il n'y a donc rien à router sur
+      # le nom. C'est l'entryPoint qui fait la sélection, et lui seul.
+      rule: "HostSNI(`*`)"
+      entryPoints:
+        - ssh
+      service: forgejo-ssh
+
+  services:
+    forgejo-ssh:
+      loadBalancer:
+        servers:
+          - address: "192.168.1.57:2222"

@@ -1,0 +1,57 @@
+# /etc/systemd/system/fjbk-offsite.service
+#
+# UNITÉ DE L'HÔTE PROXMOX (pve-ysera), pas du CT 400.
+# Ne pas confondre avec fj-backup.service, qui vit DANS le conteneur.
+#
+[Unit]
+Description=Copie hors-site des sauvegardes Forgejo vers GCS
+Documentation=file:///root/homelab_proxmox/pve-ysera/forgejo/doc/RUNBOOK.md
+# Sans réseau, rclone échoue bruyamment — ce qui est le comportement voulu,
+# mais autant ne pas produire une alerte à chaque démarrage du nœud.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# root : les dumps sont en 600, propriété d'un UID de CT non privilégié.
+# Aucun autre compte de l'hôte ne peut les lire.
+User=root
+Group=root
+
+# POURQUOI SUR L'HÔTE ET NON DANS LE CT — le conteneur Forgejo est la source
+# de vérité d'ArgoCD. Il n'a aucune raison de détenir des identifiants GCP ni
+# d'atteindre internet en écriture. L'hôte lit le dataset des sauvegardes par
+# sa VUE HÔTE, et le conteneur ne sait rien de tout ceci.
+#
+# Ce nœud-ci, décrit à un seul endroit.
+Environment=FJBK_OFFSITE_NODE=pve-ysera
+# Vue HÔTE du volume mp2 du CT 400 — pas sa vue conteneur
+# (/var/backups/forgejo). « fj deploy » la résout par pvesm et pose un drop-in
+# 10-noeud.conf qui remplace cette valeur : celle-ci n'est qu'un repli lisible.
+Environment=FJBK_OFFSITE_SRC=/data/subvol-400-disk-0
+Environment=FJBK_OFFSITE_REMOTE=gcs
+# Le bucket est celui des sauvegardes PostgreSQL, réutilisé à dessein : mêmes
+# règles de cycle de vie (Nearline 30 j, Coldline 90 j, suppression 365 j),
+# même compte de service aux droits volontairement incomplets. Son nom parle
+# de « pgsql » pour des raisons historiques ; le sous-chemin distingue les
+# services, et l'arborescence distante reste gs://<bucket>/<nœud>/<service>/.
+Environment=FJBK_OFFSITE_BUCKET=homelab-pgsql-backups-dc93212a
+Environment=FJBK_OFFSITE_SUBPATH=forgejo
+Environment=FJBK_OFFSITE_CONFIG=/root/.config/rclone/rclone.conf
+Environment=FJBK_OFFSITE_KEY=/root/.config/rclone/pgsql-backups.json
+# Chemin absolu : le PATH de systemd n'inclut pas /usr/local/bin, et
+# « fj deploy » relit cette ligne pour vérifier que rclone est installé.
+Environment=FJBK_OFFSITE_RCLONE=/usr/bin/rclone
+Environment=FJBK_OFFSITE_TRANSFERS=4
+Environment=FJBK_OFFSITE_CHECK=hash
+Environment=FJBK_OFFSITE_STALE_HOURS=48
+
+# Chemin absolu : le PATH fourni par systemd n'inclut pas /usr/local/sbin.
+ExecStart=/usr/local/sbin/fj offsite
+
+# Une exécution qui traîne est un montage cassé, pas une lenteur passagère :
+# le timer repassera demain de toute façon.
+TimeoutStartSec=2h
+
+NoNewPrivileges=true
+PrivateTmp=true

@@ -1,0 +1,19 @@
+# /etc/systemd/system/fj-backup.timer
+#
+# UNITÉ DU CT 400, pas du nœud.
+#
+[Unit]
+Description=Sauvegarde Forgejo quotidienne
+
+[Timer]
+# 02:45, et non 02:30 comme le CT 200 : les deux nœuds copient vers le même
+# bucket, et les décaler évite que deux rclone se disputent la bande passante
+# montante de la maison au même quart d'heure.
+OnCalendar=*-*-* 02:45:00
+RandomizedDelaySec=10m
+# Le nœud est parfois éteint la nuit : rattraper au démarrage, sinon la
+# sauvegarde saute silencieusement les jours d'arrêt.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

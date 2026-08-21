@@ -203,8 +203,14 @@ sort en 1 s'il y en a un.
 - [ ] **Constater la parité de `pg <commande>`** avec `pgbk` dans le CT, puis
       retirer `ct/pgbk.sh` — il reste installé exprès, c'est le filet du
       conteneur tant que la restauration Python n'a pas été éprouvée.
-- [ ] Ligne du locataire `forgejo` dans `pg_hba.conf` — dépend de son IP
-      définitive. C'est le dernier geste que `pg deploy` ne fait pas.
+- [ ] **Retirer** la ligne du locataire `forgejo` de `ct/pg_hba.conf`, et sa
+      base si elle a été créée. Elle n'a plus d'objet : Forgejo a désormais
+      **son propre cluster, co-localisé dans le CT 400** de `pve-ysera`.
+      Mutualiser aurait créé la chaîne `pve-eranikus → CT 200 → Forgejo →
+      ArgoCD → cluster`, où une panne d'un nœud qui n'héberge même pas Forgejo
+      bloque toute réconciliation GitOps — voir
+      [pve-ysera/forgejo/doc/RUNBOOK.md § 3](../../pve-ysera/forgejo/doc/RUNBOOK.md#3-postgresql-co-localisé).
+      Tant qu'elle est là, elle décrit un accès qui ne servira jamais.
 - [ ] Copier `postgresql.vars` dans ce dépôt après vérification des secrets.
 - [ ] **Jouer l'exercice de bascule**
       ([doc/PRA-exercice.md](doc/PRA-exercice.md#exercice-de-bascule--valider-le-moteur-python)) —

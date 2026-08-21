@@ -20,9 +20,23 @@ PROXMOX = LIB / "proxmox"
 
 # Les règles génériques valent aussi pour l'outillage d'un service : c'est du
 # code de production, poussé sur les mêmes machines.
-OUTILS = sorted((REPO / "pve-eranikus" / "pgsql" / "pgtool").rglob("*.py"))
+#
+# Un service = un répertoire, un paquet d'outillage, un lanceur. Inscrire un
+# service ici est le geste qui le place sous la surveillance de TOUTES les
+# règles ci-dessous ; l'oublier laisserait son code hors de tout contrôle, et
+# aucun autre test ne le rattraperait.
+SERVICES = [
+    (REPO / "pve-eranikus" / "pgsql", "pgtool", "pg"),
+    (REPO / "pve-ysera" / "forgejo", "fjtool", "fj"),
+]
+
+OUTILS = [
+    chemin
+    for racine, paquet, _ in SERVICES
+    for chemin in sorted((racine / paquet).rglob("*.py"))
+]
 SOURCES = sorted(LIB.rglob("*.py")) + OUTILS
-LANCEURS = [REPO / "pve-eranikus" / "pgsql" / "pg"]
+LANCEURS = [racine / lanceur for racine, _, lanceur in SERVICES]
 
 
 def _relatif(chemin: Path) -> str:
@@ -54,7 +68,7 @@ def test_il_y_a_bien_des_sources_a_verifier():
 @pytest.mark.parametrize("chemin", SOURCES, ids=_relatif)
 def test_bibliotheque_standard_uniquement(chemin):
     """Aucun pip install sur l'hyperviseur ni dans un conteneur."""
-    interne = {"core", "proxmox", "pgtool"}
+    interne = {"core", "proxmox"} | {paquet for _, paquet, _ in SERVICES}
     externes = _modules_importes(chemin) - STDLIB - interne
     assert not externes, f"{chemin.name} importe hors stdlib : {sorted(externes)}"
 
@@ -157,8 +171,12 @@ def test_core_simporte_sans_proxmox(tmp_path):
     assert res.stdout.strip() == "ok"
 
 
-@pytest.mark.parametrize("chemin", LANCEURS, ids=_relatif)
-def test_le_lanceur_verifie_la_version_avant_tout(chemin):
+@pytest.mark.parametrize(
+    "chemin,paquet",
+    [(racine / lanceur, paquet) for racine, paquet, lanceur in SERVICES],
+    ids=[lanceur for _, _, lanceur in SERVICES],
+)
+def test_le_lanceur_verifie_la_version_avant_tout(chemin, paquet):
     """Le contrôle de version doit précéder l'import du reste : le message de
     refus doit pouvoir s'afficher là où le reste ne s'analyserait pas."""
     texte = chemin.read_text(encoding="utf-8")
@@ -166,8 +184,20 @@ def test_le_lanceur_verifie_la_version_avant_tout(chemin):
         "chemin absolu de l'interpréteur : le PATH de systemd et de pct exec "
         "est minimal"
     )
-    assert texte.index("require_python()") < texte.index("from pgtool")
+    assert texte.index("require_python()") < texte.index(f"from {paquet}")
     ast.parse(texte)
+
+
+@pytest.mark.parametrize("chemin", LANCEURS, ids=_relatif)
+def test_le_lanceur_est_executable(chemin):
+    """Un lanceur non exécutable ne se voit qu'à l'usage.
+
+    Le déploiement le pousse en 0755 dans le conteneur, donc la production
+    survit ; mais « ./fj » joué depuis le dépôt — la façon dont on compare une
+    commande à celle qu'elle remplace — échoue en « Permission denied », sans
+    rapport visible avec un bit perdu au commit.
+    """
+    assert chemin.stat().st_mode & 0o111, f"{chemin} n'est pas exécutable"
 
 
 def test_pytest_nest_jamais_importe_par_la_production():
@@ -176,25 +206,35 @@ def test_pytest_nest_jamais_importe_par_la_production():
         assert "pytest" not in _modules_importes(chemin), chemin.name
 
 
-def test_la_charge_utile_du_conteneur_simporte_seule(tmp_path):
+@pytest.mark.parametrize(
+    "racine,paquet,modules",
+    [
+        (REPO / "pve-eranikus" / "pgsql", "pgtool",
+         "pgtool.cli, pgtool.engine, pgtool.snapshots, pgtool.restore"),
+        (REPO / "pve-ysera" / "forgejo", "fjtool",
+         "fjtool.cli, fjtool.backup, fjtool.version"),
+    ],
+    ids=["pgtool", "fjtool"],
+)
+def test_la_charge_utile_du_conteneur_simporte_seule(
+    tmp_path, racine, paquet, modules
+):
     """Ce que `pct push` dépose dans le CT : `core/` et `pgtool/`, jamais
     `proxmox/`. Le moteur doit s'importer entièrement dans ces conditions —
     sinon il échoue dans le seul endroit où il est censé tourner.
 
     C'est aussi ce qui impose les imports paresseux de `cli.py`.
     """
-    faux_ct = tmp_path / "usr-local-lib-pgtool"
+    faux_ct = tmp_path / f"usr-local-lib-{paquet}"
     faux_ct.mkdir()
     (faux_ct / "core").symlink_to(CORE, target_is_directory=True)
-    (faux_ct / "pgtool").symlink_to(
-        REPO / "pve-eranikus" / "pgsql" / "pgtool", target_is_directory=True
-    )
+    (faux_ct / paquet).symlink_to(racine / paquet, target_is_directory=True)
 
     code = (
         f"import sys; sys.path.insert(0, {str(faux_ct)!r}); "
         "import importlib.util as u; "
         "assert u.find_spec('proxmox') is None, 'proxmox ne doit pas être dans le CT'; "
-        "import pgtool.cli, pgtool.engine, pgtool.snapshots, pgtool.restore; "
+        f"import {modules}; "
         "print('ok')"
     )
     res = subprocess.run([sys.executable, "-I", "-c", code],
