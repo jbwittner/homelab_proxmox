@@ -178,8 +178,11 @@ class Context:
                 continue
             if self.mode.applies:
                 self._handlers[nom](self)
-            else:
+            elif self.mode is Mode.DRY_RUN:
                 info(f"  [dry-run] effet : {nom}")
+            # En STATUS, on draine sans rien dire : ce mode rend des verdicts,
+            # pas un plan. Y annoncer un redémarrage ferait croire qu'il décrit
+            # ce qu'il ferait, ce qui est le rôle de --dry-run.
             joues.append(nom)
         return joues
 
@@ -313,7 +316,11 @@ class Barrier:
         if not en_attente:
             return Outcome("ok", "aucun effet en attente")
         ctx.flush()
-        return Outcome("ok", "effets vidés : " + ", ".join(en_attente))
+        # Le compte rendu suit ce qui a réellement eu lieu : dire « vidés » sur
+        # un mode qui ne touche à rien serait rendre compte d'une action qui
+        # n'a pas été faite.
+        verbe = "effets vidés" if ctx.mode.applies else "effets nécessaires"
+        return Outcome("ok", f"{verbe} : " + ", ".join(en_attente))
 
 
 def _reste_a_faire(rapport: Report) -> bool:

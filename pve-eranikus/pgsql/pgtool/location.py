@@ -78,15 +78,21 @@ def read_conf(chemin: Path = CONF) -> dict[str, str]:
 
 
 def resolve_ctid(
-    *, flag: str | None, env: Mapping[str, str], conf: Mapping[str, str]
+    *, flag: str | None, env: Mapping[str, str], conf: Mapping[str, str],
+    defaut: int | None = None,
 ) -> int:
-    """`--ctid`, puis l'environnement, puis le fichier. Jamais de défaut.
+    """`--ctid`, puis l'environnement, puis le fichier.
 
-    `pg deploy` garde un défaut parce qu'il doit pouvoir amorcer une
-    installation vierge. Ici, non : deviner un CTID, c'est risquer de
+    Sans `defaut`, l'absence est un refus : deviner un CTID, c'est risquer de
     restaurer une base dans le mauvais conteneur.
+
+    Seul `pg deploy` en passe un, et pour une raison précise : il doit pouvoir
+    amorcer une installation vierge, où `/etc/default/pgbk` n'existe pas encore
+    puisque c'est LUI qui l'écrit.
     """
     brut = flag or env.get("PG_CTID") or conf.get("PG_CTID") or ""
+    if not brut and defaut is not None:
+        return defaut
     if not brut:
         raise Refus(
             f"aucun conteneur cible : {CONF} absent ou sans PG_CTID\n"

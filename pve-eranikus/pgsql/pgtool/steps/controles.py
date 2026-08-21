@@ -95,9 +95,13 @@ class SocketsEnEcoute(Controle):
 
 
 class TimerSauvegarde(Controle):
-    """`pg-backup.timer`, DANS le conteneur."""
+    """`pg-backup.timer`, DANS le conteneur.
 
-    name = "pg-backup.timer"
+    Le nom porte « état » : la section B a une étape qui ARME ce timer, et deux
+    étapes homonymes rendraient une dépendance ambiguë et le bilan illisible.
+    """
+
+    name = "pg-backup.timer (état)"
 
     def check(self, ctx) -> Outcome:
         systemd = Systemd(ctx.runner.for_container(ctx.opts.ctid))
@@ -118,7 +122,7 @@ class TimerHorsSite(Controle):
     qu'on ne veut pas.
     """
 
-    name = "pgbk-offsite.timer"
+    name = "pgbk-offsite.timer (état)"
 
     def skip_if(self, ctx) -> str | None:
         if not ctx.opts.do_offsite:

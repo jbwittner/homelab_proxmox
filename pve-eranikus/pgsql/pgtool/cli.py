@@ -83,6 +83,149 @@ def _offsite(args: argparse.Namespace) -> int:
     return run(cfg, runner, dry_run=args.dry_run, now=time.time())
 
 
+# ─── pg deploy ───────────────────────────────────────────────────────────────
+
+# CTID par défaut, et le seul de tout l'outillage. `pg deploy` doit pouvoir
+# amorcer une installation vierge, quand `/etc/default/pgbk` n'existe pas
+# encore — c'est lui qui l'écrit. Les autres commandes, elles, refusent de
+# deviner : restaurer dans un conteneur supposé n'a pas d'excuse.
+CTID_PAR_DEFAUT = 200
+
+
+def _mode_de(args: argparse.Namespace):
+    """`--status` constate, `--dry-run` constate ET annonce ce qu'il ferait.
+
+    Les confondre ferait passer le premier pour un plan, alors qu'il ne dit
+    rien de ce qu'il faudrait faire.
+    """
+    from core.converge import Mode
+
+    if args.status:
+        return Mode.STATUS
+    if args.dry_run:
+        return Mode.DRY_RUN
+    return Mode.APPLY
+
+
+def _options_de(args: argparse.Namespace, *, ctid: int):
+    """Les drapeaux, tels quels. Un drapeau ne désactive jamais un contrôle."""
+    from pgtool.deploy import Options
+
+    return Options(
+        ctid=ctid,
+        do_container=not args.no_container,
+        do_offsite=not args.no_offsite,
+        do_install=not args.no_install,
+        do_first_run=not args.no_first_run,
+        force_restart=args.restart,
+        admin=args.admin,
+        tenant=args.tenant,
+    )
+
+
+def _secrets_autorises(opts) -> bool:
+    """Un mot de passe n'apparaît que si on l'a demandé.
+
+    Le moteur refuse toute action marquée `generates_secret` sans cette
+    autorisation ; c'est la règle d'AGENTS.md devenue propriété du parcours,
+    et non une discipline de relecture.
+    """
+    return bool(opts.admin or opts.tenant)
+
+
+def _source_du_depot(args: argparse.Namespace):
+    """Où lire ce qu'on va poser. Le dépôt, jamais la copie installée.
+
+    Poser depuis `/usr/local/lib/pgtool` reviendrait à redéployer ce qui est
+    déjà là : le déploiement n'aurait plus aucune source de vérité, et un
+    `git pull` cesserait d'avoir le moindre effet.
+    """
+    from pathlib import Path
+
+    from pgtool.location import Refus
+
+    if getattr(args, "src", None):
+        return Path(args.src)
+
+    racine = Path(__file__).resolve().parents[1]
+    if (racine / "ct").is_dir():
+        return racine
+    raise Refus(
+        "pg deploy se lance depuis le dépôt (…/pgsql/pg), pas depuis la "
+        "copie installée — ou passer --src <chemin du service>"
+    )
+
+
+def _contexte_deploy(args: argparse.Namespace, *, ctid: int, runner, src):
+    from pgtool.deploy import Paths, contexte
+
+    opts = _options_de(args, ctid=ctid)
+    return contexte(
+        runner=runner,
+        paths=Paths(src=src),
+        opts=opts,
+        mode=_mode_de(args),
+        allow_secrets=_secrets_autorises(opts),
+    )
+
+
+def _code_de_sortie(rapports) -> int:
+    """0 si rien n'a échoué. « Bloquée » n'est pas un échec.
+
+    Une étape bloquée est une étape NON DEMANDÉE — sortir en 1 ferait passer
+    un déploiement de routine pour un incident, et systemd le consignerait
+    comme tel.
+    """
+    from core.converge import BLOCKED, SKIP
+
+    for rapport in rapports:
+        if rapport.state in (SKIP, BLOCKED, "ok", "drift", "absent"):
+            continue
+        return 1
+    return 0
+
+
+def _deploy(args: argparse.Namespace) -> int:
+    """Un parcours, trois modes, un bilan.
+
+    Le bash refaisait quarante-quatre fois le triplet « constater / annoncer /
+    appliquer ». Ici il n'y a qu'un appel, et l'ordre des étapes est une donnée
+    que l'on peut relire.
+    """
+    import os
+
+    from core.converge import Mode, render_report, render_summary
+    from core.log import info, step
+    from core.runner import Runner
+    from pgtool.location import Refus, read_conf, resolve_ctid
+    from pgtool.plan import deployer
+
+    if os.geteuid() != 0:
+        raise Refus("à lancer en root sur le nœud (pct l'exige)")
+
+    src = _source_du_depot(args)
+    ctid = resolve_ctid(
+        flag=args.ctid, env=os.environ, conf=read_conf(),
+        defaut=CTID_PAR_DEFAUT,
+    )
+    ctx = _contexte_deploy(args, ctid=ctid, runner=Runner(), src=src)
+
+    step(f"CT {ctid} — dépôt {src} (mp1 : ct/, hôte : host/)")
+    if ctx.mode is not Mode.APPLY:
+        info(f"(mode --{ctx.mode.value} : aucune modification)")
+
+    rapports = deployer(ctx)
+
+    step("Résumé")
+    rendu = render_report(rapports) if ctx.mode is Mode.STATUS \
+        else render_summary(rapports)
+    for ligne in rendu.splitlines():
+        info(ligne)
+    if ctx.mode is not Mode.APPLY:
+        info("Aucune modification appliquée.")
+    return _code_de_sortie(rapports)
+
+
 def _positionnels(args: argparse.Namespace, commande: str) -> list[str]:
     """Reconstitue les arguments dans l'ordre, en s'arrêtant au premier absent.
 
@@ -314,6 +457,70 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     offsite.set_defaults(fonction=_offsite)
+
+    deploy = sous.add_parser(
+        "deploy",
+        help="pose et vérifie tout le montage : conteneur, nœud, hors-site",
+        description=(
+            "Convergence complète, sur le nœud. Le plan est produit par le "
+            "constat : ce que --dry-run annonce est exactement ce que le mode "
+            "réel exécute, il n'y en a pas deux descriptions."
+        ),
+        epilog=(
+            "Un drapeau --no-* ne désactive jamais un contrôle, seulement une "
+            "pose : le bilan reste complet quels que soient les drapeaux."
+        ),
+    )
+    deploy.add_argument(
+        "--status", action="store_true",
+        help="constate et dresse le bilan avec ses motifs. N'écrit rien.",
+    )
+    deploy.add_argument(
+        "--dry-run", action="store_true",
+        help="constate ET annonce chaque modification. N'écrit rien.",
+    )
+    deploy.add_argument(
+        "--restart", action="store_true",
+        help=(
+            "redémarre PostgreSQL même sans changement de configuration "
+            "(listen_addresses ne se relit pas à chaud)"
+        ),
+    )
+    deploy.add_argument(
+        "--no-container", action="store_true",
+        help="ne touche pas au conteneur — le hors-site ne s'armera pas",
+    )
+    deploy.add_argument(
+        "--no-offsite", action="store_true",
+        help="saute la copie hors-site et ses prérequis",
+    )
+    deploy.add_argument(
+        "--no-install", action="store_true",
+        help="n'installe aucun paquet ; un manque est constaté, pas comblé",
+    )
+    deploy.add_argument(
+        "--no-first-run", action="store_true",
+        help="ne déclenche pas la première sauvegarde",
+    )
+    deploy.add_argument(
+        "--admin", metavar="ROLE",
+        help=(
+            "crée un compte d'administration s'il n'existe pas. AFFICHE UN "
+            "MOT DE PASSE, une seule fois. Un rôle existant n'est jamais touché."
+        ),
+    )
+    deploy.add_argument(
+        "--tenant", metavar="NOM",
+        help=(
+            "crée une base et son rôle s'ils n'existent pas. AFFICHE UN MOT "
+            "DE PASSE, une seule fois."
+        ),
+    )
+    deploy.add_argument(
+        "--src", metavar="CHEMIN",
+        help=argparse.SUPPRESS,  # dépannage : le dépôt est trouvé tout seul
+    )
+    deploy.set_defaults(fonction=_deploy)
 
     for nom, positionnels in DELEGUEES.items():
         p = sous.add_parser(

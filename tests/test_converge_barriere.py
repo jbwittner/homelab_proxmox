@@ -95,3 +95,27 @@ def test_en_simulation_un_effet_sans_barriere_est_annonce_a_la_fin(capsys):
     assert journal == []
     capture = capsys.readouterr()
     assert "ct.reboot" in capture.out + capture.err
+
+
+def test_en_STATUS_rien_nest_annonce(capsys):
+    """`--status` rend des verdicts, pas un plan. Y voir « [dry-run] effet :
+    ct.reboot » ferait croire qu'il décrit ce qu'il ferait — c'est le rôle de
+    `--dry-run`, et confondre les deux ôte tout sens au premier."""
+    journal = []
+    ctx = Context(mode=Mode.STATUS)
+    ctx.on_effect("ct.reboot", lambda c: journal.append("reboot"))
+    traverse([Pose(journal), Barrier("fin de section A", "A")], ctx)
+    capture = capsys.readouterr()
+    assert "ct.reboot" not in capture.out + capture.err
+    assert journal == []
+
+
+def test_une_barriere_qui_napplique_pas_ne_dit_pas_AVOIR_vide():
+    """« effets vidés » sur un mode qui ne touche à rien serait le compte rendu
+    d'une action qui n'a pas eu lieu."""
+    journal = []
+    ctx = Context(mode=Mode.STATUS)
+    ctx.on_effect("ct.reboot", lambda c: journal.append("reboot"))
+    rapports = traverse([Pose(journal), Barrier("fin de section A", "A")], ctx)
+    assert "vidés" not in rapports[-1].detail
+    assert "ct.reboot" in rapports[-1].detail
