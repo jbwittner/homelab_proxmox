@@ -75,10 +75,21 @@ modification qu'il ferait**, redémarrage du conteneur compris. Un drapeau
 `--no-*` ne désactive jamais un contrôle, seulement une pose : le bilan reste
 complet quels que soient les drapeaux.
 
-`fj deploy` se joue **depuis le dépôt** — c'est de là qu'il lit ce qu'il pose.
-Les exemples ci-dessus omettent le préfixe
-`/root/homelab_proxmox/pve-eranikus/forgejo/`. Les autres commandes `fj`, elles,
-sont bien dans le `PATH` du nœud.
+`fj deploy` lit **dans le dépôt** ce qu'il pose : poser depuis la copie
+installée reviendrait à redéployer ce qui est déjà là, et un `git pull`
+cesserait d'avoir le moindre effet. Deux formes marchent, et une seule était
+documentée jusqu'au 21 août 2026 :
+
+```bash
+cd /root/homelab_proxmox && pve-eranikus/forgejo/fj deploy   # le lanceur du dépôt
+cd /root/homelab_proxmox/pve-eranikus/forgejo && fj deploy   # celui du PATH, depuis le service
+```
+
+La seconde échouait : `fj` sans chemin résout vers `/usr/local/sbin/fj`, la
+copie installée, qui cherchait le service **à côté d'elle-même** et refusait —
+en conseillant d'aller dans le dépôt à quelqu'un qui y était déjà. Le
+répertoire courant est désormais un candidat, et le refus nomme tout ce qui a
+été essayé.
 
 **Trois choses qu'il ne fait pas**, délibérément :
 

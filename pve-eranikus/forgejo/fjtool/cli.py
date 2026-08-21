@@ -182,28 +182,65 @@ def _key(args: argparse.Namespace) -> int:
 # ─── fj deploy ───────────────────────────────────────────────────────────────
 
 
-def _source_du_depot(args: argparse.Namespace):
-    """La racine du service DANS LE DÉPÔT.
+def racine_du_service(candidats):
+    """Le premier candidat qui porte `ct/app.ini`, sinon un refus argumenté.
 
-    `fj deploy` se joue depuis le dépôt : c'est de là qu'il lit ce qu'il pose,
-    et la copie installée dans /usr/local/sbin n'aurait rien à en dire.
+    Fonction PURE : toute la décision est ici, et se teste sans toucher au
+    système de fichiers de production.
+
+    LE REFUS NOMME TOUT CE QUI A ÉTÉ ESSAYÉ, et c'est le fruit d'un défaut
+    réel. Il n'en citait qu'un — celui de la copie installée — ce qui donnait,
+    à un opérateur pourtant placé dans le bon répertoire :
+
+        /usr/local/lib/fjtool ne ressemble pas au service Forgejo du dépôt
+        — jouer fj depuis le dépôt
+
+    Il y était. Un message qui envoie là où l'on se trouve déjà est pire qu'un
+    message absent : on cherche ce qu'on a mal fait, et il n'y a rien.
+    """
+    from fjtool.location import Refus
+
+    candidats = list(candidats)
+    for candidat in candidats:
+        if (candidat / "ct" / "app.ini").is_file():
+            return candidat
+
+    essayes = "\n".join(f"         — {c}" for c in candidats)
+    raise Refus(
+        "aucun service Forgejo trouvé (ct/app.ini introuvable).\n"
+        f"         Essayé :\n{essayes}\n"
+        "         Se placer dans le répertoire du service, jouer « ./fj » "
+        "depuis le dépôt,\n"
+        "         ou préciser « --src <chemin du service> »."
+    )
+
+
+def _source_du_depot(args: argparse.Namespace, *, module: "Path | None" = None):
+    """La racine du service DANS LE DÉPÔT, jamais la copie installée.
+
+    Poser depuis `/usr/local/lib/fjtool` reviendrait à redéployer ce qui est
+    déjà là : le déploiement n'aurait plus de source de vérité, et un
+    `git pull` cesserait d'avoir le moindre effet.
+
+    DEUX CANDIDATS, dans cet ordre :
+
+      1. le répertoire du module — c'est le cas de `./fj` joué depuis le
+         dépôt, la forme que la documentation écrit partout ;
+      2. **le répertoire courant** — c'est le cas de `fj` tapé sans chemin,
+         qui résout par le PATH vers la copie installée. L'opérateur est alors
+         presque toujours dans le répertoire du service, et l'y chercher est
+         la seule chose raisonnable à faire.
+
+    `module` n'existe que pour les tests : il remplace `__file__`.
     """
     from pathlib import Path
 
-    from fjtool.location import Refus
-
     if getattr(args, "src", None):
-        src = Path(args.src).resolve()
-    else:
-        # `fjtool/cli.py` → `fjtool/` → la racine du service.
-        src = Path(__file__).resolve().parents[1]
-    if not (src / "ct" / "app.ini").is_file():
-        raise Refus(
-            f"{src} ne ressemble pas au service Forgejo du dépôt "
-            "(ct/app.ini introuvable) — jouer fj depuis le dépôt, "
-            "ou préciser --src"
-        )
-    return src
+        return racine_du_service([Path(args.src).resolve()])
+
+    # `fjtool/cli.py` → `fjtool/` → la racine du service.
+    depuis_module = Path(module or __file__).resolve().parents[1]
+    return racine_du_service([depuis_module, Path.cwd().resolve()])
 
 
 def _contexte_deploy(args: argparse.Namespace, *, ctid: int, runner, src):
