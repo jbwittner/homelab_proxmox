@@ -278,3 +278,39 @@ class PgtoolHote(EtapeHote):
         etat = "absent" if not racine.is_dir() else "drift"
         detail = f"{len(a_poser)} à poser, {len(a_retirer)} à retirer"
         return Outcome(etat, detail, tuple(actions))
+
+
+class ConfCtid(EtapeHote):
+    """`/etc/default/pgbk` — la source unique du CTID.
+
+    Sans ce fichier, `pgbk` s'arrête plutôt que de taper dans un conteneur
+    supposé. Il se règle en rejouant `pg deploy --ctid <ID>`, jamais en
+    l'éditant : c'est ce que dit son en-tête, et le déploiement le fait tenir.
+    """
+
+    name = "CTID consigné"
+
+    def _contenu(self, ctx) -> str:
+        return "\n".join((
+            "# Généré par pg deploy — conteneur PostgreSQL piloté par pg.",
+            "# Changer de CT : rejouer « pg deploy --ctid <ID> », "
+            "pas éditer ce fichier.",
+            f"PG_CTID={ctx.opts.ctid}",
+        )) + "\n"
+
+    def check(self, ctx) -> Outcome:
+        cible = ctx.paths.conf
+        voulu = self._contenu(ctx)
+        actuel = cible.read_text() if cible.is_file() else ""
+        if actuel == voulu:
+            return Outcome("ok", f"{cible} : PG_CTID={ctx.opts.ctid}")
+        return Outcome(
+            "drift" if actuel else "absent",
+            f"{cible} — PG_CTID={ctx.opts.ctid}",
+            (
+                Action(
+                    f"écrire {cible} (PG_CTID={ctx.opts.ctid})",
+                    lambda c, p=cible, t=voulu: c.fs.write_file(p, t, mode=0o644),
+                ),
+            ),
+        )

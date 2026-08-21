@@ -217,3 +217,48 @@ def test_larbre_de_lhote_porte_proxmox(ctx):
     """Contrairement à celui du conteneur : le nœud en a besoin, le CT non."""
     _appliquer(PgtoolHote(), ctx)
     assert (ctx.paths.host_lib / "proxmox").is_dir()
+
+
+# ─── le CTID consigné ────────────────────────────────────────────────────────
+
+
+def test_le_ctid_est_consigne_dans_un_fichier(ctx, tmp_path):
+    """Source unique du CTID : sans ce fichier, `pgbk` s'arrête plutôt que de
+    taper dans un conteneur supposé."""
+    from pgtool.steps.hote import ConfCtid
+
+    cible = tmp_path / "default" / "pgbk"
+    ctx.paths.conf = cible
+    plan = ConfCtid().check(ctx)
+    assert plan.state == "absent"
+    for action in plan.actions:
+        action.run(ctx)
+    assert "PG_CTID=200" in cible.read_text()
+    assert stat.S_IMODE(cible.stat().st_mode) == 0o644
+
+
+def test_un_ctid_deja_consigne_ne_propose_rien(ctx, tmp_path):
+    from pgtool.steps.hote import ConfCtid
+
+    ctx.paths.conf = tmp_path / "pgbk"
+    etape = ConfCtid()
+    for action in etape.check(ctx).actions:
+        action.run(ctx)
+    assert etape.check(ctx).state == "ok"
+
+
+def test_changer_de_ctid_reecrit_le_fichier(ctx, tmp_path):
+    """Le fichier se règle en rejouant « pg deploy --ctid <ID> », pas en
+    l'éditant : c'est ce que dit son en-tête, et c'est vrai."""
+    from pgtool.deploy import Options
+    from pgtool.steps.hote import ConfCtid
+
+    ctx.paths.conf = tmp_path / "pgbk"
+    for action in ConfCtid().check(ctx).actions:
+        action.run(ctx)
+    ctx.opts = Options(ctid=201)
+    plan = ConfCtid().check(ctx)
+    assert plan.state == "drift"
+    for action in plan.actions:
+        action.run(ctx)
+    assert "PG_CTID=201" in (tmp_path / "pgbk").read_text()

@@ -158,16 +158,29 @@ class Context:
         for effet in effets:
             self._pending[effet] = None
 
+    def pending(self) -> tuple[str, ...]:
+        """Les effets demandés et pas encore vidés, dans l'ordre de demande."""
+        return tuple(self._pending)
+
     def flush(self) -> list[str]:
-        """Joue les effets demandés, chacun une fois, dans l'ordre."""
+        """Vide les effets demandés, chacun une fois, dans l'ordre.
+
+        En simulation, ils sont ANNONCÉS et non joués. C'est ce qui permet à
+        `--dry-run` de dire « il faudra redémarrer le CT » — l'information la
+        plus utile de ce mode, et celle qu'un vidage réservé à l'exécution
+        ferait disparaître exactement là où on la cherche.
+        """
         joues: list[str] = []
         while self._pending:
             nom = next(iter(self._pending))
             del self._pending[nom]
-            handler = self._handlers.get(nom)
-            if handler is not None:
-                handler(self)
-                joues.append(nom)
+            if nom not in self._handlers:
+                continue
+            if self.mode.applies:
+                self._handlers[nom](self)
+            else:
+                info(f"  [dry-run] effet : {nom}")
+            joues.append(nom)
         return joues
 
 
@@ -263,9 +276,44 @@ def traverse(
 
     if ctx.mode.applies:
         ctx.request(effets_finaux)
-    for effet in ctx.flush():
-        info(f"  effet : {effet}")
+        for effet in ctx.flush():
+            info(f"  effet : {effet}")
+    else:
+        # Ce qui n'a pas été vidé par une barrière se dit ici, sinon
+        # l'information se perdrait au lieu d'être annoncée.
+        ctx.flush()
     return rapports
+
+
+class Barrier:
+    """Une étape qui ne constate rien : elle VIDE les effets en attente.
+
+    « Redémarrer après tous les `pct set` » est un effet coalescé, pas un ordre
+    de déclaration — et il faut bien un endroit où le vider. Cet endroit ne
+    peut pas être la fin du parcours : la section suivante observerait alors un
+    conteneur d'avant son redémarrage, donc un montage encore vide.
+
+    Elle touche au contexte depuis `check()`, ce que les autres étapes ne font
+    pas. La règle qu'elle respecte reste intacte : **rien n'est fait au SYSTÈME
+    hors du mode qui applique**. En simulation, `flush()` annonce et n'exécute
+    pas — et c'est précisément là que « il faudra redémarrer » se lit.
+    """
+
+    def __init__(self, name: str, section: str,
+                 requires: Sequence[str] = ()) -> None:
+        self.name = name
+        self.section = section
+        self.requires = tuple(requires)
+
+    def skip_if(self, ctx: "Context") -> str | None:
+        return None
+
+    def check(self, ctx: "Context") -> Outcome:
+        en_attente = ctx.pending()
+        if not en_attente:
+            return Outcome("ok", "aucun effet en attente")
+        ctx.flush()
+        return Outcome("ok", "effets vidés : " + ", ".join(en_attente))
 
 
 def _reste_a_faire(rapport: Report) -> bool:
@@ -274,9 +322,13 @@ def _reste_a_faire(rapport: Report) -> bool:
 
 def _jouer(actions: Sequence[Action], ctx: Context) -> tuple[str, ...]:
     if not ctx.mode.applies:
-        if ctx.mode is Mode.DRY_RUN:
-            for action in actions:
+        for action in actions:
+            if ctx.mode is Mode.DRY_RUN:
                 info(f"  [dry-run] {action.label}")
+            # Demandé même sans être joué : c'est ce qui permet d'annoncer le
+            # redémarrage que ces poses rendraient nécessaire. Le vidage, lui,
+            # n'exécute rien dans ce mode.
+            ctx.request(action.effects)
         return ()
     faites: list[str] = []
     for action in actions:
