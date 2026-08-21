@@ -272,3 +272,43 @@ def test_laide_dune_sous_commande_nest_pas_une_erreur():
     with pytest.raises(SystemExit) as sortie:
         main(["offsite", "--help"])
     assert sortie.value.code == 0
+
+
+# ─── parité d'affichage avec le moteur bash ──────────────────────────────────
+
+
+def test_le_tableau_est_une_donnee_le_bilan_est_un_message(
+    monkeypatch, capsys, tmp_path
+):
+    """Le bash horodate la seule ligne de bilan, pas les lignes du tableau —
+    et c'est exactement la distinction posée dans log.py : une donnée se
+    recopie telle quelle, un message porte l'heure et son niveau.
+
+    Écart constaté à la comparaison des deux moteurs le 21 août 2026 :
+
+        bash   : 10:17:14 [INFO ] 8 sauvegarde(s), 34K — 51200 Mo libres
+        python : 8 sauvegarde(s), 34K — 51200 Mo libres
+    """
+    import re
+
+    dest = tmp_path / "postgresql" / "20260820-093240"
+    dest.mkdir(parents=True)
+    for f in ("globals.sql", "forge.dump", "MANIFEST"):
+        (dest / f).write_text("x")
+
+    monkeypatch.setattr(location, "detect", lambda _r: Where.CONTAINER)
+    monkeypatch.setattr(runner_mod, "Runner", lambda *a, **k: FakeRunner())
+    monkeypatch.setattr("os.geteuid", lambda: 0)
+    monkeypatch.setenv("PG_BACKUP_DEST", str(tmp_path / "postgresql"))
+
+    main(["list"])
+    lignes = [l for l in capsys.readouterr().out.splitlines() if l]
+
+    horodate = re.compile(r"^\d{2}:\d{2}:\d{2} \[INFO \] ")
+    bilan = [l for l in lignes if "sauvegarde(s)" in l]
+    assert bilan and horodate.match(bilan[0]), "le bilan est un message"
+
+    tableau = [l for l in lignes if "20260820-093240" in l or "INSTANTANÉ" in l]
+    assert tableau, "le tableau doit être là"
+    for ligne in tableau:
+        assert not horodate.match(ligne), "une donnée ne s'horodate pas"

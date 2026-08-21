@@ -162,12 +162,23 @@ def render_list(store: Store, *, maintenant: float) -> str:
             " ".join(s.databases),
             " ← latest" if s.path == dernier.path else "",
         ))
-    lignes.append("")
-    lignes.append(
+    return "\n".join(lignes)
+
+
+def list_summary(store: Store) -> str:
+    """La ligne de bilan, SÉPARÉE du tableau.
+
+    Le tableau est une donnée : il se recopie tel quel, sans horodatage. Le
+    bilan est un message sur cette donnée, il passe donc par la journalisation
+    et porte l'heure et son niveau — la distinction posée dans `core.log`, et
+    celle que le bash faisait déjà en n'horodatant que cette ligne-là.
+    """
+    instantanes = store.snapshots()
+    total = sum(s.size_bytes() for s in instantanes)
+    return (
         f"{len(instantanes)} sauvegarde(s), {human_size(total)} — "
         f"{free_mb(store.dest)} Mo libres"
     )
-    return "\n".join(lignes)
 
 
 def render_show(store: Store, ref: str = "latest") -> str:

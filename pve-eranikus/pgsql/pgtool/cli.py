@@ -130,6 +130,7 @@ def _moteur(args: argparse.Namespace, runner) -> int:
         DeleteRefused,
         describe_delete,
         do_delete,
+        list_summary,
         plan_delete,
         render_list,
         render_show,
@@ -152,6 +153,9 @@ def _moteur(args: argparse.Namespace, runner) -> int:
     try:
         if commande == "list":
             print(render_list(store, maintenant=time.time()))
+            if store.snapshots():
+                print()
+                info(list_summary(store))
             return 0
 
         if commande == "show":
