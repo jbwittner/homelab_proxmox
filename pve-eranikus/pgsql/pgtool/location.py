@@ -22,12 +22,12 @@ gardes, n'efface rien, et n'écrit sur la sortie standard que le nom résolu.
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from core.log import error
 from core.runner import CommandError, Runner
 
 # Chemin du moteur DANS le conteneur. Absolu : le PATH de `pct exec` est
@@ -140,8 +140,14 @@ class Delegate:
         try:
             res = self.runner.read(*self._argv(commande, args, "--plan"))
         except CommandError as exc:
-            for ligne in exc.result.stderr.splitlines():
-                error(ligne)
+            # Recopié VERBATIM. Le moteur formate déjà ses lignes
+            # (« HH:MM:SS [ERROR] … ») ; les repasser par error() les
+            # préfixerait une seconde fois, et le journal porterait deux
+            # horodatages sur la même ligne. La façade achemine, elle ne
+            # réécrit pas ce que le conteneur a dit.
+            sortie = exc.result.stderr.rstrip("\n")
+            if sortie:
+                print(sortie, file=sys.stderr, flush=True)
             raise Refus("") from exc
         return res.out
 

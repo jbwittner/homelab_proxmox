@@ -245,3 +245,31 @@ def test_la_question_dit_ce_quelle_attend():
 def test_first_positional_saute_les_options():
     assert first_positional(["--yes", "forge", "20260819"]) == "forge"
     assert first_positional(["--yes"]) is None
+
+
+def test_le_refus_du_moteur_est_recopie_verbatim(capsys):
+    """Le moteur formate déjà ses lignes. Les repasser par error() en
+    ajouterait un second — le journal porterait deux horodatages sur la même
+    ligne, ce qui casse le format que tout le reste respecte.
+
+    Constaté en production le 21 août 2026 sur « pg delete latest --plan ».
+    """
+    ligne = "09:20:34 [ERROR] le dernier instantané est protégé"
+    r = _noeud()
+    r.when("--plan", Result(("pct",), 1, "", ligne + "\n"))
+    with pytest.raises(Refus):
+        Delegate(r, 200).plan("delete", ["latest"])
+    err = capsys.readouterr().err
+    assert err.strip() == ligne
+    assert err.count("[ERROR]") == 1, "un seul préfixe, pas deux"
+    assert err.count("09:20:34") == 1, "un seul horodatage"
+
+
+def test_un_refus_muet_najoute_pas_de_ligne_vide(capsys):
+    """Un moteur qui échoue sans rien dire ne doit pas produire une ligne
+    vide décorée."""
+    r = _noeud()
+    r.when("--plan", Result(("pct",), 1, "", ""))
+    with pytest.raises(Refus):
+        Delegate(r, 200).plan("delete", ["x"])
+    assert capsys.readouterr().err == ""
