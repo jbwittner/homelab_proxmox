@@ -94,15 +94,18 @@ class VersionEpinglee:
 
 
 class CleDePublication:
-    """La clé qui signe les publications Forgejo, dans un trousseau dédié.
+    """La clé qui signe les publications, comparée à l'empreinte ÉPINGLÉE.
 
-    Elle n'est PAS téléchargée par ce code, et ce n'est pas une lacune : une
-    clé récupérée par le même canal que l'artefact ne prouve rien de plus que
-    l'artefact. Elle est déposée à la main dans `ct/RELEASE-KEY.asc` après
-    avoir été confrontée à une source indépendante — voir doc/RUNBOOK.md § 4.
+    Cette étape ne récupère rien — c'est `fj key --fetch` qui le fait, une
+    fois, et qui écrit l'empreinte dans le dépôt. Ici on VÉRIFIE, à chaque
+    déploiement, que la clé qui va servir à valider le binaire est toujours
+    celle qu'on a approuvée.
 
-    Ce que fait cette étape : constater qu'elle est là, et l'importer dans un
-    trousseau à part.
+    C'est la partie qui vaut quelque chose. Une signature vérifiée contre
+    n'importe quelle clé ne prouve rien ; vérifiée contre une clé épinglée,
+    elle prouve que l'artefact vient de la même origine que la dernière fois.
+    Un changement de clé de signature devient un REFUS, pas une chose qu'on
+    avale sans la voir.
     """
 
     name = CLE_DE_PUBLICATION
@@ -114,24 +117,51 @@ class CleDePublication:
         return None
 
     def check(self, ctx) -> Outcome:
-        source = ctx.paths.ct_src / "RELEASE-KEY.asc"
-        if not source.is_file():
+        from fjtool import cle as K
+
+        bloc = ctx.paths.release_key
+        epinglee = K.lire(ctx.paths.key_fingerprint)
+
+        if epinglee is None:
             return Outcome(
                 "error",
-                f"{source} absent — sans clé, rien ne peut être vérifié et "
-                "rien ne sera installé ; voir doc/RUNBOOK.md section 4",
+                f"{ctx.paths.key_fingerprint} ne porte aucune empreinte — "
+                "l'épingler : fj key --fetch (n'installe rien) ; "
+                "voir doc/RUNBOOK.md section 4",
             )
-        empreintes = _empreintes_du_trousseau(ctx)
-        if empreintes:
-            ctx.facts["gpg_ok"] = True
-            return Outcome("ok", f"{TROUSSEAU} — {', '.join(empreintes)}")
+        if not bloc.is_file():
+            return Outcome(
+                "error",
+                f"{bloc} absent alors qu'une empreinte est épinglée — "
+                "rejouer : fj key --fetch",
+            )
+
+        # Ce que le DÉPÔT porte, comparé à ce que le dépôt ÉPINGLE. Les deux
+        # fichiers peuvent diverger : l'un a pu être remplacé sans l'autre.
+        try:
+            K.retenir(K.empreintes(ctx.runner, bloc), epinglee=epinglee)
+        except K.CleError as exc:
+            return Outcome("error", str(exc))
+
+        ctx.facts["gpg_ok"] = True
+        ctx.facts["gpg_fingerprint"] = epinglee
+
+        # Le trousseau dédié doit porter CETTE clé, et pas une autre restée
+        # d'un passage précédent.
+        dans_trousseau = [
+            K.normaliser(f) for f in _empreintes_du_trousseau(ctx)
+        ]
+        if epinglee in dans_trousseau:
+            return Outcome("ok", f"{epinglee} — {TROUSSEAU}")
+
         return Outcome(
-            "absent",
-            f"{TROUSSEAU} vide ou absent",
+            "drift" if dans_trousseau else "absent",
+            f"{epinglee} épinglée, trousseau : "
+            + (", ".join(dans_trousseau) or "vide"),
             (
                 Action(
-                    f"gpg --import {source} → {TROUSSEAU}",
-                    lambda c, s=source: _importer(c, s),
+                    f"gpg --import {bloc} → {TROUSSEAU}",
+                    lambda c, s=bloc: _importer(c, s),
                 ),
             ),
         )

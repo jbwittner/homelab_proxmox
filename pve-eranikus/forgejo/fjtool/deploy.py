@@ -97,6 +97,23 @@ class Paths:
         lire, c'est ce qui permet de comparer l'épinglage au binaire posé."""
         return self.ct_src / "VERSION"
 
+    @property
+    def release_key(self) -> Path:
+        """Le bloc de clé publique qui signe les publications Forgejo."""
+        return self.ct_src / "RELEASE-KEY.asc"
+
+    @property
+    def key_fingerprint(self) -> Path:
+        """L'empreinte ÉPINGLÉE de cette clé.
+
+        Deux fichiers plutôt qu'un, et ce n'est pas une redondance : le bloc de
+        clé est un pavé illisible dont le `git diff` ne dit rien à un humain.
+        L'empreinte, elle, tient sur une ligne — un changement de clé se voit
+        donc dans une revue, au lieu de se cacher dans mille caractères
+        d'armure ASCII.
+        """
+        return self.ct_src / "RELEASE-KEY.fingerprint"
+
 
 @dataclass(frozen=True)
 class Options:

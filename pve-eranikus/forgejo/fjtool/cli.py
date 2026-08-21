@@ -117,6 +117,72 @@ def _version(args: argparse.Namespace) -> int:
     return 0
 
 
+# ─── fj key ──────────────────────────────────────────────────────────────────
+
+
+def _key(args: argparse.Namespace) -> int:
+    """Lit l'empreinte épinglée, ou récupère la clé et l'épingle.
+
+    Même séparation que pour la version, et pour la même raison : **récupérer
+    et poser sont deux gestes**. `fj deploy` n'interroge personne — il vérifie
+    que la clé du dépôt correspond toujours à l'empreinte du dépôt.
+    """
+    from core.log import info, step, warn
+    from core.runner import Runner
+    from fjtool import cle as K
+    from fjtool.deploy import Paths
+
+    paths = Paths(src=_source_du_depot(args))
+    runner = Runner()
+
+    epinglee = K.lire(paths.key_fingerprint)
+
+    if not args.fetch:
+        if not epinglee:
+            error(f"{paths.key_fingerprint} ne porte aucune empreinte")
+            error("         l'épingler : fj key --fetch")
+            return 1
+        info(f"{epinglee}")
+        if not paths.release_key.is_file():
+            warn(f"  {paths.release_key} absent — rejouer fj key --fetch")
+            return 1
+        # Ce que le dépôt porte VRAIMENT, et non ce qu'il prétend porter : les
+        # deux fichiers peuvent diverger si l'un a été édité à la main.
+        try:
+            trouvees = K.empreintes(runner, paths.release_key)
+            K.retenir(trouvees, epinglee=epinglee)
+        except K.CleError as exc:
+            error(str(exc))
+            return 1
+        info(f"  {paths.release_key} correspond")
+        return 0
+
+    source = args.source or K.URL_PAR_DEFAUT
+    step(f"récupération de la clé depuis {source}")
+    try:
+        bloc = K.recuperer(source)
+        paths.release_key.write_bytes(bloc)
+        trouvees = K.empreintes(runner, paths.release_key)
+        retenue = K.retenir(trouvees, epinglee=epinglee)
+    except K.CleError as exc:
+        error(str(exc))
+        return 1
+
+    if epinglee == retenue:
+        info(f"  {retenue} — déjà épinglée, inchangée")
+        return 0
+
+    paths.key_fingerprint.write_text(
+        K.rendre(retenue, source=source), encoding="utf-8"
+    )
+    info(f"  empreinte : {retenue}")
+    info(f"  écrite dans {paths.key_fingerprint}")
+    warn("  À COMMITER — c'est ce fichier qui rend un changement de clé visible")
+    warn("  Facultatif, une minute : comparer cette empreinte à celle annoncée")
+    warn("  par le projet ailleurs que sur la page de téléchargement.")
+    return 0
+
+
 # ─── fj deploy ───────────────────────────────────────────────────────────────
 
 
@@ -384,6 +450,18 @@ def construire_parseur() -> Parser:
     ver.add_argument("--resolve", action="store_true",
                      help="interroge Codeberg et réécrit ct/VERSION")
     ver.set_defaults(fonction=_version)
+
+    # -- key -------------------------------------------------------------
+    key = sous.add_parser(
+        "key", help="la clé de signature : l'empreinte épinglée, ou la récupérer"
+    )
+    ctid_local(key)
+    key.add_argument("--src", help="racine du service dans le dépôt")
+    key.add_argument("--fetch", action="store_true",
+                     help="récupère la clé et épingle son empreinte")
+    key.add_argument("--from", dest="source", metavar="URL|FICHIER",
+                     help="d'où récupérer la clé (défaut : le site du projet)")
+    key.set_defaults(fonction=_key)
 
     # -- status ----------------------------------------------------------
     sta = sous.add_parser("status", help="les maillons du montage, ensemble")

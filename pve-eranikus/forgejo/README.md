@@ -172,7 +172,7 @@ clé GCS.
 | `fj`, `fjtool/` + `lib/` (racine du dépôt) | **hôte** | `/usr/local/sbin/fj`, arbre d'import en `/usr/local/lib/fjtool` |
 | `fjtool/` + `lib/core/` poussés par `pct push` | **CT 400** | `/usr/local/lib/fjtool/`, lanceur en `/usr/local/bin/fj` |
 | `ct/app.ini` | **CT 400** | **copie** en `/etc/forgejo/app.ini` (0640 root:git) |
-| `ct/VERSION`, `ct/RELEASE-KEY.asc` | lus par l'**hôte** | rien — ils gouvernent ce qui est téléchargé |
+| `ct/VERSION`, `ct/RELEASE-KEY.asc`, `ct/RELEASE-KEY.fingerprint` | lus par l'**hôte** | rien — ils gouvernent ce qui est téléchargé, et ce qui est refusé |
 | `ct/forgejo.service` | **CT 400** | `/etc/systemd/system/` du CT |
 | `ct/fj-backup.service` / `.timer` | **CT 400** | `/etc/systemd/system/` du CT |
 | `ct/10-forgejo.conf`, `ct/pg_hba.conf`, `ct/pg_ident.conf` | **CT 400** | symlinks depuis `/etc/forgejo-git` |
@@ -224,8 +224,10 @@ Avant de chercher : **`fj status`** dit lequel des quatre maillons est rompu.
       rendre un bilan vert tant qu'il est là. C'est l'IP du CT 201.
 - [x] **Résoudre `ct/VERSION`** (`fj version --resolve`) et commiter — sans
       elle, `fj deploy` n'installe rien, délibérément.
-- [ ] **Déposer `ct/RELEASE-KEY.asc`** après l'avoir confrontée à une source
-      indépendante ([§ 4](doc/RUNBOOK.md#la-clé-de-publication)).
+- [ ] **Épingler la clé de signature** : `fj key --fetch`, puis commiter les
+      deux fichiers produits. Une minute. Ensuite, toute mise à jour dont la
+      clé aurait changé est refusée
+      ([§ 4](doc/RUNBOOK.md#la-clé-de-publication)).
 - [ ] **Le credential ArgoCD → Forgejo doit être un Sealed Secret**, pas un
       ExternalSecret : un ExternalSecret réintroduirait la dépendance
       ESO → OpenBao au démarrage, ce qui viole le principe « Sealed Secrets

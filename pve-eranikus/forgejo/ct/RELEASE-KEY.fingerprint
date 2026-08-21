@@ -1,0 +1,24 @@
+# Empreinte de la clé qui signe les publications Forgejo.
+#
+# Une seule ligne utile : 40 caractères hexadécimaux. Tout ce qui commence
+# par « # » est un commentaire.
+#
+# ÉPINGLÉE. « fj deploy » refuse d'installer si la clé de ct/RELEASE-KEY.asc
+# ne correspond plus à cette empreinte. Un changement de clé de signature
+# devient donc un refus, et non une chose qu'on avale sans la voir.
+#
+# Pour l'épingler, depuis le dépôt :
+#
+#     fj key --fetch
+#     fj key --fetch --from <url-ou-fichier>   # si l'URL par défaut ne répond pas
+#
+# La commande récupère la clé, écrit ct/RELEASE-KEY.asc, affiche l'empreinte et
+# la consigne ici. Elle n'installe rien : c'est « fj deploy » qui pose, et il
+# ne pose que si la clé correspond toujours.
+#
+# Voir doc/RUNBOOK.md section 4.
+#
+# --- NON ÉPINGLÉE ---
+# Tant qu'aucune ligne d'empreinte ne figure ci-dessous, « fj deploy » refuse
+# d'installer et le dit. C'est délibéré : vérifier une signature contre une
+# clé quelconque ne prouve rien.

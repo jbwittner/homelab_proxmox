@@ -351,24 +351,61 @@ remplacer l'un peut remplacer l'autre. C'est la signature qui rattache
 l'artefact à une clé — et **cette clé doit avoir été obtenue autrement que par
 le canal qu'elle sert à valider**.
 
-Elle n'est donc pas téléchargée par ce code. Elle se dépose une fois, à la
-main, dans `ct/RELEASE-KEY.asc`, après avoir été confrontée à une source
-indépendante du téléchargement (la page de publication Forgejo **et** une
-seconde source : annonce officielle, empreinte publiée ailleurs, copie déjà
-présente sur une autre machine de confiance).
+D'où la question : d'où vient la clé, et comment sait-on que c'est la bonne ?
+
+**Ce qu'on fait ici est de la confiance à la première utilisation, puis de
+l'épinglage.** La clé est récupérée UNE fois, son empreinte est écrite dans le
+dépôt et commitée. À partir de là, chaque déploiement vérifie que la clé qui
+sert à valider le binaire est toujours celle-là.
 
 ```bash
-# Sur le nœud, une fois la clé obtenue et vérifiée hors bande :
-cp forgejo-release.asc /root/homelab_proxmox/pve-eranikus/forgejo/ct/RELEASE-KEY.asc
-cd /root/homelab_proxmox && git add -A && git commit -m 'clé de publication Forgejo'
+fj key                  # l'empreinte épinglée, et si la clé du dépôt correspond
+fj key --fetch          # récupère la clé, écrit ct/RELEASE-KEY.asc,
+                        # et épingle son empreinte — N'INSTALLE RIEN
+fj key --fetch --from https://exemple/cle.asc   # autre URL
+fj key --fetch --from ./cle-recuperee.asc       # ou un fichier local
 ```
 
-`fj deploy` l'importe alors dans un **trousseau dédié**
-(`/var/lib/fjtool/forgejo-release.gpg`), jamais dans celui de root : y importer
-une clé de publication la rendrait de confiance pour tout ce que root vérifie
-ensuite, bien au-delà de Forgejo.
+Deux fichiers en sortent, et ce n'est pas une redondance :
 
-Relire ce que le trousseau contient :
+| Fichier | Rôle |
+|---|---|
+| `ct/RELEASE-KEY.asc` | le bloc de clé — un pavé dont le `git diff` ne dit rien à un humain |
+| `ct/RELEASE-KEY.fingerprint` | l'empreinte, sur une ligne — **c'est elle qui rend un changement de clé visible en revue** |
+
+**L'URL par défaut n'a pas pu être vérifiée** au moment de l'écriture (le
+domaine était injoignable depuis la machine de développement). Si elle ne
+répond pas, `--from` accepte n'importe quelle source, y compris un fichier
+récupéré à la main par le moyen qu'on veut.
+
+### Ce que l'épinglage protège, et ce qu'il ne protège pas
+
+**Il protège les mises à jour.** Si la clé de signature change — que ce soit
+le projet qui en change ou quelqu'un qui substitue la sienne — le déploiement
+REFUSE et le dit :
+
+```
+la clé récupérée ne correspond PAS à l'empreinte épinglée.
+         épinglée : AAAA1111… (celle qu'on avait approuvée)
+         trouvée(s) : BBBB2222… (celle que la source donne aujourd'hui)
+         Rien n'est installé. Soit le projet a changé de clé de
+         signature […], soit la source n'est pas celle qu'on croit.
+```
+
+**Il ne protège pas l'amorçage.** Si la toute première récupération est
+compromise, on épingle la mauvaise clé et on la vérifie fidèlement ensuite.
+C'est le défaut connu de ce modèle, et il est assumé.
+
+Pour durcir l'amorçage — **facultatif, une minute** — comparer l'empreinte que
+`fj key --fetch` affiche à celle que le projet annonce **ailleurs que sur la
+page de téléchargement** : notes de version, documentation, salon Matrix. Si
+les deux concordent, un attaquant aurait dû compromettre deux canaux.
+
+### Le trousseau dédié
+
+`fj deploy` importe la clé dans `/var/lib/fjtool/forgejo-release.gpg`, jamais
+dans celui de root : y importer une clé de publication la rendrait de confiance
+pour tout ce que root vérifie ensuite, bien au-delà de Forgejo.
 
 ```bash
 gpg --no-default-keyring --keyring /var/lib/fjtool/forgejo-release.gpg --list-keys
