@@ -18,6 +18,7 @@ refus. Deux d'entre eux méritent d'être compris :
 
 from __future__ import annotations
 
+import math
 import shutil
 from pathlib import Path
 
@@ -33,10 +34,16 @@ class DeleteRefused(RuntimeError):
 
 
 def human_size(octets: int) -> str:
-    """Comme `du -h` : une décimale en dessous de 10, un entier au-delà.
+    """Comme `du -h` : une décimale en dessous de 10, un entier au-delà, et
+    l'arrondi TOUJOURS AU-DESSUS.
 
-    Reproduit pour que les sorties restent comparables à celles du bash, qui
-    s'appuie sur `du -sh --apparent-size`.
+    `du` ne fait pas un arrondi au plus proche, il compte des unités entamées :
+    1025 octets s'affichent « 1.1K » et non « 1.0K », 10241 donnent « 11K ».
+    Arrondir au plus proche fait diverger les deux sorties dès qu'une taille
+    tombe du mauvais côté — c'est ce qui donnait 33K là où le bash disait 34K.
+
+    Les divisions par 1024 sont exactes en binaire, il n'y a donc pas de
+    question d'epsilon : le plafond est calculé sur une valeur juste.
     """
     valeur = float(octets)
     for unite in UNITES:
@@ -44,8 +51,8 @@ def human_size(octets: int) -> str:
             if not unite:
                 return str(int(valeur))
             if valeur < 10:
-                return f"{valeur:.1f}{unite}"
-            return f"{round(valeur)}{unite}"
+                return f"{math.ceil(valeur * 10) / 10:.1f}{unite}"
+            return f"{math.ceil(valeur)}{unite}"
         valeur /= KIO
     return str(octets)  # pragma: no cover - inatteignable
 

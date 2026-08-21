@@ -43,14 +43,43 @@ def store(tmp_path):
 
 
 def test_human_size_suit_du_h():
-    """`du -h` : une décimale en dessous de 10, un entier au-delà."""
+    """`du -h` : une décimale en dessous de 10, un entier au-delà.
+
+    Valeurs relevées sur un vrai `du -sh --apparent-size`, et non supposées —
+    la version précédente de ce test affirmait « 3300 → 3.2K », ce qui était
+    mon hypothèse et non le comportement de du.
+    """
     assert human_size(0) == "0"
     assert human_size(1023) == "1023"
     assert human_size(1024) == "1.0K"
-    assert human_size(3300) == "3.2K"
-    assert human_size(12 * 1024) == "12K"
     assert human_size(1024 ** 2) == "1.0M"
-    assert human_size(34 * 1024) == "34K"
+
+
+def test_human_size_arrondit_AU_DESSUS_comme_du():
+    """`du -h` ne fait pas un arrondi au plus proche : il compte des unités
+    ENTAMÉES. Un octet de plus fait changer d'affichage.
+
+    Mesuré :  1025 → 1.1K   3300 → 3.3K   10240 → 10K   10241 → 11K
+    """
+    assert human_size(1025) == "1.1K"
+    assert human_size(3300) == "3.3K"
+    assert human_size(10 * 1024) == "10K"
+    assert human_size(10 * 1024 + 1) == "11K"
+    assert human_size(5_000_000) == "4.8M"
+
+
+def test_human_size_sur_les_chiffres_de_la_production():
+    """Constaté le 21 août 2026, à la comparaison des deux moteurs :
+
+        bash   : 8 sauvegarde(s), 34K
+        python : 8 sauvegarde(s), 33K
+
+    34341 octets vus par `du` (inodes de répertoires et lien latest compris),
+    34251 octets de fichiers vus par le modèle. Les deux valent 34K dès lors
+    que l'arrondi est celui de du — le désaccord ne venait pas du périmètre.
+    """
+    assert human_size(34341) == "34K"
+    assert human_size(34251) == "34K"
 
 
 def test_human_size_monte_dans_les_unites():
