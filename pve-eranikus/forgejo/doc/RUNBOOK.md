@@ -105,6 +105,10 @@ cd /root/homelab_proxmox && git pull
 pve-eranikus/forgejo/fj deploy --dry-run
 ```
 
+**Le lanceur du dépôt, pas `fj` du `PATH`** : la copie installée date du
+déploiement précédent et ne connaît pas encore ces retraits — voir
+[§ 2](#amorçage--quand-la-copie-installée-est-en-retard).
+
 Le conteneur, lui, ne presse pas : il ne casse rien tant qu'on n'y touche pas.
 
 ### Le chemin recommandé : détruire et recréer
@@ -289,6 +293,43 @@ C  contrôles                   en dernier, sinon ils répondent sur l'état d'a
 **Ce plan ne sauvegarde rien et ne copie rien hors-site.** La base est un
 locataire du CT 200 ; les dépôts partent par `vzdump`. Voir
 [§ 9](#9-sauvegardes--ce-que-ce-conteneur-ne-fait-pas).
+
+### Amorçage : quand la copie installée est en retard
+
+**Le piège qui se reproduira à chaque changement de `fj` lui-même.**
+
+Il y a deux `fj` sur le nœud, et ils ne sont pas au même niveau :
+
+| Invocation | Ce qui s'exécute |
+|---|---|
+| `fj …` | `/usr/local/sbin/fj` + `/usr/local/lib/fjtool` — la copie **installée** |
+| `./fj …` ou `pve-eranikus/forgejo/fj …` | le lanceur **du dépôt**, avec `fjtool/` du dépôt |
+
+La copie installée n'est rafraîchie **que par `fj deploy`** — c'est l'étape
+« arbre d'import (hôte) ». Donc après un `git pull` qui change `fj`, la copie
+installée est encore l'ancienne, et `fj` du `PATH` exécute du vieux code.
+
+Le symptôme est déroutant : `git pull` dit « Already up to date », le dépôt
+porte bien le correctif, et la commande se comporte toujours comme avant.
+
+**Toujours amorcer par le lanceur du dépôt :**
+
+```bash
+cd /root/homelab_proxmox && git pull
+pve-eranikus/forgejo/fj deploy --dry-run     # le lanceur du DÉPÔT
+pve-eranikus/forgejo/fj deploy
+```
+
+Après quoi `/usr/local/lib/fjtool` est à jour et `fj` du `PATH` redevient
+équivalent. Vérifier laquelle des deux on exécute, en cas de doute :
+
+```bash
+command -v fj                                    # /usr/local/sbin/fj
+diff -rq /usr/local/lib/fjtool/fjtool \
+         /root/homelab_proxmox/pve-eranikus/forgejo/fjtool
+```
+
+Aucune sortie = les deux sont au même niveau.
 
 ### Les ordres qui comptent
 

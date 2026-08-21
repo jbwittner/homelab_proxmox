@@ -18,7 +18,6 @@ lire autre chose — au pire moment.
 from __future__ import annotations
 
 import re
-import unicodedata
 from pathlib import Path
 
 import pytest
@@ -209,6 +208,11 @@ def _sous_commandes() -> set[str]:
     raise AssertionError("aucun sous-parseur trouvé")
 
 
+# Les valeurs de remplacement des documents, qui ne sont pas des arguments
+# réels : « <ID> », « <NOM> », « … ».
+GABARIT = re.compile(r"^[<{]|[>}]$|^\.\.\.$|^…$")
+
+
 def test_les_documents_citent_bien_des_invocations():
     """Un extracteur qui ne trouve rien passerait pour un contrôle vert."""
     total = sum(
@@ -224,6 +228,11 @@ def test_les_sous_commandes_citees_existent(document):
     connues = _sous_commandes()
     inventees = set()
     for argv in _invocations(document.read_text(encoding="utf-8")):
+        # Même filtre que le test des drapeaux : « fj … » dans un tableau qui
+        # explique une FORME d'invocation n'est pas une commande inventée.
+        # Sans lui, les deux tests jugeraient différemment la même ligne.
+        if any(GABARIT.search(m) for m in argv):
+            continue
         verbes = [m for m in argv if not m.startswith("-")]
         # Le premier mot qui n'est pas une option, et qui ne suit pas une
         # option à valeur, est la sous-commande.
@@ -239,11 +248,6 @@ def test_les_sous_commandes_citees_existent(document):
         f"{document.name} : sous-commandes inexistantes {sorted(inventees)} "
         f"(connues : {sorted(connues)})"
     )
-
-
-# Les valeurs de remplacement des documents, qui ne sont pas des arguments
-# réels : « <ID> », « <NOM> », « … ».
-GABARIT = re.compile(r"^[<{]|[>}]$|^\.\.\.$|^…$")
 
 
 @pytest.mark.parametrize("document", DOCUMENTS, ids=_relatif)

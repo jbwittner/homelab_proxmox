@@ -97,13 +97,28 @@ class RetraitUniteArmee:
     def skip_if(self, ctx) -> str | None:
         return None
 
+    # Les seuls états où un `disable` fait quelque chose. Tout le reste —
+    # `static`, `disabled`, `masked`, ou rien du tout — n'a rien à désarmer.
+    ARMEE = {"enabled", "enabled-runtime"}
+
     def check(self, ctx) -> Outcome:
         from core.commands import Systemd
 
         systemd = Systemd(ctx.runner)
+
+        # `UnitFileState`, et NON `is-enabled` : sur une unité sans section
+        # [Install], `systemctl is-enabled` affiche « static » et sort en 0.
+        # Un test de code de retour la lit donc comme armée, et le plan
+        # annonce un `disable` qui ne fera rien. Constaté le 21 août 2026 sur
+        # `fjbk-offsite.service`, qui n'a jamais eu de section [Install].
+        #
+        # « Le plan est LA description du delta » : une action qui ne change
+        # rien n'y a pas sa place.
+        etat = systemd.show(self.unite, "UnitFileState")
+        armee = etat in self.ARMEE
+
         # Deux états indépendants, et il faut les deux : une unité peut être
         # armée sans que son fichier existe encore, et l'inverse.
-        armee = systemd.is_enabled(self.unite)
         presente = self.chemin.exists()
 
         if not armee and not presente:

@@ -301,7 +301,9 @@ def _deploy(args: argparse.Namespace) -> int:
     )
     ctx = _contexte_deploy(args, ctid=ctid, runner=Runner(), src=src)
 
-    step(f"CT {ctid} — dépôt {src} (mp1 : ct/, hôte : host/)")
+    # `host/` a disparu avec le hors-site : ne l'annoncer plus serait mentir
+    # sur ce que le déploiement va lire.
+    step(f"CT {ctid} — dépôt {src} (mp1 : ct/, tout le reste depuis le nœud)")
     if ctx.mode is not Mode.APPLY:
         info(f"(mode --{ctx.mode.value} : aucune modification)")
 
