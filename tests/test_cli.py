@@ -203,3 +203,40 @@ def test_un_incident_imprevu_sort_en_un(noeud, monkeypatch, capsys):
     monkeypatch.setattr(location, "resolve_ctid", boum)
     assert main(["list"]) == 1
     assert "échec inattendu" in capsys.readouterr().err
+
+
+# ─── codes de retour de l'analyse d'arguments ────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["offsite", "--foo"],       # option inconnue
+        ["inconnu"],                # sous-commande inconnue
+        [],                         # aucune commande
+        ["restore"],                # positionnel obligatoire manquant
+        ["--ctid"],                 # valeur manquante
+    ],
+    ids=["option", "commande", "vide", "positionnel", "valeur"],
+)
+def test_un_usage_fautif_sort_en_un(argv):
+    """argparse sort en 2 de lui-même. Or 2 veut dire « au moins un transfert a
+    échoué » : une faute de frappe serait consignée par systemd comme une panne
+    de transfert, et se lirait comme telle trois semaines plus tard."""
+    with pytest.raises(SystemExit) as sortie:
+        main(argv)
+    assert sortie.value.code == 1
+
+
+def test_laide_nest_pas_une_erreur():
+    with pytest.raises(SystemExit) as sortie:
+        main(["--help"])
+    assert sortie.value.code == 0
+
+
+def test_laide_dune_sous_commande_nest_pas_une_erreur():
+    """Les sous-analyseurs héritent de la classe du parent : sans cela ils
+    garderaient le code 2 d'argparse."""
+    with pytest.raises(SystemExit) as sortie:
+        main(["offsite", "--help"])
+    assert sortie.value.code == 0

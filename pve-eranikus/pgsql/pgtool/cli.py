@@ -40,6 +40,25 @@ AIDE = {
 }
 
 
+class Parser(argparse.ArgumentParser):
+    """Un usage fautif sort en 1, pas en 2.
+
+    `argparse` sort en 2 sur une erreur d'arguments. Dans la table de cette
+    commande, 2 veut dire « au moins un transfert a échoué » : une faute de
+    frappe serait consignée par systemd comme une panne de transfert, et se
+    lirait comme telle trois semaines plus tard. Une erreur d'usage appartient
+    à la famille « environnement inutilisable », soit 1 — c'est aussi ce que
+    faisaient les scripts bash.
+
+    `--help` continue de sortir en 0 : ce n'est pas une erreur.
+    """
+
+    def error(self, message: str):  # noqa: D102 - contrat d'argparse
+        self.print_usage(sys.stderr)
+        error(f"{self.prog} : {message}")
+        raise SystemExit(1)
+
+
 def _quitter_sur_signal(numero, _cadre):  # pragma: no cover - dépend du signal
     """130, pour SIGINT comme pour SIGTERM.
 
@@ -151,7 +170,7 @@ def _deleguer(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = Parser(
         prog="pg",
         description="Outillage du cluster PostgreSQL mutualisé.",
         epilog="Documentation : pve-eranikus/pgsql/README.md et doc/RUNBOOK.md",
