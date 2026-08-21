@@ -181,13 +181,21 @@ def test_database_owner_absent_rend_none():
 
 
 def test_psql_dans_le_conteneur_est_le_meme_code():
-    """Même classe, même code métier : c'est le Runner qui décide où ça tourne."""
+    """Même classe, même code métier : c'est le Runner qui décide où ça tourne.
+
+    L'argv métier est identique des deux côtés ; seul le préfixe `pct exec`
+    s'ajoute, et il vient de l'exécuteur, pas de `Psql`.
+    """
     hote = FakeRunner()
-    hote.executor = __import__("core.runner", fromlist=["InContainer"]).InContainer(200)
     Psql(hote).scalar("SELECT 1")
-    # FakeRunner intercepte avant l'exécuteur : c'est l'argv logique qu'on voit,
-    # identique des deux côtés — d'où l'unicité du code métier.
-    assert hote.calls[-1][:3] == ("sudo", "-u", "postgres")
+    local = hote.calls[-1]
+
+    dans_le_ct = FakeRunner()
+    Psql(dans_le_ct.for_container(200)).scalar("SELECT 1")
+    distant = dans_le_ct.calls[-1]
+
+    assert distant[:5] == ("pct", "exec", "200", "--", "sudo")
+    assert distant[4:] == local, "le code métier ne change pas"
 
 
 # ─── systemd ─────────────────────────────────────────────────────────────────

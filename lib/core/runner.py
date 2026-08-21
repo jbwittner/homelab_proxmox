@@ -435,6 +435,21 @@ class FakeRunner(Runner):
         # ses variables sur l'entrée standard, jamais avec -c.
         self.stdins: list[str | None] = []
 
+    def for_container(self, ctid: int) -> "FakeRunner":
+        """Un double, pas un vrai Runner.
+
+        `Runner.for_container` fabrique un Runner neuf ; hérité tel quel, il
+        ferait sortir les tests du bac à sable et exécuterait `pct` pour de
+        bon. L'enfant partage la table de réponses ET le journal des appels :
+        ce qui part vers le conteneur se lit au même endroit que le reste.
+        """
+        enfant = FakeRunner(self.responses, self.matchers)
+        enfant.executor = InContainer(ctid)
+        enfant.dry_run = self.dry_run
+        enfant.calls = self.calls
+        enfant.stdins = self.stdins
+        return enfant
+
     def when(self, predicate, result: Result) -> "FakeRunner":
         """Ajoute un prédicat. `predicate` reçoit l'argv en tuple.
 
@@ -467,7 +482,9 @@ class FakeRunner(Runner):
         timeout: int | None = -1,
         stream: bool = False,
     ) -> Result:
-        argv = tuple(argv)
+        # L'argv RÉELLEMENT lancé, préfixe `pct exec` compris : c'est ce qu'on
+        # veut relire. Pour un exécuteur local, `build` ne change rien.
+        argv = tuple(self.executor.build(argv))
         self.calls.append(argv)
         self.stdins.append(stdin)
         found = self._lookup(_mask(argv))

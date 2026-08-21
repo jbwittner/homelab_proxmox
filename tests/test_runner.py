@@ -153,17 +153,21 @@ def test_timeout_none_est_une_valeur_demandable():
 def test_which_dans_un_conteneur_passe_par_un_shell():
     """`command` est une primitive, pas un binaire : `pct exec` fait un execvp
     et ne trouverait rien. Le script est constant, le nom arrive en argument."""
-    r = FakeRunner()
-    r.executor = InContainer(200)
-    r.when(
-        lambda argv: argv[0] == "sh",
+    hote = FakeRunner()
+    hote.when(
+        lambda argv: "sh" in argv,
         Result(("sh",), 0, "/usr/bin/sudo\n", ""),
     )
-    assert r.which("sudo") == "/usr/bin/sudo"
-    argv = r.calls[0]
-    assert argv[0] == "sh" and argv[1] == "-c"
-    assert "sudo" not in argv[2], "le nom cherché ne doit pas être concaténé au script"
-    assert argv[-1] == "sudo"
+    assert hote.for_container(200).which("sudo") == "/usr/bin/sudo"
+
+    argv = hote.calls[0]
+    assert argv[:4] == ("pct", "exec", "200", "--")
+    commande = argv[4:]
+    assert commande[0] == "sh" and commande[1] == "-c"
+    assert "sudo" not in commande[2], (
+        "le nom cherché ne doit pas être concaténé au script"
+    )
+    assert commande[-1] == "sudo"
 
 
 # ─── FakeRunner ──────────────────────────────────────────────────────────────
