@@ -150,8 +150,16 @@ def _oui_non(valeur: bool | None) -> str:
     return "oui" if valeur else "NON"
 
 
+# Assez large pour les libellés courants. Les noms de timers la dépassent —
+# c'est pour cela que le séparateur est un ESPACE explicite et non le seul
+# remplissage : quand la clé est plus longue que la colonne, le remplissage ne
+# produit rien, et la valeur vient se coller au nom. Constaté sur le nœud, en
+# « pg-backup.timer (CT 200)armé : oui ».
+COLONNE = 22
+
+
 def _ligne(cle: str, valeur: str) -> str:
-    return f"  {cle:<22}{valeur}"
+    return f"  {cle:<{COLONNE}} {valeur}"
 
 
 def render_etat(etat: Etat) -> str:

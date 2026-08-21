@@ -185,3 +185,16 @@ def test_sans_hors_site_le_bucket_nest_pas_interroge():
     etat = relever(_ctx([]))
     assert etat.distants is None
     assert any("non constatée" in a for a in alarmes(etat))
+
+
+def test_une_cle_plus_longue_que_la_colonne_garde_son_separateur():
+    """Constate sur le noeud : la cle « pg-backup.timer (CT 200) » depasse la
+    colonne, le remplissage ne produit alors AUCUN espace, et la valeur se
+    colle au nom -- « (CT 200)arme : oui ». Un tableau qu'on ne peut pas lire
+    ne rend pas le service pour lequel il existe."""
+    rendu = render_etat(_etat())
+    for ligne in rendu.splitlines():
+        if "arme" in ligne or "armé" in ligne:
+            assert ")armé" not in ligne and ")arme" not in ligne
+    assert "pg-backup.timer (CT 200) " in rendu
+    assert "pgbk-offsite.timer (nœud) " in rendu
