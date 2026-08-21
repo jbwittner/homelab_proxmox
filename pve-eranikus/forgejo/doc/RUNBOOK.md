@@ -10,6 +10,7 @@ section, c'est aussi corriger ces renvois-là.
 ## Sommaire
 
 - [0. Retrait de l'instance 16.0 existante](#0-retrait-de-linstance-160-existante)
+- [0 bis. Repartir de zéro après un déploiement co-localisé](#0-bis-repartir-de-zéro-après-un-déploiement-co-localisé)
 - [1. Création du conteneur](#1-création-du-conteneur)
 - [2. Déploiement depuis l'hôte : `fj deploy`](#2-déploiement-depuis-lhôte--fj-deploy)
 - [3. La base, locataire du CT 200](#3-la-base-locataire-du-ct-200)
@@ -74,6 +75,119 @@ pct destroy $CT --purge           # --purge retire aussi les entrées de sauvega
 
 Vérifier ensuite que le CTID n'apparaît plus dans `pct list`, et que Traefik ne
 route plus vers son IP.
+
+---
+
+## 0 bis. Repartir de zéro après un déploiement co-localisé
+
+**À jouer si le CT 400 a été déployé avec la version où PostgreSQL était
+co-localisé.** Reconnaissable à ceci :
+
+```bash
+pct exec 400 -- pg_lsclusters          # un cluster local → version périmée
+pct config 400 | grep mp2              # un volume de sauvegarde → idem
+systemctl list-unit-files 'fjbk-*'     # sur le NŒUD
+```
+
+### Ce qui presse, et ce qui ne presse pas
+
+**Ce qui presse est sur le NŒUD, pas dans le conteneur.** Les unités
+`fjbk-offsite` ont pu être armées. Leur `ExecStart` invoque une sous-commande
+`offsite` qui **n'existe plus** dans le parseur : elles échoueraient toutes les
+nuits à **03:50**, dans une plage horaire où personne ne regarde.
+
+Bonne nouvelle : `fj deploy` s'en charge désormais lui-même — la section H
+désarme puis retire les deux unités et leur drop-in. Un `--dry-run` le montre
+avant de le faire :
+
+```bash
+cd /root/homelab_proxmox && git pull
+pve-eranikus/forgejo/fj deploy --dry-run
+```
+
+Le conteneur, lui, ne presse pas : il ne casse rien tant qu'on n'y touche pas.
+
+### Le chemin recommandé : détruire et recréer
+
+Le CT 400 d'un déploiement co-localisé **ne contient rien qui vaille d'être
+sauvé** — aucun dépôt n'a encore été poussé, et les secrets seront régénérés.
+Le reconstruire coûte quelques minutes et évite tout état intermédiaire.
+
+**Vérifier d'abord qu'il est bien vide**, comme en [§ 0](#0-retrait-de-linstance-160-existante) :
+
+```bash
+pct exec 400 -- find /var/lib/forgejo/repositories -maxdepth 2 -name '*.git' 2>/dev/null
+```
+
+Aucune ligne ? Alors :
+
+```bash
+# 1. Le nœud d'abord — c'est ce qui échouerait cette nuit
+pve-eranikus/forgejo/fj deploy --no-container
+
+# 2. Détruire le conteneur
+pct stop 400
+pct set 400 --protection 0
+pct destroy 400 --purge
+
+# 3. Le recréer — § 1, et SANS postgresql cette fois
+#    (le §1 à jour n'installe que « sudo »)
+
+# 4. Créer le locataire sur le CT 200, si ce n'est pas déjà fait
+pve-eranikus/pgsql/pg deploy --tenant forgejo
+#    puis déposer le mot de passe — § 3
+
+# 5. Déployer
+pve-eranikus/forgejo/fj deploy --secrets
+fj status
+```
+
+> `fj deploy --no-container` à l'étape 1 : il fait tout le travail du nœud —
+> dont les retraits — **sans toucher au CT**, qu'on s'apprête à détruire de
+> toute façon. Un drapeau `--no-*` ne désactive jamais un contrôle, seulement
+> une pose : le bilan reste complet.
+
+### Si le conteneur doit être gardé
+
+Par exemple parce que des dépôts y ont déjà été poussés. Le nettoyage se fait
+alors à la main, **dans cet ordre**, et rien de tout ceci n'est automatisé —
+ce sont des gestes destructifs sur des données :
+
+```bash
+# a. Arrêter Forgejo, il tient une connexion à la base locale
+pct exec 400 -- systemctl stop forgejo
+
+# b. Désarmer et retirer la sauvegarde locale
+pct exec 400 -- systemctl disable --now fj-backup.timer
+pct exec 400 -- rm -f /etc/systemd/system/fj-backup.service \
+                      /etc/systemd/system/fj-backup.timer
+pct exec 400 -- systemctl daemon-reload
+
+# c. Les symlinks de configuration PostgreSQL pointent vers des fichiers
+#    SUPPRIMÉS du dépôt : les retirer avant de toucher au cluster
+pct exec 400 -- sh -c 'rm -f /etc/postgresql/*/main/pg_hba.conf \
+                             /etc/postgresql/*/main/pg_ident.conf \
+                             /etc/postgresql/*/main/conf.d/10-forgejo.conf'
+
+# d. Le cluster local — DESTRUCTIF. Relever d'abord ce qu'il contient.
+pct exec 400 -- pg_lsclusters
+pct exec 400 -- apt-get purge -y postgresql postgresql-* 
+pct exec 400 -- apt-get install -y postgresql-client
+
+# e. Le moteur poussé dans le CT, que plus rien n'appelle
+pct exec 400 -- rm -rf /usr/local/lib/fjtool /usr/local/bin/fj
+
+# f. Le volume de sauvegarde — DESTRUCTIF, et il porte peut-être des dumps
+pct config 400 | grep mp2          # relever le volid AVANT
+pct stop 400
+pct set 400 --delete mp2           # ne détruit pas le volume, le détache
+pct start 400
+#    Le volume détaché reste dans le stockage : le supprimer une fois
+#    certain qu'il ne sert plus (pvesm free <volid>).
+```
+
+Puis reprendre au point 4 ci-dessus. **`fj deploy` refusera tant que le
+locataire du CT 200 n'existe pas** — c'est le maillon « connexion à la base ».
 
 ---
 

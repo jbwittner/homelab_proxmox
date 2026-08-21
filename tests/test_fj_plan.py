@@ -120,10 +120,29 @@ def test_aucune_etape_ne_sauvegarde_ni_ne_copie_hors_site(etapes):
     """La base est un locataire du CT 200 : `pg` la sauvegarde et l'emporte
     hors-site. Les dépôts partent par `vzdump`. Une étape de sauvegarde ici
     donnerait deux filets pour un même objet, dont un que personne ne
-    surveille."""
-    noms = " ".join(_noms(etapes)).lower()
+    surveille.
+
+    **La section H est exclue, et ce n'est pas une échappatoire.** Elle nomme
+    précisément ce qui ne doit PAS être là — « retrait de fjbk-offsite.timer »
+    est l'inverse d'une étape de sauvegarde. Sans cette exclusion, ce test
+    interdirait de nettoyer ce qu'il existe justement pour interdire.
+    """
+    noms = " ".join(e.name for e in etapes if e.section != "H").lower()
     for interdit in ("sauvegarde", "hors-site", "offsite", "backup"):
         assert interdit not in noms, f"« {interdit} » n'a plus lieu d'être ici"
+
+
+def test_le_hors_site_perime_est_desarme_avant_dtre_retire(etapes):
+    """Retirer le fichier d'une unité encore armée laisse un lien pendant dans
+    `timers.target.wants`, et systemd s'en plaint à chaque `daemon-reload`
+    sans que personne fasse le rapprochement.
+
+    Et le TIMER passe avant le SERVICE : désarmer le second en premier
+    laisserait un timer pointant sur une unité disparue.
+    """
+    assert _position(etapes, "retrait de fjbk-offsite.timer") < _position(
+        etapes, "retrait de fjbk-offsite.service"
+    )
 
 
 def test_l_outillage_du_noeud_precede_l_installation_binaire(etapes):

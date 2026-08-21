@@ -60,6 +60,15 @@ EFFETS_FINAUX: tuple[str, ...] = ()
 # Ce que le script communautaire aurait posé si quelqu'un l'avait joué.
 UNITE_COMMUNAUTAIRE = Path("/etc/systemd/system/gitea.service")
 
+# Ce qu'une version ANTÉRIEURE de ce service posait sur le nœud, quand le
+# CT 400 produisait ses propres sauvegardes. La base étant redevenue locataire
+# du CT 200, ces unités appellent une commande qui n'existe plus.
+HORSSITE_PERIME = (
+    ("fjbk-offsite.timer", Path("/etc/systemd/system/fjbk-offsite.timer")),
+    ("fjbk-offsite.service", Path("/etc/systemd/system/fjbk-offsite.service")),
+)
+DROPIN_PERIME = Path("/etc/systemd/system/fjbk-offsite.service.d/10-noeud.conf")
+
 
 def etapes(ctx: Context) -> list:
     """La liste ordonnée. Une donnée, pas une suite d'appels."""
@@ -133,6 +142,20 @@ def etapes(ctx: Context) -> list:
             UNITE_COMMUNAUTAIRE,
             remplace_par="« forgejo.service », posé depuis le dépôt",
             requires=("forgejo.service",),
+        ),
+        # Le timer AVANT le service : désarmer le second sans le premier
+        # laisserait un timer pointant sur une unité disparue.
+        *(
+            H.RetraitUniteArmee(
+                unite, chemin,
+                motif="la base est un locataire du CT 200, qui a déjà son "
+                      "hors-site",
+            )
+            for unite, chemin in HORSSITE_PERIME
+        ),
+        H.RetraitOrphelin(
+            DROPIN_PERIME,
+            remplace_par="rien — l'unité qu'il complétait a été retirée",
         ),
         H.AucunAutoUpdate(),
 

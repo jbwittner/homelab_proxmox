@@ -65,6 +65,73 @@ class RetraitOrphelin:
         )
 
 
+class RetraitUniteArmee:
+    """Une unité systemd du NŒUD que plus rien n'appelle — désarmée, puis retirée.
+
+    L'ORDRE EST TOUT. Supprimer le fichier d'une unité encore armée laisse un
+    lien pendant dans `*.wants/`, et systemd s'en plaint à chaque
+    `daemon-reload` sans que personne fasse le rapprochement. On désarme
+    d'abord, on retire ensuite.
+
+    CE QUE CETTE ÉTAPE RÉPARE CONCRÈTEMENT. Une version antérieure de ce
+    service posait `fjbk-offsite.service` et son timer sur le nœud, pour copier
+    vers GCS des sauvegardes que le CT 400 produisait lui-même. La base étant
+    redevenue locataire du CT 200, ces sauvegardes n'existent plus et la
+    commande que l'unité appelle — `fj offsite` — a disparu du parseur.
+
+    Laissée en place, elle échouerait **toutes les nuits à 03:50**, sur une
+    sous-commande inconnue. C'est exactement la panne que ce dépôt refuse : un
+    automatisme qui échoue en silence dans une plage horaire où personne ne
+    regarde.
+    """
+
+    section = "H"
+
+    def __init__(self, unite: str, chemin: Path, *, motif: str) -> None:
+        self.unite = unite
+        self.chemin = Path(chemin)
+        self.motif = motif
+        self.requires: tuple[str, ...] = ()
+        self.name = f"retrait de {unite}"
+
+    def skip_if(self, ctx) -> str | None:
+        return None
+
+    def check(self, ctx) -> Outcome:
+        from core.commands import Systemd
+
+        systemd = Systemd(ctx.runner)
+        # Deux états indépendants, et il faut les deux : une unité peut être
+        # armée sans que son fichier existe encore, et l'inverse.
+        armee = systemd.is_enabled(self.unite)
+        presente = self.chemin.exists()
+
+        if not armee and not presente:
+            return Outcome("ok", f"déjà retirée — {self.motif}")
+
+        actions = []
+        if armee:
+            actions.append(
+                Action(
+                    f"systemctl disable --now {self.unite}",
+                    lambda c, u=self.unite: c.runner.write(
+                        "systemctl", "disable", "--now", u),
+                )
+            )
+        if presente:
+            actions.append(
+                Action(
+                    f"rm {self.chemin}",
+                    lambda c, p=self.chemin: c.fs.remove(p),
+                )
+            )
+        return Outcome(
+            "drift",
+            f"{'armée' if armee else 'présente'} alors que {self.motif}",
+            tuple(actions),
+        )
+
+
 class AucunAutoUpdate:
     """Rien, dans le conteneur, ne doit pouvoir mettre Forgejo à jour tout seul.
 
