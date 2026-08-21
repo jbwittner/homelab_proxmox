@@ -68,14 +68,24 @@ compte de service GCP, qui est un secret
 Tout se tape **sur le nœud**, pas dans le CT.
 
 ```bash
-pgbk list                          # instantanés : âge, taille, bases
-pgbk backup                        # sauvegarde immédiate
-pgbk show 20260820-093240          # MANIFEST + fichiers
-pgbk restore forgejo               # depuis le dernier instantané
-pgbk restore forgejo 20260819      # depuis le plus récent de ce jour
-pgbk verify forgejo                # contrôle ACL et propriétaires
-pgbk delete 20260819-233627        # supprime un instantané (jamais le dernier)
+pg list                            # instantanés : âge, taille, bases
+pg backup                          # sauvegarde immédiate
+pg show 20260820-093240            # MANIFEST + fichiers
+pg restore forgejo                 # depuis le dernier instantané
+pg restore forgejo 20260819        # depuis le plus récent de ce jour
+pg verify forgejo                  # contrôle ACL et propriétaires
+pg delete 20260819-233627          # supprime un instantané (jamais le dernier)
+pg delete 20260819 --plan          # dit lequel serait visé, n'efface rien
+pg --ctid 299 list                 # vise un autre conteneur, ponctuellement
 ```
+
+`pg` achemine vers le moteur du conteneur, qui fait le travail. Les questions
+de confirmation sont posées **ici**, sur le nœud : `pct exec` n'alloue pas de
+TTY, une question posée depuis le conteneur ne verrait jamais la réponse. Pour
+`delete`, la question porte sur l'instantané **réellement visé** et non sur ce
+qui a été tapé — `20260819` désigne la plus récente de ce jour-là.
+
+`pgbk` reste installé le temps de constater la parité.
 
 Créer un compte ou un locataire — le mot de passe généré n'est affiché
 **qu'une fois**, et rien ne bouge si le rôle existe déjà :
@@ -159,8 +169,9 @@ diagnostic et donne une procédure complète par scénario.
 
 ## Reste à faire
 
-- [ ] **Constater la parité de `pg offsite`** avec `pgbk-offsite`, puis retirer
-      l'ancien script (il reste installé exprès le temps de la comparaison).
+- [ ] **Constater la parité de `pg offsite` et de `pg <commande>`** avec
+      `pgbk-offsite` et `pgbk`, puis retirer les anciens scripts (ils restent
+      installés exprès le temps de la comparaison).
 - [ ] Ligne du locataire `forgejo` dans `pg_hba.conf` — dépend de son IP
       définitive. C'est le dernier geste que `pg-deploy.sh` ne fait pas.
 - [ ] Copier `postgresql.vars` dans ce dépôt après vérification des secrets.

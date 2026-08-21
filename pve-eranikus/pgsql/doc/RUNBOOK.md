@@ -635,6 +635,43 @@ conteneur Debian non :
 `--ctid <ID>` vise ponctuellement un autre conteneur sans toucher à
 `/etc/default/pgbk`. `--local` force le mode moteur, utile pour déboguer.
 
+### `pg` a pris le mode hôte — 21 août 2026
+
+Le routage est passé en Python : `pg list`, `pg backup`, `pg show`,
+`pg restore`, `pg verify`, `pg delete`. Le **moteur du conteneur reste le
+`pgbk` bash**, inchangé, et c'est lui qui travaille — `pg` ne fait que résoudre
+le CTID, appliquer les gardes, poser la question et déléguer.
+
+Trois différences avec le bash, toutes assumées :
+
+- **`pg delete --plan` s'arrête.** Le bash, lancé depuis le nœud, affichait le
+  plan *puis supprimait quand même* : `--plan` n'y était honnête que dans le
+  conteneur ou avec `--local`. Ici il fait ce que son nom promet.
+- **`/etc/default/pgbk` est analysé, plus « sourcé ».** Un fichier de
+  configuration n'a pas à pouvoir exécuter des commandes.
+- **Aucun CTID par défaut.** `pg deploy` en garde un pour amorcer une
+  installation vierge ; la façade refuse de deviner, parce que se tromper de
+  conteneur en restauration ne se rattrape pas.
+
+Ce qui ne change pas, et ne doit pas changer : la détection par la présence de
+`pct`, les libellés des questions, le fait que le code de retour du conteneur
+devienne celui de la commande — `pg` se fait remplacer par `pct exec`, il ne
+capture rien.
+
+**Reste à corriger, côté moteur** (étape suivante de la migration) : `pgbk
+restore` d'une base qui **n'existait pas** se termine sur un code 1 alors que
+la restauration a réussi. La dernière ligne de la fonction est un test qui
+échoue quand le filet `pre-restore-*` n'a pas eu lieu d'être. Sans conséquence
+sur les données, gênant pour un script appelant.
+
+**Constater la parité** — les deux commandes cohabitent :
+
+```bash
+pgbk list > /tmp/avant.txt 2>&1
+pg   list > /tmp/apres.txt 2>&1
+diff /tmp/avant.txt /tmp/apres.txt      # attendu : aucune différence
+```
+
 ### La confirmation est posée sur le nœud
 
 `pct exec` n'alloue pas de TTY : un `read` exécuté dans le CT ne verrait jamais

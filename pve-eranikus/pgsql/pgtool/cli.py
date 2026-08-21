@@ -1,8 +1,7 @@
 """`pg` — point d'entrée unique de l'outillage PostgreSQL.
 
 Là où il y avait trois commandes (`pg-deploy.sh`, `pgbk`, `pgbk-offsite`), il
-n'y en a qu'une. Les sous-commandes arrivent au fil de la migration ; seule
-`offsite` est portée à ce stade.
+n'y en a qu'une. Les sous-commandes arrivent au fil de la migration.
 
 Les sous-commandes sont importées **paresseusement**, au moment de la
 répartition. C'est un invariant du conteneur : il ne reçoit que `core/` et
@@ -19,6 +18,26 @@ import time
 from typing import Sequence
 
 from core.log import error
+
+# Commandes acheminées vers le moteur du conteneur, avec leurs positionnels.
+# « ? » = facultatif. L'ordre est celui de la ligne de commande.
+DELEGUEES: dict[str, list[tuple[str, bool]]] = {
+    "backup": [],
+    "list": [],
+    "show": [("instantane", True)],
+    "restore": [("base", False), ("instantane", True)],
+    "verify": [("base", False)],
+    "delete": [("instantane", False)],
+}
+
+AIDE = {
+    "backup": "déclenche une sauvegarde immédiate",
+    "list": "instantanés disponibles : âge, taille, bases",
+    "show": "manifeste et fichiers d'un instantané (défaut : latest)",
+    "restore": "restaure une base depuis un instantané — ÉCRASE la base visée",
+    "verify": "contrôle les ACL et les propriétaires d'une base",
+    "delete": "supprime un instantané — jamais le dernier",
+}
 
 
 def _quitter_sur_signal(numero, _cadre):  # pragma: no cover - dépend du signal
@@ -45,11 +64,105 @@ def _offsite(args: argparse.Namespace) -> int:
     return run(cfg, runner, dry_run=args.dry_run, now=time.time())
 
 
+def _positionnels(args: argparse.Namespace, commande: str) -> list[str]:
+    """Reconstitue les arguments dans l'ordre, en s'arrêtant au premier absent.
+
+    Un positionnel facultatif non fourni ne doit pas laisser de trou : le
+    moteur lit `$1` et `$2`, pas des options nommées.
+    """
+    sortie: list[str] = []
+    for nom, _facultatif in DELEGUEES[commande]:
+        valeur = getattr(args, nom, None)
+        if valeur is None:
+            break
+        sortie.append(valeur)
+    return sortie
+
+
+def _deleguer(args: argparse.Namespace) -> int:
+    """Mode hôte : on achemine, le conteneur travaille.
+
+    Toute la valeur ajoutée est ici — les gardes, la résolution du CTID et les
+    confirmations — parce que ce sont les seules choses qu'on ne puisse pas
+    faire de l'autre côté du montage.
+    """
+    import os
+
+    from core.runner import Runner
+    from pgtool.location import (
+        Delegate,
+        Refus,
+        Where,
+        confirm,
+        detect,
+        read_conf,
+        resolve_ctid,
+    )
+
+    runner = Runner()
+    commande = args.commande
+
+    if detect(runner) is Where.CONTAINER:
+        # Le moteur est encore en bash à ce stade de la migration.
+        raise Refus(
+            "dans le conteneur, le moteur est « pgbk » — "
+            f"« pg {commande} » s'utilise depuis le nœud"
+        )
+
+    if os.geteuid() != 0:
+        raise Refus("à lancer en root sur le nœud (pct l'exige)")
+
+    ctid = resolve_ctid(flag=args.ctid, env=os.environ, conf=read_conf())
+    delegue = Delegate(runner, ctid)
+    delegue.preflight()
+
+    ct_args = _positionnels(args, commande)
+    oui = getattr(args, "yes", False)
+
+    if commande == "delete":
+        # Le conteneur seul sait à quoi une référence correspond : « 20260819 »
+        # désigne la plus récente de ce jour, qui peut être le dernier
+        # instantané. --plan applique toutes les gardes et n'efface rien.
+        vise = delegue.plan(commande, ct_args)
+        if not vise:
+            raise Refus("rien à supprimer")
+        if args.plan:
+            # Le bash, lui, enchaînait sur la suppression : « --plan » n'y
+            # était honnête que dans le conteneur. Ici il s'arrête, ce que son
+            # nom promet.
+            print(vise)
+            return 0
+        if not oui:
+            confirm(
+                f"SUPPRIME l'instantané {vise} du CT {ctid}", vise, "son nom"
+            )
+            oui = True
+
+    elif commande == "restore" and not oui:
+        confirm(
+            f"ÉCRASE la base {args.base} du CT {ctid}",
+            args.base,
+            "le nom de la base",
+        )
+        oui = True
+
+    delegue.hand_over(commande, ct_args, yes=oui)
+    return 0  # inatteignable : hand_over remplace le processus
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pg",
         description="Outillage du cluster PostgreSQL mutualisé.",
         epilog="Documentation : pve-eranikus/pgsql/README.md et doc/RUNBOOK.md",
+    )
+    parser.add_argument(
+        "--ctid",
+        metavar="ID",
+        help=(
+            "vise un autre conteneur pour cette commande, sans toucher à "
+            "/etc/default/pgbk"
+        ),
     )
     sous = parser.add_subparsers(dest="commande", required=True)
 
@@ -77,6 +190,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     offsite.set_defaults(fonction=_offsite)
 
+    for nom, positionnels in DELEGUEES.items():
+        p = sous.add_parser(
+            nom,
+            help=AIDE[nom],
+            description=(
+                f"{AIDE[nom].capitalize()}. Se tape sur le nœud : la commande "
+                "est acheminée vers le moteur du conteneur."
+            ),
+        )
+        for arg, facultatif in positionnels:
+            p.add_argument(arg, nargs="?" if facultatif else None)
+        if nom in ("restore", "delete"):
+            p.add_argument(
+                "--yes",
+                action="store_true",
+                help="saute la confirmation — pour un usage scripté, jamais à la main",
+            )
+        if nom == "delete":
+            p.add_argument(
+                "--plan",
+                action="store_true",
+                help=(
+                    "affiche l'instantané réellement visé et s'arrête. "
+                    "Toutes les gardes s'appliquent, rien n'est effacé."
+                ),
+            )
+        p.set_defaults(fonction=_deleguer)
+
     return parser
 
 
@@ -85,8 +226,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, _quitter_sur_signal)
 
     args = build_parser().parse_args(argv if argv is not None else sys.argv[1:])
+
+    from pgtool.location import Refus
+
     try:
         return args.fonction(args)
+    except Refus as refus:
+        # Un refus argumenté : le message a déjà tout dit, pas de trace.
+        for ligne in str(refus).splitlines():
+            if ligne:
+                error(ligne)
+        return 1
     except SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001 - dernier filet, volontaire
@@ -103,5 +253,4 @@ def main(argv: Sequence[str] | None = None) -> int:
             cadre = trace.tb_frame
             ou = f" — {cadre.f_code.co_filename}:{trace.tb_lineno}"
         error(f"échec inattendu : {type(exc).__name__}: {exc}{ou}")
-        error("copie hors-site NON garantie pour cette exécution")
         return 1
