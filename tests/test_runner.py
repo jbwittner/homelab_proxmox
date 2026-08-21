@@ -254,3 +254,37 @@ def test_fs_en_simulation_necrit_rien(tmp_path):
     dst = tmp_path / "dst"
     assert Fs(dry_run=True).install(src, dst) is True
     assert not dst.exists(), "la simulation ne doit rien écrire"
+
+
+# ─── écriture de contenu généré ──────────────────────────────────────────────
+
+
+def test_fs_ecrit_un_contenu_genere_avec_son_mode(tmp_path):
+    """Tout ne se copie pas : `rclone.conf` et le drop-in du nœud sont
+    fabriqués, pas repris d'un fichier du dépôt. Le mode part avec le contenu —
+    un fichier de configuration lisible par tous n'est un défaut qu'à
+    retardement."""
+    from core.runner import Fs
+
+    cible = tmp_path / "sous" / "dossier" / "f.conf"
+    assert Fs().write_file(cible, "[gcs]\n", mode=0o600) is True
+    assert cible.read_text() == "[gcs]\n"
+    assert (cible.stat().st_mode & 0o777) == 0o600
+
+
+def test_fs_ne_reecrit_pas_un_contenu_identique(tmp_path):
+    """« Zéro modification sur un état conforme » vaut aussi pour le contenu
+    généré : réécrire changerait le mtime et ferait mentir le bilan."""
+    from core.runner import Fs
+
+    cible = tmp_path / "f.conf"
+    Fs().write_file(cible, "a\n", mode=0o600)
+    assert Fs().write_file(cible, "a\n", mode=0o600) is False
+
+
+def test_fs_en_simulation_necrit_rien(tmp_path):
+    from core.runner import Fs
+
+    cible = tmp_path / "f.conf"
+    assert Fs(dry_run=True).write_file(cible, "a\n") is True
+    assert not cible.exists()

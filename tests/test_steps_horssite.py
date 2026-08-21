@@ -237,3 +237,140 @@ def test_le_script_hors_site_est_pose_en_755(ctx):
         action.run(ctx)
     cible = ctx.cible / "usr/local/bin/pgbk-offsite"
     assert stat.S_IMODE(cible.stat().st_mode) == 0o755
+
+
+# ─── ce que l'unité du dépôt déclare ─────────────────────────────────────────
+
+
+UNITE = """[Unit]
+Description=Copie hors-site
+
+[Service]
+Environment=PGBK_OFFSITE_RCLONE=/usr/bin/rclone
+Environment=PGBK_OFFSITE_REMOTE=gcs
+Environment=PGBK_OFFSITE_CONFIG=/root/.config/rclone/rclone.conf
+"""
+
+
+def test_unit_env_lit_la_copie_du_DEPOT(tmp_path):
+    """Ni l'unité installée ni le drop-in : le dépôt fait foi, c'est ce que le
+    déploiement va poser. Interroger `systemctl show` répondrait sur l'état
+    d'avant, celui qu'on est justement en train de remplacer."""
+    from pgtool.steps.horssite import unit_env
+
+    unite = tmp_path / "pgbk-offsite.service"
+    unite.write_text(UNITE)
+    assert unit_env(unite, "PGBK_OFFSITE_REMOTE", "autre") == "gcs"
+
+
+def test_unit_env_se_rabat_sur_le_defaut(tmp_path):
+    """Une ligne Environment retirée ne doit pas produire un contrôle sur une
+    chaîne vide, qui passerait pour un fichier absent."""
+    from pgtool.steps.horssite import unit_env
+
+    unite = tmp_path / "pgbk-offsite.service"
+    unite.write_text(UNITE)
+    assert unit_env(unite, "ABSENTE", "/par/defaut") == "/par/defaut"
+    assert unit_env(tmp_path / "rien.service", "X", "d") == "d"
+
+
+def test_unit_env_garde_la_derniere_occurrence(tmp_path):
+    """systemd retient la dernière ; lire la première divergerait de ce que
+    l'unité fait réellement."""
+    from pgtool.steps.horssite import unit_env
+
+    unite = tmp_path / "u.service"
+    unite.write_text(UNITE + "Environment=PGBK_OFFSITE_REMOTE=gcs2\n")
+    assert unit_env(unite, "PGBK_OFFSITE_REMOTE", "") == "gcs2"
+
+
+# ─── rclone.conf ─────────────────────────────────────────────────────────────
+
+
+def test_un_rclone_conf_absent_est_ecrit(ctx, tmp_path):
+    from pgtool.steps.horssite import ConfigRclone
+
+    conf = tmp_path / "rclone" / "rclone.conf"
+    plan = ConfigRclone(conf, remote="gcs", cle=tmp_path / "k.json").check(ctx)
+    assert plan.state == "absent"
+    for action in plan.actions:
+        action.run(ctx)
+    ecrit = conf.read_text()
+    assert "[gcs]" in ecrit
+    assert "bucket_policy_only = true" in ecrit
+    assert stat.S_IMODE(conf.stat().st_mode) == 0o600
+
+
+def test_un_rclone_conf_present_nest_JAMAIS_reecrit(ctx, tmp_path):
+    """Le fichier est hors dépôt et peut porter d'autres remotes : le réécrire
+    en emporterait."""
+    from pgtool.steps.horssite import ConfigRclone
+
+    conf = tmp_path / "rclone.conf"
+    conf.write_text("[autre]\ntype = s3\n")
+    plan = ConfigRclone(conf, remote="gcs", cle=tmp_path / "k.json").check(ctx)
+    assert plan.actions == (), "aucune action : on n'y touche pas"
+    assert conf.read_text() == "[autre]\ntype = s3\n"
+
+
+def test_bucket_policy_only_manquant_est_DICTE_pas_ajoute(ctx, tmp_path):
+    """Sans lui, UBLA refuse chaque insertion en 400 et zéro octet est écrit.
+    La ligne exacte est donnée ; l'ajouter serait éditer un fichier qu'on ne
+    possède pas."""
+    from pgtool.steps.horssite import ConfigRclone
+
+    conf = tmp_path / "rclone.conf"
+    conf.write_text("[gcs]\ntype = google cloud storage\n")
+    plan = ConfigRclone(conf, remote="gcs", cle=tmp_path / "k.json").check(ctx)
+    assert plan.state == "error"
+    assert plan.actions == ()
+    assert "bucket_policy_only = true" in plan.detail
+
+
+# ─── le drop-in du nœud ──────────────────────────────────────────────────────
+
+
+def test_le_dropin_porte_CE_noeud_et_CE_volume(ctx, tmp_path):
+    """L'unité du dépôt ne porte que des valeurs par défaut lisibles ; c'est le
+    drop-in qui rend le hors-site juste sur --ctid 201 comme sur un autre
+    nœud, sans rien éditer dans le dépôt."""
+    from pgtool.steps.horssite import DropInNoeud
+
+    ctx.facts["offsite_src"] = "/data/subvol-200-disk-0"
+    cible = tmp_path / "10-noeud.conf"
+    plan = DropInNoeud(cible, node="pve-eranikus").check(ctx)
+    assert plan.state == "absent"
+    for action in plan.actions:
+        action.run(ctx)
+    ecrit = cible.read_text()
+    assert "Environment=PGBK_OFFSITE_NODE=pve-eranikus" in ecrit
+    assert "Environment=PGBK_OFFSITE_SRC=/data/subvol-200-disk-0" in ecrit
+
+
+def test_un_dropin_a_jour_ne_propose_rien(ctx, tmp_path):
+    from pgtool.steps.horssite import DropInNoeud
+
+    ctx.facts["offsite_src"] = "/data/subvol-200-disk-0"
+    cible = tmp_path / "10-noeud.conf"
+    etape = DropInNoeud(cible, node="pve-eranikus")
+    for action in etape.check(ctx).actions:
+        action.run(ctx)
+    assert etape.check(ctx).state == "ok"
+
+
+def test_sans_source_resolue_le_dropin_nest_pas_ecrit(ctx, tmp_path):
+    """Écrire une source qu'on n'a pas su résoudre ferait partir la copie de
+    3h30 sur un chemin inventé."""
+    from pgtool.steps.horssite import DropInNoeud
+
+    plan = DropInNoeud(tmp_path / "10-noeud.conf", node="n").check(ctx)
+    assert plan.state == "error"
+    assert plan.actions == ()
+
+
+def test_reecrire_le_dropin_demande_un_daemon_reload(ctx, tmp_path):
+    from pgtool.steps.horssite import EFFET_RELOAD, DropInNoeud
+
+    ctx.facts["offsite_src"] = "/data/subvol-200-disk-0"
+    plan = DropInNoeud(tmp_path / "10-noeud.conf", node="n").check(ctx)
+    assert EFFET_RELOAD in plan.actions[0].effects

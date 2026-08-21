@@ -380,6 +380,31 @@ class Fs:
         dst.chmod(mode)
         return True
 
+    def write_file(self, path: Path, content: str, *, mode: int = 0o644) -> bool:
+        """Écrit un contenu FABRIQUÉ. Renvoie True si quelque chose a changé.
+
+        `install()` recopie un fichier du dépôt ; certains fichiers, eux,
+        n'existent nulle part avant d'être calculés — un drop-in qui porte le
+        nom du nœud, une configuration qui porte un chemin de clé. Ils passent
+        par ici pour hériter des deux mêmes garanties : la simulation n'écrit
+        rien, et un contenu déjà identique n'est pas réécrit — sans quoi le
+        mtime changerait et le bilan annoncerait une pose qui n'a pas eu lieu.
+        """
+        same = (
+            path.is_file()
+            and path.read_text() == content
+            and (path.stat().st_mode & 0o777) == mode
+        )
+        if same:
+            return False
+        if self.dry_run:
+            info(f"  [dry-run] écrire {path} ({mode:o})")
+            return True
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+        path.chmod(mode)
+        return True
+
     def mkdir(self, path: Path, *, mode: int = 0o755) -> bool:
         if path.is_dir():
             return False

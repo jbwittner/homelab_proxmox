@@ -254,3 +254,152 @@ class ArmementHorsSite(EtapeHorsSite):
                 ),
             ),
         )
+
+
+# ─── ce que l'unité du dépôt déclare ─────────────────────────────────────────
+
+
+def unit_env(unite: Path, cle: str, defaut: str) -> str:
+    """Valeur d'un `Environment=CLE=valeur` dans l'unité DU DÉPÔT.
+
+    Le dépôt fait foi, ni l'unité installée ni le drop-in : c'est ce que le
+    déploiement s'apprête à poser. Interroger `systemctl show` répondrait sur
+    l'état d'avant — celui qu'on est justement en train de remplacer.
+
+    La DERNIÈRE occurrence gagne, comme chez systemd. Et un défaut est rendu
+    quand la clé manque : sans lui, une ligne retirée produirait un contrôle
+    sur une chaîne vide, qui passerait pour un fichier absent.
+    """
+    valeur = defaut
+    try:
+        lignes = Path(unite).read_text().splitlines()
+    except OSError:
+        return defaut
+    for ligne in lignes:
+        nom, _, reste = ligne.strip().partition("=")
+        if nom != "Environment":
+            continue
+        # Deuxième découpe sur le PREMIER « = » seulement : l'awk du bash
+        # prenait $3 et tronquait donc une valeur qui en contiendrait un.
+        # Aucune n'en contient aujourd'hui ; ne pas tronquer ne peut pas nuire.
+        trouvee, _, contenu = reste.partition("=")
+        if trouvee == cle:
+            valeur = contenu
+    return valeur
+
+
+# ─── rclone.conf ─────────────────────────────────────────────────────────────
+
+LIGNE_UBLA = "bucket_policy_only = true"
+
+
+class ConfigRclone(EtapeHorsSite):
+    """Le remote de la copie. Écrit s'il est ABSENT, jamais réécrit.
+
+    Ce fichier est hors dépôt et peut porter d'autres remotes que le nôtre : le
+    réécrire en emporterait. Quand il existe mais qu'il lui manque
+    `bucket_policy_only`, la ligne exacte est DICTÉE et rien n'est ajouté —
+    éditer un fichier qu'on ne possède pas est un geste qui appartient à
+    l'humain.
+
+    Sans cette ligne, l'accès uniforme du bucket (UBLA) refuse chaque insertion
+    en « Error 400: Cannot insert legacy ACL », zéro octet écrit.
+    """
+
+    name = "rclone.conf"
+
+    def __init__(self, chemin: Path, *, remote: str, cle: Path) -> None:
+        self.chemin = Path(chemin)
+        self.remote = remote
+        self.cle = Path(cle)
+
+    def _contenu(self) -> str:
+        return "\n".join((
+            "# Généré par pg deploy — remote de la copie hors-site.",
+            f"[{self.remote}]",
+            "type = google cloud storage",
+            f"service_account_file = {self.cle}",
+            LIGNE_UBLA,
+        )) + "\n"
+
+    def check(self, ctx) -> Outcome:
+        if not self.chemin.is_file():
+            return Outcome(
+                "absent",
+                f"{self.chemin} — remote [{self.remote}] à écrire",
+                (
+                    Action(
+                        f"écrire {self.chemin} (0600)",
+                        lambda c, p=self.chemin, t=self._contenu():
+                            c.fs.write_file(p, t, mode=0o600),
+                    ),
+                ),
+            )
+
+        texte = self.chemin.read_text()
+        if not any(l.strip().startswith("bucket_policy_only")
+                   for l in texte.splitlines()):
+            return Outcome(
+                "error",
+                f"{LIGNE_UBLA} absent de {self.chemin} — sans lui, UBLA "
+                f"refuse chaque insertion en 400 (doc/RUNBOOK.md section 10)\n"
+                f"{CONT}echo '{LIGNE_UBLA}' >> {self.chemin}",
+            )
+        return Outcome("ok", str(self.chemin))
+
+
+# ─── le drop-in du nœud ──────────────────────────────────────────────────────
+
+
+class DropInNoeud(EtapeHorsSite):
+    """CE nœud-ci, CE volume-ci. Le drop-in fait autorité.
+
+    L'unité du dépôt ne porte que des valeurs par défaut lisibles ; c'est ce
+    fichier qui rend le hors-site juste sur `--ctid 201` comme sur un autre
+    nœud, sans rien éditer dans le dépôt.
+
+    Il n'est PAS écrit tant que la source n'a pas été résolue : y inscrire un
+    chemin deviné ferait partir la copie de 3h30 sur un volume inventé, dans un
+    bucket qu'on ne peut pas purger.
+    """
+
+    name = "drop-in du nœud"
+    requires = ("source hors-site",)
+
+    def __init__(self, chemin: Path, *, node: str) -> None:
+        self.chemin = Path(chemin)
+        self.node = node
+
+    def _contenu(self, source: str) -> str:
+        return "\n".join((
+            "# Généré par pg deploy — ne pas éditer, il sera réécrit.",
+            "[Service]",
+            f"Environment=PGBK_OFFSITE_NODE={self.node}",
+            f"Environment=PGBK_OFFSITE_SRC={source}",
+        )) + "\n"
+
+    def check(self, ctx) -> Outcome:
+        source = ctx.facts.get("offsite_src")
+        if not source:
+            return Outcome(
+                "error",
+                "source hors-site non résolue — le drop-in n'est pas écrit "
+                "plutôt que de porter un chemin deviné",
+            )
+
+        voulu = self._contenu(str(source))
+        actuel = self.chemin.read_text() if self.chemin.is_file() else ""
+        if actuel == voulu:
+            return Outcome("ok", f"{self.chemin} (nœud {self.node}, {source})")
+        return Outcome(
+            "drift" if actuel else "absent",
+            f"{self.chemin} — nœud {self.node}, source {source}",
+            (
+                Action(
+                    f"écrire {self.chemin} (0644)",
+                    lambda c, p=self.chemin, t=voulu:
+                        c.fs.write_file(p, t, mode=0o644),
+                    effects=frozenset({EFFET_RELOAD}),
+                ),
+            ),
+        )
