@@ -83,6 +83,13 @@ class Options:
     admin: str | None = None
     tenant: str | None = None
 
+    # Le volume des sauvegardes. La taille ne sert qu'à la CRÉATION : après,
+    # c'est Proxmox qui décide du nom du volume, et l'agrandir est un geste
+    # séparé (`pct resize`).
+    mp2_mount: str = "/var/backups/postgresql"
+    mp2_storage: str = "data"
+    mp2_size: int = 50
+
 
 @dataclass
 class DeployContext(Context):
