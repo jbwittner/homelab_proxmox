@@ -21,7 +21,7 @@ Un PRA qui n'a jamais été joué n'est pas un plan, c'est une intention.
 | Copie hors-site | tous les jours à 3h30 vers `gs://homelab-pgsql-backups-dc93212a/pve-eranikus/postgresql/`, conservée **365 jours** |
 | Contenu d'un instantané | un `<base>.dump` par base, `globals.sql` (rôles **et empreintes de mots de passe**), `MANIFEST` (date, version PostgreSQL, bases) |
 | Secrets | OpenBao — mais `globals.sql` suffit à rendre leurs accès aux services, voir scénario 6 |
-| Reconstruction du service | `pg-deploy.sh`, une commande |
+| Reconstruction du service | `pg deploy`, une commande |
 
 **RPO — au pire 24 h**, l'écart entre deux sauvegardes. Il n'y a pas
 d'archivage WAL : ce qui a été écrit depuis la dernière sauvegarde est perdu.
@@ -115,7 +115,7 @@ référence, il suffit de la reposer :
 
 ```bash
 cd /root/homelab_proxmox && git pull
-pve-eranikus/pgsql/pg-deploy.sh --restart
+pve-eranikus/pgsql/pg deploy --restart
 ```
 
 Penser à `postgresql.auto.conf` (`/var/lib/postgresql/18/main/`), écrit par les
@@ -151,7 +151,7 @@ Puis reposer la configuration depuis le nœud, qui remet les symlinks, les
 unités et le timer :
 
 ```bash
-pve-eranikus/pgsql/pg-deploy.sh
+pve-eranikus/pgsql/pg deploy
 ```
 
 ## 3 — Le conteneur est détruit
@@ -170,7 +170,7 @@ sa base telle qu'elle était au moment du vzdump.
 ```bash
 pct set 200 --protection 0        # la protection bloque la restauration d'un vzdump
 pct restore 200 /var/lib/vz/dump/<archive>.tar.zst
-pve-eranikus/pgsql/pg-deploy.sh   # repose mp1, mp2, config, timers, protection
+pve-eranikus/pgsql/pg deploy   # repose mp1, mp2, config, timers, protection
 ```
 
 **Sinon, reconstruction complète** — le conteneur d'abord, les données
@@ -183,7 +183,7 @@ ensuite :
 # 2. Tout reposer, d'une commande. Elle crée mp2, la configuration, les
 #    unités, et déclenche une première sauvegarde (vide, sans importance).
 cd /root/homelab_proxmox && git pull
-pve-eranikus/pgsql/pg-deploy.sh
+pve-eranikus/pgsql/pg deploy
 ```
 
 Puis récupérer le dernier instantané depuis GCS — **avec le compte personnel**,
@@ -237,7 +237,7 @@ git clone <url> /root/homelab_proxmox
 # 2. Créer le CT avec le script communautaire (runbook § 1).
 
 # 3. Tout reposer.
-/root/homelab_proxmox/pve-eranikus/pgsql/pg-deploy.sh
+/root/homelab_proxmox/pve-eranikus/pgsql/pg deploy
 
 # 4. Pousser l'instantané récupéré dans le CT — pct push prend un fichier
 #    à la fois, d'où la boucle.
@@ -256,7 +256,7 @@ pgbk verify  forgejo
 ```
 
 **Si le nœud de remplacement porte un autre nom**, la copie hors-site s'y
-range d'elle-même sous ce nom : `pg-deploy.sh` écrit un drop-in avec
+range d'elle-même sous ce nom : `pg deploy` écrit un drop-in avec
 `hostname -s` et le volume réel du CT. L'ancienne arborescence
 `pve-eranikus/` reste intacte dans le bucket — rien ne l'écrase, rien ne la
 supprime.
@@ -264,7 +264,7 @@ supprime.
 **À ne pas oublier une fois le service debout** :
 
 - redéposer la clé du compte de service (`/root/.config/rclone/`) depuis
-  OpenBao, puis rejouer `pg-deploy.sh` pour armer la copie hors-site ;
+  OpenBao, puis rejouer `pg deploy` pour armer la copie hors-site ;
 - remettre les mots de passe applicatifs — ou pas, voir
   [scénario 6](#6--les-secrets-sont-perdus) ;
 - vérifier que les clients pointent la bonne IP (`pg_hba.conf` filtre en `/32`).
@@ -284,7 +284,7 @@ Dans l'ordre :
 2. **Considérer les empreintes SCRAM comme divulguées.** `globals.sql` part
    hors-site et contient les empreintes de tous les rôles. Changer les mots de
    passe de tous les locataires et du compte d'administration après la reprise
-   (`pg-deploy.sh --admin`, et `ALTER ROLE <nom> PASSWORD '<nouveau>'` pour
+   (`pg deploy --admin`, et `ALTER ROLE <nom> PASSWORD '<nouveau>'` pour
    chaque locataire), puis les ranger dans OpenBao.
 3. **Reconstruire sur du matériel sain**, en suivant le
    [scénario 4](#4--le-nœud-est-perdu). Ne pas réutiliser le nœud compromis.

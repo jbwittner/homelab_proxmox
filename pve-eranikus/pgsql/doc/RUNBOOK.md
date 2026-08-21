@@ -6,12 +6,12 @@ production, procédures de restauration. **Les gestes courants sont dans
 sort de l'ordinaire, ou quand il faut refaire l'installation depuis zéro.
 
 Sauf la création du conteneur (section 1), tout ce qui suit est joué par
-`pg-deploy.sh`. Les commandes sont données parce qu'il faut pouvoir comprendre
+`pg deploy`. Les commandes sont données parce qu'il faut pouvoir comprendre
 et rejouer à la main ce que le script automatise — pas parce qu'il faut les
 taper.
 
 1. [Création du conteneur](#1-création-du-conteneur)
-2. [Déploiement depuis l'hôte — `pg-deploy.sh`](#2-déploiement-depuis-lhôte--pg-deploysh)
+2. [Déploiement depuis l'hôte — `pg deploy`](#2-déploiement-depuis-lhôte--pg-deploy)
 3. [Montage du dépôt](#3-montage-du-dépôt)
 4. [Pose de la configuration](#4-pose-de-la-configuration)
 5. [Compte d'administration (`jbwittner`)](#5-compte-dadministration-jbwittner)
@@ -20,6 +20,7 @@ taper.
 8. [`pgbk` — interface de gestion](#8-pgbk--interface-de-gestion)
 9. [Restauration manuelle](#9-restauration-manuelle)
 10. [Copie hors-site vers GCS — `pgbk-offsite`](#10-copie-hors-site-vers-gcs--pgbk-offsite)
+11. [`pg status` — l'état du montage](#11-pg-status--létat-du-montage)
 
 ## 1. Création du conteneur
 
@@ -81,14 +82,14 @@ actif — aucun `ssl-cert` à installer.
 
 ### Après création
 
-Rien à faire à la main : `pg-deploy.sh` (section 2) pose `startup order=1`,
+Rien à faire à la main : `pg deploy` (section 2) pose `startup order=1`,
 corrige `features=nesting=1` si la réponse au questionnaire a été manquée,
 crée le volume de sauvegarde et active `fstrim.timer` dans le CT. Pour
 regarder sans rien changer :
 
 ```bash
 pct config 200 | grep -E 'net0|features|protection|mp'
-pve-eranikus/pgsql/pg-deploy.sh --status
+pve-eranikus/pgsql/pg deploy --status
 ```
 
 Le stockage est du **LVM-thin**, pas du ZFS : aucun réglage de `recordsize` à
@@ -97,17 +98,43 @@ faire. Deux conséquences en revanche — le pool est surprovisionné (surveille
 à `on`, ext4 sur LVM n'offrant aucune garantie d'atomicité des écritures de
 page.
 
-## 2. Déploiement depuis l'hôte — `pg-deploy.sh`
+## 2. Déploiement depuis l'hôte — `pg deploy`
 
 Tout ce que décrivent les sections 3, 4 et 7 se joue en une commande, **depuis
 le nœud, sans entrer dans le CT** :
 
 ```bash
 cd /root/homelab_proxmox && git pull
-pve-eranikus/pgsql/pg-deploy.sh
+pve-eranikus/pgsql/pg deploy
 ```
 
-**Première pose et mises à jour, c'est le même script**, et il n'y a pas de
+> **Deux implémentations cohabitent le temps de la bascule.** `pg deploy` est
+> celle qui vaut ; `pg-deploy.sh` est conservé jusqu'à ce que la parité des
+> deux `--status` ait été constatée sur le nœud, section par section. Les
+> drapeaux sont les mêmes, à une addition près (`--no-container`). Partout
+> ci-dessous, `pg-deploy.sh <drapeaux>` se lit `pg deploy <drapeaux>`.
+>
+> Ce que `pg deploy` fait de plus, et qui explique la migration :
+>
+> - **le plan est produit par le constat, jamais par l'application** — ce que
+>   `--dry-run` annonce est exactement ce que le mode réel exécute, il n'y en a
+>   pas deux descriptions qui puissent diverger ;
+> - **`--dry-run` annonce aussi les effets** : « il faudra redémarrer le CT »
+>   est l'information la plus utile de ce mode, et le bash ne la donnait pas ;
+> - **un prérequis non constaté bloque ce qui en dépend** au lieu de le laisser
+>   conclure dans le vide. Le hors-site ne s'arme plus sur un `mp2` que
+>   personne n'a vérifié — le trou que `--no-container` ouvrait ;
+> - **une action qui ferait apparaître un mot de passe est refusée** tant
+>   qu'elle n'a pas été demandée par `--admin` ou `--tenant`.
+>
+> **Un écart attendu pendant la comparaison des deux `--status`.** Les fichiers
+> générés portent le nom de leur générateur en en-tête. Le premier `pg deploy`
+> après un `pg-deploy.sh` réécrit donc `10-noeud.conf` — même contenu utile,
+> en-tête différent — et l'annonce en POSE. C'est correct, et cela ne se
+> produit qu'une fois. `rclone.conf`, lui, n'est jamais réécrit quand il
+> existe : son en-tête restera celui du bash, et ce n'est pas un défaut.
+
+**Première pose et mises à jour, c'est la même commande**, et il n'y a pas de
 raison de distinguer les deux : chaque étape est conditionnelle et ne touche à
 rien si l'état est déjà conforme.
 
@@ -116,22 +143,27 @@ normal. Les fichiers de configuration sont des symlinks vers le dépôt et
 suivent donc le `git pull` tout seuls — mais `pgbk.sh`, `pg-backup.sh` et les
 unités systemd sont des **copies**, imposées par un montage en lecture seule
 qui ne peut pas porter le bit d'exécution. Modifier `pgbk.sh` dans le dépôt ne
-change donc rien tant que `pg-deploy.sh` n'a pas été rejoué.
+change donc rien tant que `pg deploy` n'a pas été rejoué.
 
-Le script lit **deux répertoires** : `ct/`, qui est la charge utile du montage,
+La commande lit **deux répertoires** : `ct/`, qui est la charge utile du montage,
 et `host/`, qui ne quitte jamais le nœud. Il refuse de démarrer si l'un des
 fichiers attendus manque de son côté — le message nomme le chemin complet.
 Détail du montage en section 3.
 
 ```bash
-pve-eranikus/pgsql/pg-deploy.sh --status   # état de chaque élément, ne change rien
-pve-eranikus/pgsql/pg-deploy.sh --dry-run  # annonce ce qui serait fait
-pve-eranikus/pgsql/pg-deploy.sh --ctid 201 # cible un autre conteneur, et le consigne
-pve-eranikus/pgsql/pg-deploy.sh --restart  # force un restart au lieu d'un reload
-pve-eranikus/pgsql/pg-deploy.sh --no-offsite   # saute la copie hors-site (étape F)
-pve-eranikus/pgsql/pg-deploy.sh --no-install   # n'installe aucun paquet (nœud sans réseau)
-pve-eranikus/pgsql/pg-deploy.sh --no-first-run # ne déclenche ni sauvegarde ni copie initiale
+pve-eranikus/pgsql/pg deploy --status   # verdicts avec leur motif, ne change rien
+pve-eranikus/pgsql/pg deploy --dry-run  # annonce chaque modification ET ses effets
+pve-eranikus/pgsql/pg deploy --ctid 201 # cible un autre conteneur, et le consigne
+pve-eranikus/pgsql/pg deploy --restart  # force un restart au lieu d'un reload
+pve-eranikus/pgsql/pg deploy --no-container # ne touche pas au CT (hors-site non armé)
+pve-eranikus/pgsql/pg deploy --no-offsite   # saute la copie hors-site (étape F)
+pve-eranikus/pgsql/pg deploy --no-install   # n'installe aucun paquet (nœud sans réseau)
+pve-eranikus/pgsql/pg deploy --no-first-run # ne déclenche ni sauvegarde ni copie initiale
 ```
+
+`pg deploy` se lit **depuis le dépôt** et refuse de tourner depuis la copie
+installée : poser depuis `/usr/local/lib/pgtool` reviendrait à redéployer ce
+qui est déjà là, et un `git pull` cesserait d'avoir le moindre effet.
 
 Sur un CT déjà conforme, `--dry-run` doit annoncer **zéro modification** : c'est
 le contrôle qui prouve que le script décrit bien l'état existant, et non un
@@ -166,8 +198,8 @@ créer quelque chose dont personne n'attend la rotation. Ces deux opérations ne
 sont donc **jamais** jouées par un déploiement de routine :
 
 ```bash
-pve-eranikus/pgsql/pg-deploy.sh --admin jbwittner   # compte d'administration (section 5)
-pve-eranikus/pgsql/pg-deploy.sh --tenant forgejo    # base + rôle d'un locataire (section 6)
+pve-eranikus/pgsql/pg deploy --admin jbwittner   # compte d'administration (section 5)
+pve-eranikus/pgsql/pg deploy --tenant forgejo    # base + rôle d'un locataire (section 6)
 ```
 
 Les deux ne font rien si le rôle ou la base existe déjà : rejouer le script ne
@@ -176,7 +208,7 @@ dans OpenBao. Le mot de passe généré est affiché **une seule fois**.
 
 ### Le CTID n'est écrit qu'à un seul endroit
 
-`pg-deploy.sh` consigne le conteneur qu'il vient de poser dans
+`pg deploy` consigne le conteneur qu'il vient de poser dans
 `/etc/default/pgbk` :
 
 ```
@@ -184,14 +216,14 @@ PG_CTID=200
 ```
 
 `pgbk` le relit de là. Changer de conteneur ne demande donc que de rejouer
-`pg-deploy.sh --ctid <ID>` — il n'y a pas de second fichier à penser à mettre à
+`pg deploy --ctid <ID>` — il n'y a pas de second fichier à penser à mettre à
 jour, et `pgbk` **refuse de démarrer** si rien n'est consigné plutôt que de
 taper dans un CT supposé. Priorité : `--ctid`, puis `$PG_CTID`, puis le
 fichier.
 
 ## 3. Montage du dépôt
 
-Posé par `pg-deploy.sh` (section 2). Ce qu'il fait, et pourquoi.
+Posé par `pg deploy` (section 2). Ce qu'il fait, et pourquoi.
 
 La protection du CT interdit toute modification de disque, ajout d'un point de
 montage compris. Il faut la lever puis la remettre :
@@ -210,7 +242,7 @@ au mauvais moment ne laisse pas le conteneur déprotégé.
 
 **La source du montage est `ct/`, pas le répertoire du service.** Le conteneur ne
 voit donc ni `host/` (scripts et unités du nœud, nom du bucket, chemin de la clé
-GCS), ni `doc/`, ni `pg-deploy.sh`. Les chemins `/etc/pgsql-git/<fichier>` sont
+GCS), ni `doc/`, ni `pg deploy`. Les chemins `/etc/pgsql-git/<fichier>` sont
 inchangés : seule la source a bougé. Conséquence pratique : le runbook ne se lit
 plus depuis le conteneur, il se lit depuis le nœud.
 
@@ -262,7 +294,7 @@ erreur dans le bucket ne pourra jamais être remplacé (section 10).
 Taille et pool sont modifiables à la création :
 
 ```bash
-PG_MP2_STORAGE=data PG_MP2_SIZE=100 pve-eranikus/pgsql/pg-deploy.sh
+PG_MP2_STORAGE=data PG_MP2_SIZE=100 pve-eranikus/pgsql/pg deploy
 ```
 
 ## 4. Pose de la configuration
@@ -271,7 +303,7 @@ Les deux fichiers sont des **liens symboliques** vers le dépôt. PostgreSQL
 accepte un symlink pour `pg_hba.conf` malgré ses exigences de permissions,
 vérifié sur cette instance.
 
-Posés par `pg-deploy.sh` (section 2). Ce qu'il fait :
+Posés par `pg deploy` (section 2). Ce qu'il fait :
 
 ```bash
 ln -sf /etc/pgsql-git/10-homelab.conf /etc/postgresql/18/main/conf.d/10-homelab.conf
@@ -300,11 +332,11 @@ par les `ALTER SYSTEM SET`, il est lu **en dernier** et écrase le drop-in.
 
 ```bash
 cd /root/homelab_proxmox && git pull
-pve-eranikus/pgsql/pg-deploy.sh
+pve-eranikus/pgsql/pg deploy
 ```
 
 Le `git pull` suffit aux fichiers de configuration, qui sont des symlinks vers
-le dépôt ; `pg-deploy.sh` recopie les scripts et les unités, qui sont des
+le dépôt ; `pg deploy` recopie les scripts et les unités, qui sont des
 copies, et applique le tout. Le `reload` de PostgreSQL est inconditionnel : les
 symlinks ayant pu changer de contenu avec le `git pull` sans que le script
 puisse s'en apercevoir, l'économiser ferait manquer un `pg_hba.conf` modifié.
@@ -350,7 +382,7 @@ injoignable.
 Depuis le nœud, comme tout le reste :
 
 ```bash
-pve-eranikus/pgsql/pg-deploy.sh --admin jbwittner
+pve-eranikus/pgsql/pg deploy --admin jbwittner
 ```
 
 Le rôle est créé en peer sur socket Unix, avec un mot de passe aléatoire
@@ -409,14 +441,14 @@ service passera sans garde-fou.
 Depuis le nœud :
 
 ```bash
-pve-eranikus/pgsql/pg-deploy.sh --tenant forgejo
+pve-eranikus/pgsql/pg deploy --tenant forgejo
 ```
 
 Base et rôle sont créés par `tenant.sql`, avec un mot de passe aléatoire
 affiché une seule fois. Si la base existe déjà, le script ne touche à rien.
 
 Il reste **une** chose à faire à la main après : ajouter la ligne du locataire
-dans `pg_hba.conf`, **avant** le `reject`, puis rejouer `pg-deploy.sh` pour
+dans `pg_hba.conf`, **avant** le `reject`, puis rejouer `pg deploy` pour
 qu'elle soit rechargée. Le script le rappelle en fin d'exécution — il ne peut
 pas l'écrire lui-même, `pg_hba.conf` étant un fichier versionné dont l'IP du
 service n'est pas toujours connue au moment de créer la base.
@@ -450,7 +482,7 @@ sudo -u postgres psql -c "DROP ROLE <nom>;"
 ```
 
 Ajouter la ligne correspondante dans `pg_hba.conf`, **avant** le `reject`, puis
-depuis le nœud `git pull` et `pg-deploy.sh` (section 2), qui applique le
+depuis le nœud `git pull` et `pg deploy` (section 2), qui applique le
 rechargement. Côté client : `SSL_MODE = require`.
 
 Dans les configurations applicatives, préférer un nom de domaine à l'IP — mais
@@ -460,7 +492,7 @@ debout.
 
 ## 7. Sauvegarde
 
-Posée par `pg-deploy.sh` (section 2), qui fait dans le CT :
+Posée par `pg deploy` (section 2), qui fait dans le CT :
 
 ```bash
 install -m 644 /etc/pgsql-git/pg-backup.service /etc/systemd/system/
@@ -469,7 +501,7 @@ install -m 755 /etc/pgsql-git/pg-backup.sh      /usr/local/bin/pg-backup.sh
 systemctl daemon-reload && systemctl enable --now pg-backup.timer
 ```
 
-**La première sauvegarde est déclenchée par `pg-deploy.sh`** s'il n'en existe
+**La première sauvegarde est déclenchée par `pg deploy`** s'il n'en existe
 aucune : un CT fraîchement déployé n'attend pas 2h30 pour avoir un filet, et
 tant qu'aucune sauvegarde n'existe, il n'y a rien à copier hors-site ni à
 restaurer — la chaîne n'est pas prouvée. `--no-first-run` s'en abstient.
@@ -483,7 +515,7 @@ pgbk backup
 L'unité pointe vers `/usr/local/bin/pg-backup.sh` : le script doit être copié,
 pas lié, car le montage est en lecture seule et ne peut pas porter le bit
 d'exécution. Chaque copie est comparée en contenu **et en mode** avant d'être
-refaite, d'où un `pg-deploy.sh` sans effet quand rien n'a bougé.
+refaite, d'où un `pg deploy` sans effet quand rien n'a bougé.
 
 Une exécution produit **un répertoire**, nommé par horodatage :
 
@@ -607,7 +639,7 @@ C'est ce que le nœud utilise pour poser sa question, le CT étant seul à savoi
 
 ### Un seul fichier, deux rôles
 
-`pgbk.sh` est posé **à l'identique** aux deux endroits par `pg-deploy.sh` :
+`pgbk.sh` est posé **à l'identique** aux deux endroits par `pg deploy` :
 
 | | |
 |---|---|
@@ -627,7 +659,7 @@ La détection se fait sur la présence de `pct` — un nœud Proxmox l'a, le
 conteneur Debian non :
 
 - **sur le nœud** : il résout le CTID (section 2), vérifie que le conteneur
-  tourne et que `pgbk` y est posé — un message qui renvoie vers `pg-deploy.sh`
+  tourne et que `pgbk` y est posé — un message qui renvoie vers `pg deploy`
   plutôt qu'un « command not found » —, pose la confirmation, puis `exec pct
   exec` et s'efface. Le code de retour est celui du CT.
 - **dans le CT** : il fait le travail.
@@ -705,7 +737,7 @@ déploiement. Le CT reçoit `core/` et `pgtool/` en `/usr/local/lib/pgtool`,
 **jamais `proxmox/`** — il n'a rien à faire avec `pct`, et un test vérifie que
 la charge utile s'importe entièrement sans lui.
 
-`pg-deploy.sh` compare les empreintes en un seul aller-retour, ne pousse que ce
+`pg deploy` compare les empreintes en un seul aller-retour, ne pousse que ce
 qui diffère, et retire ce que le dépôt ne contient plus — sans quoi un module
 renommé laisserait son ancêtre, qui continuerait de s'importer.
 
@@ -862,7 +894,7 @@ d'activation et l'historique du journal. Seul `ExecStart` a bougé.
 `proxmox`, `pgtool` — en `/usr/local/lib/pgtool`. **Des copies, pas des
 symlinks**, pour la même raison que les scripts : le dépôt peut être en cours
 de `git pull` à l'heure où le timer se déclenche, et un arbre d'import à moitié
-à jour donne un `ImportError` au pire moment. `pg-deploy.sh` retire aussi ce
+à jour donne un `ImportError` au pire moment. `pg deploy` retire aussi ce
 que le dépôt ne contient plus, sans quoi un module renommé laisserait son
 ancêtre, qui continuerait de s'importer.
 
@@ -947,11 +979,11 @@ Trois conséquences, toutes visibles dans le code :
 
 ### Le seul geste manuel : la clé du compte de service
 
-Tout le reste est posé par `pg-deploy.sh` — `apt install rclone`, le répertoire
+Tout le reste est posé par `pg deploy` — `apt install rclone`, le répertoire
 `/root/.config/rclone` en `700`, et le fichier `rclone.conf` s'il n'existe pas :
 
 ```ini
-# Généré par pg-deploy.sh — remote de la copie hors-site.
+# Généré par pg deploy — remote de la copie hors-site.
 [gcs]
 type = google cloud storage
 service_account_file = /root/.config/rclone/pgsql-backups.json
@@ -990,7 +1022,7 @@ rclone --config /root/.config/rclone/rclone.conf \
 
 Le listage prouve la clé, le réseau et les droits de lecture — **pas** que
 l'écriture passe. Le seul test d'écriture est la première copie, que
-`pg-deploy.sh` déclenche lui-même. Ne pas déposer d'objet-sonde dans le
+`pg deploy` déclenche lui-même. Ne pas déposer d'objet-sonde dans le
 bucket : le nœud n'aurait pas le droit de l'effacer et il y resterait un an.
 
 #### Le piège de l'accès uniforme (UBLA)
@@ -1020,11 +1052,11 @@ Constaté le 20 août 2026, à la première exécution réelle.
 
 ### Installation
 
-Rien de spécifique : c'est l'étape F de `pg-deploy.sh` (section 2).
+Rien de spécifique : c'est l'étape F de `pg deploy` (section 2).
 
 ```bash
 cd /root/homelab_proxmox && git pull
-pve-eranikus/pgsql/pg-deploy.sh
+pve-eranikus/pgsql/pg deploy
 ```
 
 Elle pose sur **l'hôte** — et non dans le CT — `/usr/local/bin/pgbk-offsite`
@@ -1032,7 +1064,7 @@ et les deux unités, puis écrit un **drop-in** qui décrit ce nœud-ci :
 
 ```ini
 # /etc/systemd/system/pgbk-offsite.service.d/10-noeud.conf
-# Généré par pg-deploy.sh — ne pas éditer, il sera réécrit.
+# Généré par pg deploy — ne pas éditer, il sera réécrit.
 [Service]
 Environment=PGBK_OFFSITE_NODE=pve-eranikus
 Environment=PGBK_OFFSITE_SRC=/data/subvol-200-disk-0
@@ -1045,7 +1077,7 @@ l'unité versionnée ne porte plus que des valeurs par défaut lisibles.
 
 Comme pour les fichiers du CT, le script est **copié et non lié** : le dépôt
 peut être déplacé, ou en cours de `git pull` à 3h30. Modifier `pgbk-offsite.sh`
-dans le dépôt ne change donc rien tant que `pg-deploy.sh` n'a pas été rejoué.
+dans le dépôt ne change donc rien tant que `pg deploy` n'a pas été rejoué.
 
 **Le timer n'est armé que si tout est réuni** — `rclone`, la clé, et un `mp2`
 identifié. Sinon le script et les unités sont quand même posés (fichiers
@@ -1061,7 +1093,7 @@ toutes les nuits à 3h30 n'aiderait personne.
 | `KO pgbk-offsite (source hors CT 201)` | repli sur la valeur de l'unité alors que `mp2` n'a pas pu être résolu, et cette valeur parle d'un autre conteneur |
 
 Un `mp2` absent parce que le CT est à l'arrêt n'est pas un refus : le dataset
-n'est monté côté hôte que quand le conteneur tourne, et `pg-deploy.sh` démarre
+n'est monté côté hôte que quand le conteneur tourne, et `pg deploy` démarre
 le CT avant tout le reste.
 
 **La première copie est déclenchée dans la foulée de l'armement.** C'est le
@@ -1069,7 +1101,7 @@ seul test d'écriture réel, et il vaut mieux qu'il ait lieu pendant qu'un humai
 regarde plutôt qu'à 3h30 dans un journal que personne n'ouvrira. `--no-first-run`
 s'en abstient.
 
-`pg-deploy.sh --no-offsite` saute entièrement l'étape — pour un nœud sans copie
+`pg deploy --no-offsite` saute entièrement l'étape — pour un nœud sans copie
 hors-site, ou pour ne toucher qu'au CT.
 
 ### Vérification
@@ -1223,7 +1255,7 @@ effacer une fois la restauration finie.
 
 Trois niveaux, du plus général au plus précis : les valeurs par défaut du
 script, celles de `pgbk-offsite.service` (versionné), et le drop-in
-`10-noeud.conf` que `pg-deploy.sh` génère pour la machine et le conteneur
+`10-noeud.conf` que `pg deploy` génère pour la machine et le conteneur
 réels. Ce dernier l'emporte, et c'est lui qui porte `PGBK_OFFSITE_NODE` et
 `PGBK_OFFSITE_SRC`.
 
@@ -1269,3 +1301,46 @@ réels. Ce dernier l'emporte, et c'est lui qui porte `PGBK_OFFSITE_NODE` et
 - `work_mem` est **par nœud de tri et par connexion**. À 100 connexions et
   8 Mo, le pire cas théorique dépasse la RAM du CT : surveiller
   `log_temp_files` plutôt que d'augmenter à l'aveugle.
+
+## 11. `pg status` — l'état du montage
+
+**La commande à taper quand on se demande si tout va bien.** Elle ne modifie
+rien, et répond à une question différente de `pg deploy --status` : celui-ci
+dit si les FICHIERS sont en place, celle-ci dit si le montage FONCTIONNE.
+
+```bash
+pg status              # les trois maillons, et les alarmes
+pg status --no-offsite # sans interroger le bucket (nœud hors ligne)
+```
+
+Elle regarde ensemble les trois maillons qui peuvent se rompre en silence :
+
+| Maillon | Où il vit | Ce qui peut arriver sans que rien ne le dise |
+|---|---|---|
+| la sauvegarde locale | CT 200 | plus rien ne s'écrit depuis des jours |
+| `pg-backup.timer` | **CT 200** | armé, et pourtant en échec chaque nuit |
+| `pgbk-offsite.timer` | **le nœud** | désarmé depuis un déploiement partiel |
+
+Les deux timers ne vivent pas sur la même machine : c'est la confusion la plus
+facile à faire dans tout ce montage, et chaque ligne de la sortie dit lequel
+est où.
+
+**Un maillon non constaté est une alarme, pas un silence.** Un bucket qui n'a
+pas répondu ne vaut pas un bucket cohérent, un âge qu'on n'a pas su lire ne
+vaut pas une sauvegarde récente. C'est la même règle qui empêche le hors-site
+de s'armer sur un `mp2` que personne n'a vérifié.
+
+**Les seuils viennent des unités**, pas d'un choix. `pg-backup.timer` se
+déclenche à 2h30 avec 15 minutes d'aléa ; au-delà de **26 heures**, une
+exécution a forcément été manquée. La marge couvre l'aléa et un décalage de
+démarrage sans laisser passer un jour entier.
+
+Codes de retour : `0` tout en ligne, `1` au moins une alarme. De quoi
+l'appeler depuis une supervision sans lire la sortie.
+
+### Ce qu'elle ne fait pas
+
+Elle ne corrige rien et ne déclenche rien — pas même une sauvegarde manquante.
+Un constat qui répare est un constat auquel on ne peut plus se fier : quand
+elle dit qu'un maillon est rompu, il l'était avant qu'on regarde. Le geste qui
+répare est nommé dans l'alarme.

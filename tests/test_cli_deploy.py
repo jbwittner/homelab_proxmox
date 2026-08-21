@@ -106,3 +106,42 @@ def test_une_etape_bloquee_par_un_secret_ne_fait_pas_echouer_le_deploiement():
     from pgtool.cli import _code_de_sortie
 
     assert _code_de_sortie([Report("admin", "G", "blocked")]) == 0
+
+
+# ---- le volume de sauvegarde ------------------------------------------------
+
+
+def test_le_volume_de_sauvegarde_se_regle_par_lenvironnement():
+    """L'exercice de PRA monte un CT jetable avec `PG_MP2_SIZE=10` : sans ces
+    variables, la repetition demanderait 50 Go pour une base de test, et le
+    document qui la decrit serait faux."""
+    from pgtool.cli import _options_de
+
+    opts = _options_de(
+        _args("deploy"), ctid=299,
+        env={"PG_MP2_SIZE": "10", "PG_MP2_STORAGE": "autre-pool",
+             "PG_MP2_MOUNT": "/ailleurs"},
+    )
+    assert opts.mp2_size == 10
+    assert opts.mp2_storage == "autre-pool"
+    assert opts.mp2_mount == "/ailleurs"
+
+
+def test_sans_environnement_les_valeurs_de_production_sappliquent():
+    from pgtool.cli import _options_de
+
+    opts = _options_de(_args("deploy"), ctid=200, env={})
+    assert opts.mp2_size == 50
+    assert opts.mp2_storage == "data"
+    assert opts.mp2_mount == "/var/backups/postgresql"
+
+
+def test_une_taille_illisible_est_refusee_et_non_ignoree():
+    """Retomber en silence sur 50 Go alors qu'on a demande autre chose creerait
+    un volume qu'on n'a pas voulu - et un volume ne se redimensionne pas d'un
+    deploiement."""
+    from pgtool.cli import _options_de
+    from pgtool.location import Refus
+
+    with pytest.raises(Refus):
+        _options_de(_args("deploy"), ctid=200, env={"PG_MP2_SIZE": "beaucoup"})

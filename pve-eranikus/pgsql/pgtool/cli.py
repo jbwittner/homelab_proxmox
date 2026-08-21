@@ -154,12 +154,29 @@ def _mode_de(args: argparse.Namespace):
     return Mode.APPLY
 
 
-def _options_de(args: argparse.Namespace, *, ctid: int):
-    """Les drapeaux, tels quels. Un drapeau ne désactive jamais un contrôle."""
+def _options_de(args: argparse.Namespace, *, ctid: int, env=None):
+    """Les drapeaux, plus les trois réglages du volume de sauvegarde.
+
+    Ceux-là viennent de l'environnement et non de la ligne de commande : ils ne
+    servent qu'à la CRÉATION du volume, c'est-à-dire une fois dans la vie d'un
+    conteneur. En faire des drapeaux les mettrait sur le même plan que
+    `--no-offsite`, alors qu'ils ne se rejouent jamais — après la création,
+    agrandir est un geste séparé (`pct resize`).
+
+    C'est aussi ce dont l'exercice de PRA a besoin pour monter un CT jetable
+    sans lui réserver 50 Go.
+    """
+    import os
+
     from pgtool.deploy import Options
 
+    env = os.environ if env is None else env
     return Options(
         ctid=ctid,
+        mp2_mount=env.get("PG_MP2_MOUNT") or Options.mp2_mount,
+        mp2_storage=env.get("PG_MP2_STORAGE") or Options.mp2_storage,
+        mp2_size=_entier(env.get("PG_MP2_SIZE"), Options.mp2_size,
+                         "PG_MP2_SIZE"),
         do_container=not args.no_container,
         do_offsite=not args.no_offsite,
         do_install=not args.no_install,
@@ -168,6 +185,22 @@ def _options_de(args: argparse.Namespace, *, ctid: int):
         admin=args.admin,
         tenant=args.tenant,
     )
+
+
+def _entier(brut: str | None, defaut: int, nom: str) -> int:
+    """Refuse plutôt que de retomber en silence sur le défaut.
+
+    Une valeur illisible ignorée créerait un volume qu'on n'a pas demandé — et
+    un volume ne se redimensionne pas d'un déploiement.
+    """
+    from pgtool.location import Refus
+
+    if not brut:
+        return defaut
+    try:
+        return int(brut)
+    except ValueError:
+        raise Refus(f"{nom} n'est pas un entier : {brut}") from None
 
 
 def _secrets_autorises(opts) -> bool:

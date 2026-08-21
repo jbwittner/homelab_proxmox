@@ -20,18 +20,18 @@ succès, pas un échec — c'est exactement ce pour quoi on le joue.
 ## Les deux garde-fous
 
 À lire **avant** de taper quoi que ce soit. Les deux failles viennent du même
-endroit : `pg-deploy.sh` a été écrit pour déployer, pas pour jouer.
+endroit : `pg deploy` a été écrit pour déployer, pas pour jouer.
 
 > **1. Toujours `--no-offsite` sur le CT d'exercice.**
 >
-> Sans ce drapeau, `pg-deploy.sh` réécrit le drop-in de `pgbk-offsite` avec le
+> Sans ce drapeau, `pg deploy` réécrit le drop-in de `pgbk-offsite` avec le
 > volume du CT visé. La copie hors-site de production partirait dès 3h30 sur
 > les sauvegardes du CT d'exercice, et ces objets-là **ne pourront jamais être
 > supprimés depuis le nœud**.
 
 > **2. Remettre le CTID de production à la fin.**
 >
-> `pg-deploy.sh --ctid 299` consigne `PG_CTID=299` dans `/etc/default/pgbk` :
+> `pg deploy --ctid 299` consigne `PG_CTID=299` dans `/etc/default/pgbk` :
 > tous les `pgbk` suivants viseraient le CT d'exercice, y compris un
 > `pgbk restore` fait en urgence trois semaines plus tard. Le démontage le
 > remet — ne pas sauter cette étape.
@@ -70,7 +70,7 @@ cat <instantané>/MANIFEST
 md5sum <instantané>/*
 
 # empreintes de l'original, sur le nœud. La vue HÔTE du dataset est écrite
-# dans le drop-in par pg-deploy.sh : la lire plutôt que la recopier de mémoire.
+# dans le drop-in par pg deploy : la lire plutôt que la recopier de mémoire.
 SRC=$(sed -n 's/^Environment=PGBK_OFFSITE_SRC=//p' \
       /etc/systemd/system/pgbk-offsite.service.d/10-noeud.conf)
 md5sum "$SRC"/<instantané>/*
@@ -128,7 +128,7 @@ matériel : le CT 299 tient lieu de machine de remplacement.
 
 ```bash
 date                                          # heure de début, à noter
-pve-eranikus/pgsql/pg-deploy.sh --status      # la production est saine ?
+pve-eranikus/pgsql/pg deploy --status      # la production est saine ?
 cat /etc/default/pgbk                         # doit dire PG_CTID=200
 ```
 
@@ -152,14 +152,14 @@ libre et un disque plus petit.
 
 ```bash
 cd /root/homelab_proxmox && git pull
-PG_MP2_SIZE=10 pve-eranikus/pgsql/pg-deploy.sh --ctid 299 --no-offsite
+PG_MP2_SIZE=10 pve-eranikus/pgsql/pg deploy --ctid 299 --no-offsite
 ```
 
 `PG_MP2_SIZE=10` évite d'allouer 50 Go pour un exercice. `--no-offsite` est
 **obligatoire** (garde-fou 1).
 
 - [ ] Le résumé ne porte aucun `KO` autre que ceux liés au hors-site.
-- [ ] `pg-deploy.sh --ctid 299 --no-offsite --dry-run` annonce ensuite **zéro
+- [ ] `pg deploy --ctid 299 --no-offsite --dry-run` annonce ensuite **zéro
       modification** : le script décrit bien l'état qu'il vient de poser.
 
 **Durée mesurée : ______**
@@ -240,11 +240,11 @@ pct destroy 299
 
 # GARDE-FOU 2 : remettre le CTID de production. Un VRAI passage, pas --status :
 # en mode --status rien n'est écrit, et /etc/default/pgbk resterait sur 299.
-pve-eranikus/pgsql/pg-deploy.sh --ctid 200
+pve-eranikus/pgsql/pg deploy --ctid 200
 cat /etc/default/pgbk             # doit redire PG_CTID=200
 
 # la production n'a pas bougé
-pve-eranikus/pgsql/pg-deploy.sh --status
+pve-eranikus/pgsql/pg deploy --status
 systemctl list-timers pgbk-offsite.timer
 pct exec 200 -- systemctl list-timers pg-backup.timer
 
@@ -263,7 +263,7 @@ rm -rf <instantané> /tmp/<instantané>   # empreintes SCRAM
 - [ ] Ligne ajoutée au journal ci-dessous.
 - [ ] **Chaque anomalie rencontrée est corrigée dans le dépôt**, pas seulement
       notée : une étape manquante devient une ligne de `PRA.md`, un geste
-      oublié devient une ligne de `pg-deploy.sh`.
+      oublié devient une ligne de `pg deploy`.
 
 ## Exercice de bascule — valider le moteur Python
 
@@ -299,7 +299,7 @@ pas de conteneur, et on ne touche pas à `/etc/default/pgbk`.
 
 ```bash
 # sur le nœud
-pve-eranikus/pgsql/pg-deploy.sh --tenant pra
+pve-eranikus/pgsql/pg deploy --tenant pra
 ```
 
 Le mot de passe s'affiche une fois. **Il n'a pas besoin d'être conservé** : ce
@@ -501,7 +501,7 @@ de locataire.
 
 - **Le RPO reste de 24 h.** Aucun exercice ne rattrape l'absence d'archivage
   WAL ; ce qui a été écrit depuis la dernière sauvegarde est perdu.
-- **La perte du dépôt git** n'est pas jouée : `pg-deploy.sh` en vient. Le
+- **La perte du dépôt git** n'est pas jouée : `pg deploy` en vient. Le
   dépôt doit être poussé ailleurs que sur le nœud — un Forgejo hébergé sur ce
   même nœud ne compte pas.
 - **La perte d'OpenBao** n'est pas jouée non plus. Le
