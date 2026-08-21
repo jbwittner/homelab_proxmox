@@ -1,29 +1,15 @@
 # Version de Forgejo ÉPINGLÉE pour le CT 400.
 #
-# Une seule ligne utile : « vMAJEUR.MINEUR.CORRECTIF ». Tout ce qui commence
-# par « # » est un commentaire, les lignes vides sont ignorées.
+# Une seule ligne utile : « vMAJEUR.MINEUR.CORRECTIF ». Tout ce qui
+# commence par « # » est un commentaire, les lignes vides sont ignorées.
 #
-# ┌────────────────────────────────────────────────────────────────────────┐
-# │ CE CONTENEUR N'EST JAMAIS MIS À JOUR PAR UN SCRIPT COMMUNAUTAIRE.      │
-# │ La branche 15.0 est LTS (fin de support : 15 juillet 2027). Passer en  │
-# │ 16 ou 17 est une DÉCISION, prise après lecture des notes de version :  │
-# │ une migration de schéma Forgejo est irréversible sans restauration.    │
-# └────────────────────────────────────────────────────────────────────────┘
+# CE CONTENEUR N'EST JAMAIS MIS À JOUR PAR UN SCRIPT COMMUNAUTAIRE.
+# La branche 15.0 est LTS — fin de support : 15 juillet 2027.
+# En sortir est une DÉCISION, prise après lecture des notes de version :
+# une migration de schéma Forgejo est irréversible sans restauration.
+# Voir doc/RUNBOOK.md section 4.
 #
-# Pour résoudre ou faire évoluer cette valeur, depuis le nœud :
-#
-#     pve-eranikus/forgejo/fj version --resolve
-#
-# Elle interroge l'API Codeberg, ne retient que le préfixe « v15.0. », écarte
-# les pré-versions et les brouillons, prend la plus récente, et réécrit ce
-# fichier. Résoudre n'installe rien : c'est « fj deploy » qui pose, et il ne
-# pose QUE ce qui est écrit ici. Voir doc/RUNBOOK.md section 4.
-#
-# L'épinglage n'a de valeur que s'il est TRAÇABLE : c'est pourquoi la version
-# est un fichier du dépôt, relu à chaque déploiement et comparé au binaire
-# réellement installé, et non un argument tapé une fois dans un terminal.
-#
-# --- NON RÉSOLUE ---
-# Tant qu'aucune ligne de version ne figure ci-dessous, « fj deploy » refuse
-# d'installer et le dit. C'est délibéré : deviner un numéro de correctif
-# reviendrait à épingler une version qui n'existe peut-être pas.
+# Écrit par « fj version --resolve ». Résoudre n'installe rien : c'est
+# « fj deploy » qui pose, et il ne pose QUE ce qui est écrit ci-dessous.
+
+v15.0.7

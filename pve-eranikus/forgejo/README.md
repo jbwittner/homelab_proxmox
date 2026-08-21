@@ -219,10 +219,10 @@ Avant de chercher : **`fj status`** dit lequel des quatre maillons est rompu.
 
 ## Reste à faire
 
-- [ ] **Renseigner `REVERSE_PROXY_TRUSTED_PROXIES`** dans `ct/app.ini` — il
+- [x] **Renseigner `REVERSE_PROXY_TRUSTED_PROXIES`** dans `ct/app.ini` — il
       porte encore le marqueur `@@TRAEFIK_IP@@`, et `fj deploy` refuse de
       rendre un bilan vert tant qu'il est là. C'est l'IP du CT 201.
-- [ ] **Résoudre `ct/VERSION`** (`fj version --resolve`) et commiter — sans
+- [x] **Résoudre `ct/VERSION`** (`fj version --resolve`) et commiter — sans
       elle, `fj deploy` n'installe rien, délibérément.
 - [ ] **Déposer `ct/RELEASE-KEY.asc`** après l'avoir confrontée à une source
       indépendante ([§ 4](doc/RUNBOOK.md#la-clé-de-publication)).
