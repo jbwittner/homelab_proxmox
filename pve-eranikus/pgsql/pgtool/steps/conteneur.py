@@ -22,9 +22,13 @@ sans qu'aucun `check()` puisse s'en apercevoir.
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+
 from core.commands import Systemd
 from core.converge import Action, Outcome
 from pgtool.deploy import MP
+from proxmox import Container, diff_tree
 
 EFFET_DAEMON_RELOAD = "ct.daemon-reload"
 EFFET_RESTART = "ct.postgresql.restart"
@@ -268,6 +272,139 @@ class TimerSauvegardeArme(EtapeCT):
                     lambda c: Systemd(
                         c.runner.for_container(c.opts.ctid)
                     ).enable_now("pg-backup.timer"),
+                ),
+            ),
+        )
+
+
+# ─── le moteur Python, poussé et non monté ───────────────────────────────────
+
+PYTHON_CT = "python3-minimal (CT)"
+
+
+def _empreinte(chemin: Path) -> str:
+    return hashlib.sha256(chemin.read_bytes()).hexdigest()
+
+
+class MoteurCT:
+    """L'arbre d'import de `pg` DANS le conteneur : `core` et `pgtool`.
+
+    **Poussé par `pct push`, jamais monté.** Le montage est vivant : un
+    `git pull` pendant qu'une sauvegarde tourne à 2h30 livrerait un arbre à
+    moitié à jour, ou un `ImportError` sur un module supprimé en cours
+    d'exécution. C'est exactement la raison pour laquelle les scripts sont
+    copiés et non liés — elle vaut pour la charge utile Python.
+
+    **Le conteneur ne reçoit jamais `proxmox`.** Il n'a pas `pct` et n'a rien à
+    en faire ; l'y pousser ferait passer les tests du nœud à un import de
+    `proxmox` depuis le moteur, qui n'échouerait que dans le CT.
+
+    **Ce qui n'est plus dans le dépôt est RETIRÉ.** Sans élagage, un module
+    renommé laisse son ancêtre en place, et cet ancêtre continue de s'importer.
+
+    Ne dépend pas du montage — il ne lit rien dedans — mais de l'interpréteur :
+    sans `python3`, il n'y a rien à poser, et `pgbk.sh` reste le moteur.
+    """
+
+    name = "moteur (CT)"
+    section = "B"
+    requires: tuple[str, ...] = (PYTHON_CT,)
+
+    def skip_if(self, ctx) -> str | None:
+        return None
+
+    def _sources(self, ctx) -> dict[str, Path]:
+        """Chemin relatif → fichier source. DEUX paquets, pas trois."""
+        racines = [ctx.paths.lib_src / "core", ctx.paths.pgtool_src]
+        trouves: dict[str, Path] = {}
+        for racine in racines:
+            if not racine.is_dir():
+                continue
+            for fichier in sorted(racine.rglob("*.py")):
+                rel = f"{racine.name}/{fichier.relative_to(racine)}"
+                trouves[rel] = fichier
+        return trouves
+
+    def check(self, ctx) -> Outcome:
+        sources = self._sources(ctx)
+        racine = str(ctx.paths.ct_lib)
+        conteneur = Container(ctx.runner, ctx.opts.ctid)
+        distant = conteneur.digests(racine)
+        local = {rel: _empreinte(chemin) for rel, chemin in sources.items()}
+        a_poser, a_retirer = diff_tree(local, distant)
+
+        if not a_poser and not a_retirer:
+            return Outcome("ok", f"{racine} — {len(sources)} module(s)")
+
+        actions = [
+            Action(
+                f"pct push {ctx.opts.ctid} {rel} → {racine}/{rel}",
+                lambda c, r=rel, s=sources[rel], d=racine:
+                    _pousser(c, s, f"{d}/{r}"),
+            )
+            for rel in a_poser
+        ]
+        actions += [
+            Action(
+                f"rm {racine}/{rel} (CT — absent du dépôt)",
+                lambda c, r=rel, d=racine: Container(
+                    c.runner, c.opts.ctid).exec("rm", "-f", f"{d}/{r}"),
+            )
+            for rel in a_retirer
+        ]
+        etat = "drift" if distant else "absent"
+        return Outcome(
+            etat,
+            f"{len(a_poser)} à pousser, {len(a_retirer)} à retirer",
+            tuple(actions),
+        )
+
+
+def _pousser(ctx, source: Path, cible: str, perms: str = "0644") -> None:
+    """`pct push` ne crée pas les répertoires intermédiaires."""
+    conteneur = Container(ctx.runner, ctx.opts.ctid)
+    parent = cible.rsplit("/", 1)[0]
+    conteneur.exec("mkdir", "-p", parent)
+    conteneur.push(source, cible, perms=perms)
+
+
+class LanceurCT:
+    """`/usr/local/bin/pg` dans le conteneur.
+
+    Poussé en 0755 : le lanceur n'est PAS dans `ct/`, il vit à la racine du
+    service, et un montage en lecture seule ne porterait de toute façon pas le
+    bit d'exécution.
+    """
+
+    name = "pg (CT)"
+    section = "B"
+    requires: tuple[str, ...] = (PYTHON_CT, "moteur (CT)")
+
+    def skip_if(self, ctx) -> str | None:
+        return None
+
+    def check(self, ctx) -> Outcome:
+        source = ctx.paths.launcher
+        cible = str(ctx.paths.ct_pg)
+        conteneur = Container(ctx.runner, ctx.opts.ctid)
+        # Script CONSTANT, chemin en argument. Le mode part avec l'empreinte :
+        # un fichier juste mais non exécutable ne se voit qu'à l'usage.
+        vu = conteneur.exec(
+            "sh", "-c",
+            'sha256sum "$1" 2>/dev/null | cut -d" " -f1; stat -c %a "$1" '
+            '2>/dev/null',
+            "sh", cible,
+            check=False,
+        ).lines
+        if vu[:2] == [_empreinte(source), "755"]:
+            return Outcome("ok", cible)
+        return Outcome(
+            "drift" if vu else "absent",
+            cible,
+            (
+                Action(
+                    f"pct push {ctx.opts.ctid} {source} {cible} --perms 0755",
+                    lambda c, s=source, d=cible: _pousser(c, s, d, "0755"),
                 ),
             ),
         )

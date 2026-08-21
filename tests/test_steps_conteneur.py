@@ -215,3 +215,116 @@ def test_le_timer_est_arme_sil_ne_lest_pas(ctx):
 
 def test_un_timer_deja_arme_ne_propose_rien(ctx):
     assert TimerSauvegardeArme().check(ctx).state == "ok"
+
+
+# ─── le moteur Python dans le conteneur ──────────────────────────────────────
+
+
+@pytest.fixture
+def arbre(ctx, tmp_path):
+    """Un dépôt minimal : `lib/core`, `lib/proxmox`, et `pgtool`."""
+    depot = tmp_path / "depot"
+    for chemin in ("lib/core/__init__.py", "lib/core/log.py",
+                   "lib/proxmox/__init__.py",
+                   "pve-eranikus/pgsql/pgtool/__init__.py",
+                   "pve-eranikus/pgsql/pgtool/cli.py"):
+        fichier = depot / chemin
+        fichier.parent.mkdir(parents=True, exist_ok=True)
+        fichier.write_text(f"# {chemin}\n")
+    (depot / "pve-eranikus" / "pgsql" / "pg").write_text("#!/usr/bin/python3\n")
+    return ctx
+
+
+def _empreintes_ct(ctx, table):
+    """Fait répondre le `find | sha256sum` du conteneur."""
+    sortie = "".join(f"{d}  ./{rel}\n" for rel, d in table.items())
+    _repond(ctx, lambda argv: "sha256sum" in " ".join(argv), sortie)
+
+
+def test_le_conteneur_ne_recoit_JAMAIS_proxmox(arbre):
+    """Le CT n'a pas `pct` et n'a rien à faire de Proxmox. L'y pousser ferait
+    croire qu'il peut s'en servir, et un import de `proxmox` depuis le moteur
+    passerait les tests du nœud avant d'échouer dans le conteneur."""
+    from pgtool.steps.conteneur import MoteurCT
+
+    plan = MoteurCT().check(arbre)
+    libelles = " ".join(a.label for a in plan.actions)
+    assert "core/log.py" in libelles
+    assert "pgtool/cli.py" in libelles
+    assert "proxmox" not in libelles
+
+
+def test_un_arbre_conforme_ne_propose_rien(arbre):
+    import hashlib
+
+    from pgtool.steps.conteneur import MoteurCT
+
+    etape = MoteurCT()
+    table = {
+        rel: hashlib.sha256(chemin.read_bytes()).hexdigest()
+        for rel, chemin in etape._sources(arbre).items()
+    }
+    _empreintes_ct(arbre, table)
+    plan = etape.check(arbre)
+    assert plan.state == "ok"
+    assert plan.actions == ()
+
+
+def test_un_module_absent_du_depot_est_retire_du_ct(arbre):
+    """Sans élagage, un module renommé laisse son ancêtre, et cet ancêtre
+    continue de s'importer : le CT tournerait sur du code disparu du dépôt."""
+    import hashlib
+
+    from pgtool.steps.conteneur import MoteurCT
+
+    etape = MoteurCT()
+    table = {
+        rel: hashlib.sha256(chemin.read_bytes()).hexdigest()
+        for rel, chemin in etape._sources(arbre).items()
+    }
+    table["core/ancien.py"] = "0" * 64
+    _empreintes_ct(arbre, table)
+    plan = etape.check(arbre)
+    assert plan.state == "drift"
+    assert any("rm" in a.label and "core/ancien.py" in a.label
+               for a in plan.actions)
+
+
+def test_le_moteur_est_pousse_et_non_lu_depuis_le_montage(arbre):
+    """`ct/` est la charge utile du montage ; le moteur, lui, n'y est pas — un
+    `git pull` à 2h30 livrerait sinon un arbre à moitié à jour, ou un
+    ImportError sur un module supprimé en cours d'exécution."""
+    from pgtool.steps.conteneur import MoteurCT
+
+    for action in MoteurCT().check(arbre).actions:
+        action.run(arbre)
+    pushes = [a for a in arbre.runner.calls if a[:2] == ("pct", "push")]
+    assert pushes, "le moteur voyage par pct push"
+
+
+def test_le_lanceur_ct_est_pousse_en_755(arbre):
+    """Le montage est en lecture seule et ne peut pas porter le bit
+    d'exécution : le lanceur ne peut donc pas y être lié."""
+    from pgtool.steps.conteneur import LanceurCT
+
+    plan = LanceurCT().check(arbre)
+    assert plan.state in ("absent", "drift")
+    assert any("0755" in a.label for a in plan.actions)
+
+
+def test_sans_python3_le_moteur_nest_pas_pose(arbre):
+    """« --no-install → moteur non posé, pgbk.sh bash conservé » : la
+    dégradation est annoncée, pas contournée."""
+    from pgtool.steps.conteneur import MoteurCT, PaquetCT
+
+    arbre.opts = Options(ctid=200, do_install=False)
+    _repond(arbre, lambda argv: "test" in argv and "/usr/bin/python3" in argv,
+            code=1)
+    rapports = traverse(
+        [MontageVisible(),
+         PaquetCT("python3-minimal", "/usr/bin/python3"),
+         MoteurCT()],
+        arbre,
+    )
+    assert rapports[1].state == "error"
+    assert rapports[2].state == "unknown"
