@@ -39,6 +39,7 @@ imprévu.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -356,6 +357,10 @@ def verdict(sorts: Iterable[Snap]) -> int:
 
 def run(cfg: OffsiteConfig, runner: Runner, *, dry_run: bool, now: float) -> int:
     """Le déroulé complet. Renvoie le code de retour, ne quitte jamais."""
+    # Horloge MONOTONE : un ajustement NTP ou un changement d'heure en pleine
+    # copie donnerait une durée absurde, voire négative, sur la seule ligne
+    # qu'on lira trois semaines plus tard.
+    depart = time.monotonic()
     step(f"démarrage — {cfg.src} → {cfg.base}")
 
     try:
@@ -430,12 +435,23 @@ def run(cfg: OffsiteConfig, runner: Runner, *, dry_run: bool, now: float) -> int
         if taille:
             info(f"  distant : {taille}")
 
+    # La durée est portée par la ligne de verdict, comme en bash. Une copie
+    # qui passe de deux secondes à quarante minutes est un signal, et sans
+    # elle il faudrait soustraire des horodatages à la main dans journalctl.
+    duree = int(time.monotonic() - depart)
+
     code = verdict(sorts)
     if code == EXIT_DIVERGENT:
-        error(f"{compte[Snap.DIVERGENT]} instantané(s) divergent(s), voir ci-dessus")
+        error(
+            f"terminé en {duree}s — {compte[Snap.DIVERGENT]} "
+            "instantané(s) divergent(s), voir ci-dessus"
+        )
         error("la copie hors-site est INCOMPLÈTE tant que ce n'est pas traité à la main")
     elif code == EXIT_FAILED:
-        error(f"{compte[Snap.FAILED]} instantané(s) en échec")
+        error(f"terminé en {duree}s — {compte[Snap.FAILED]} instantané(s) en échec")
     else:
-        step(f"terminé — {len(instantanes)} instantané(s) en ligne sur {cfg.base}")
+        step(
+            f"terminé en {duree}s — {len(instantanes)} instantané(s) "
+            f"en ligne sur {cfg.base}"
+        )
     return code

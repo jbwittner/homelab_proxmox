@@ -459,3 +459,37 @@ def test_bwlimit_vide_veut_dire_pas_de_bridage():
     assert OffsiteConfig.from_env({}, hostname="x").bwlimit == ""
     cfg = OffsiteConfig.from_env({"PGBK_OFFSITE_BWLIMIT": "10M"}, hostname="x")
     assert cfg.bwlimit == "10M"
+
+
+# ─── parité de la ligne de verdict ───────────────────────────────────────────
+
+
+def test_le_verdict_porte_la_duree(monkeypatch, cfg_valide, capsys):
+    """Le bash disait « terminé en 2s ». Une copie qui passe de deux secondes à
+    quarante minutes est un signal ; sans la durée il faudrait soustraire des
+    horodatages à la main dans journalctl.
+
+    Écart constaté à la comparaison de parité du 21 août 2026.
+    """
+    import re
+
+    monkeypatch.setattr("pgtool.offsite.preflight", lambda cfg, *, euid: None)
+    _instantane(cfg_valide.src, "20260820-093240")
+    run(cfg_valide, _runner_sain(), dry_run=False, now=time.time())
+    assert re.search(r"terminé en \d+s — 1 instantané\(s\) en ligne",
+                     capsys.readouterr().out)
+
+
+def test_la_duree_figure_aussi_sur_un_verdict_negatif(monkeypatch, cfg_valide, capsys):
+    """Un échec est justement le moment où l'on veut savoir combien de temps
+    ça a duré avant de renoncer."""
+    import re
+
+    monkeypatch.setattr("pgtool.offsite.preflight", lambda cfg, *, euid: None)
+    _instantane(cfg_valide.src, "20260820-093240")
+    r = _runner_sain()
+    r.matchers.insert(0, (lambda argv: "lsf" in argv and "-R" in argv,
+                          Result(("rclone",), 1, "", "refus")))
+    assert run(cfg_valide, r, dry_run=False, now=time.time()) == EXIT_FAILED
+    assert re.search(r"terminé en \d+s — 1 instantané\(s\) en échec",
+                     capsys.readouterr().err)
