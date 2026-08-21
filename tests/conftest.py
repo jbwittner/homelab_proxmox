@@ -14,5 +14,11 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 LIB = REPO / "lib"
 
-if str(LIB) not in sys.path:
-    sys.path.insert(0, str(LIB))
+# Les outils propres à un service vivent dans le répertoire de ce service, et
+# sont déposés dans le conteneur à côté de `core`. On reproduit donc la même
+# disposition : `lib/` puis le répertoire du service, tous deux à plat.
+SERVICES = [REPO / "pve-eranikus" / "pgsql"]
+
+for chemin in [LIB, *SERVICES]:
+    if str(chemin) not in sys.path:
+        sys.path.insert(0, str(chemin))

@@ -71,6 +71,9 @@ CT_SRC="$SRC/ct"                                     # source reelle du mp1
 HOST_SRC="$SRC/host"                                 # ce qui s'installe sur le noeud
 MP=/etc/pgsql-git                                    # cible du montage dans le CT
 HOST_PGBK=/usr/local/sbin/pgbk
+HOST_PG=/usr/local/sbin/pg                           # point d'entree unique
+HOST_LIB=/usr/local/lib/pgtool                       # arbre d'import de pg
+LIB_SRC="$(cd "$SRC/../.." && pwd)/lib"              # briques partagees du depot
 HOST_OFFSITE=/usr/local/bin/pgbk-offsite             # copie hors-site, cote HOTE
 OFFSITE_UNIT=/etc/systemd/system/pgbk-offsite.service
 OFFSITE_DROPIN_DIR="${OFFSITE_UNIT}.d"
@@ -153,6 +156,10 @@ command -v pct >/dev/null || die "pct introuvable : ce script tourne sur l'hote,
 for f in pg-backup.sh pgbk.sh pg-backup.service pg-backup.timer; do
     [[ -f "$CT_SRC/$f" ]] || die "Depot incomplet : $CT_SRC/$f absent."
 done
+[[ -x "$SRC/pg" ]]            || die "Depot incomplet : $SRC/pg absent ou non executable."
+[[ -f "$SRC/pgtool/cli.py" ]] || die "Depot incomplet : $SRC/pgtool/cli.py absent."
+[[ -d "$LIB_SRC/core" ]]      || die "Depot incomplet : $LIB_SRC/core absent."
+[[ -d "$LIB_SRC/proxmox" ]]   || die "Depot incomplet : $LIB_SRC/proxmox absent."
 if [[ $DO_OFFSITE -eq 1 ]]; then
     for f in pgbk-offsite.sh pgbk-offsite.service pgbk-offsite.timer; do
         [[ -f "$HOST_SRC/$f" ]] || die "Depot incomplet : $HOST_SRC/$f absent."
@@ -573,6 +580,85 @@ host_wrapper() {
     log
 }
 
+# Arbre d'import de « pg ». Les trois paquets sont deposes cote a cote, ce qui
+# reproduit la disposition qu'aura le conteneur — lui n'en recevra que deux,
+# proxmox ne quittant jamais l'hote.
+PY_TREE=("$LIB_SRC/core" "$LIB_SRC/proxmox" "$SRC/pgtool")
+
+# Liste « chemin relatif <TAB> source » de tout ce qui doit etre pose.
+py_manifest() {
+    local src f
+    for src in "${PY_TREE[@]}"; do
+        while IFS= read -r f; do
+            printf '%s/%s\t%s\n' "$(basename "$src")" "${f#"$src"/}" "$f"
+        done < <(find "$src" -type f -name '*.py' | sort)
+    done
+}
+
+host_pgtool() {
+    log "== Outillage Python de l'hote"
+
+    # python3 vient du template Debian, pas d'une decision explicite. Le
+    # constater, ne pas le supposer : « pg » refuse de demarrer en dessous de
+    # 3.11, et mieux vaut l'apprendre ici qu'a 3h30.
+    local py=/usr/bin/python3 pyver
+    if [[ ! -x $py ]]; then
+        warn "python3 absent de $py — pg ne peut pas tourner"
+        note KO "python3 (absent)"
+        return 0
+    fi
+    pyver=$("$py" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo '?')
+    if ! "$py" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+        warn "python3 $pyver sur $py — 3.11 minimum requis par pg"
+        note KO "python3 ($pyver)"
+        return 0
+    fi
+    log "  python3 $pyver ($py)"
+    note OK "python3 $pyver"
+
+    # COPIE ET NON SYMLINK, comme pour les scripts : le depot peut etre en
+    # cours de « git pull » a l'heure ou un timer se declenche, et un arbre
+    # d'import a moitie a jour donne un ImportError au pire moment.
+    local changed=0 rel src dest
+    local want; want=$(mktemp)
+    while IFS=$'\t' read -r rel src; do
+        printf '%s\n' "$rel" >> "$want"
+        cmp -s "$src" "$HOST_LIB/$rel" 2>/dev/null || changed=1
+    done < <(py_manifest)
+
+    # Ce que le depot ne contient plus doit partir : un module renomme
+    # laisserait son ancetre en place, et cet ancetre continuerait de
+    # s'importer. Le noeud tournerait sur du code absent du depot.
+    local -a extra=()
+    if [[ -d $HOST_LIB ]]; then
+        while IFS= read -r dest; do
+            rel="${dest#"$HOST_LIB"/}"
+            grep -qxF "$rel" "$want" || extra+=("$rel")
+        done < <(find "$HOST_LIB" -type f -name '*.py' | sort)
+    fi
+    [[ ${#extra[@]} -gt 0 ]] && changed=1
+
+    if [[ $changed -eq 0 ]]; then
+        log "  $HOST_LIB a jour"
+        note OK "$HOST_LIB"
+    else
+        log "  pose de $HOST_LIB"
+        while IFS=$'\t' read -r rel src; do
+            run install -D -m 644 "$src" "$HOST_LIB/$rel"
+        done < <(py_manifest)
+        for rel in "${extra[@]}"; do
+            log "  retrait de $rel (absent du depot)"
+            run rm -f "$HOST_LIB/$rel"
+        done
+        note POSE "$HOST_LIB"
+    fi
+    rm -f "$want"
+
+    # Le lanceur : seul fichier executable de l'ensemble, et le seul du PATH.
+    install_host 755 "$SRC/pg" "$HOST_PG" || true
+    log
+}
+
 # ------------------------------------- E. dependances de l'hote (paquets, GCS)
 
 host_packages() {
@@ -925,6 +1011,7 @@ container_setup
 log
 write_conf
 host_wrapper
+host_pgtool
 
 # La premiere sauvegarde AVANT le hors-site : sans elle, la copie initiale
 # n'aurait rien a transferer et sortirait en erreur « aucune sauvegarde

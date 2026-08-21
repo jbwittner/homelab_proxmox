@@ -88,6 +88,13 @@ pg-deploy.sh --tenant forgejo      # base + rôle d'un service
 Reste ensuite **un** geste manuel : ajouter la ligne du locataire dans
 `pg_hba.conf`, avant le `reject`, puis rejouer `pg-deploy.sh`.
 
+La copie hors-site se joue aussi à la main, sur le nœud :
+
+```bash
+pg offsite --dry-run   # ce qui partirait, et les divergences déjà détectables
+pg offsite             # ce que fait le timer de 3h30
+```
+
 Journaux :
 
 ```bash
@@ -107,6 +114,7 @@ clé GCS. `pg-deploy.sh`, ce fichier et `doc/` restent à la racine du service.
 | Fichier | Tourne sur | Installé en |
 |---|---|---|
 | `pg-deploy.sh` | **hôte** | joué depuis le dépôt |
+| `pg`, `pgtool/` + `lib/` (racine du dépôt) | **hôte** | `/usr/local/sbin/pg`, arbre d'import en `/usr/local/lib/pgtool` |
 | `ct/pgbk.sh` | **hôte** et **CT** | `/usr/local/sbin/pgbk` (hôte), `/usr/local/bin/pgbk` (CT) |
 | `host/pgbk-offsite.sh` | **hôte** | `/usr/local/bin/pgbk-offsite` |
 | `host/pgbk-offsite.service` / `.timer` | **hôte** | `/etc/systemd/system/` de l'hôte |
@@ -151,6 +159,8 @@ diagnostic et donne une procédure complète par scénario.
 
 ## Reste à faire
 
+- [ ] **Constater la parité de `pg offsite`** avec `pgbk-offsite`, puis retirer
+      l'ancien script (il reste installé exprès le temps de la comparaison).
 - [ ] Ligne du locataire `forgejo` dans `pg_hba.conf` — dépend de son IP
       définitive. C'est le dernier geste que `pg-deploy.sh` ne fait pas.
 - [ ] Copier `postgresql.vars` dans ce dépôt après vérification des secrets.

@@ -750,6 +750,49 @@ gs://homelab-pgsql-backups-dc93212a/pve-eranikus/postgresql/20260820-093240/
 Le **nœud est au premier niveau** : `vert-ysera` pourra s'ajouter en posant les
 mêmes fichiers avec un autre `PGBK_OFFSITE_NODE`, sans rien restructurer.
 
+### `pg offsite` — la commande, et l'ancien script
+
+Depuis le 21 août 2026 la copie hors-site est en Python : `pgbk-offsite.sh` est
+devenu `pg offsite`, et c'est ce que lance l'unité. **Le nom de l'unité n'a pas
+changé** — le renommer orphelinerait le drop-in `10-noeud.conf`, le lien
+d'activation et l'historique du journal. Seul `ExecStart` a bougé.
+
+`pg` est posé en `/usr/local/sbin/pg`, et son arbre d'import — `core`,
+`proxmox`, `pgtool` — en `/usr/local/lib/pgtool`. **Des copies, pas des
+symlinks**, pour la même raison que les scripts : le dépôt peut être en cours
+de `git pull` à l'heure où le timer se déclenche, et un arbre d'import à moitié
+à jour donne un `ImportError` au pire moment. `pg-deploy.sh` retire aussi ce
+que le dépôt ne contient plus, sans quoi un module renommé laisserait son
+ancêtre, qui continuerait de s'importer.
+
+**Les codes de retour sont inchangés** : `0` tout en ligne, `1` environnement
+inutilisable, `2` transfert en échec, `3` objet distant divergent, `130`
+interrompu. Deux différences assumées avec le bash :
+
+- le `10` que `push_snapshot` faisait circuler en interne n'existe plus ; il
+  n'a jamais été un code de sortie de processus ;
+- le `trap ERR` du bash faisait `exit $rc` et laissait donc échapper des codes
+  arbitraires ; un incident imprévu sort désormais en `1`.
+
+Et une amélioration : **`--dry-run` détecte maintenant le code 3.** Le bash
+sortait avant le contrôle post-transfert, ce qui rendait la simulation aveugle
+au seul mode de panne autour duquel tout ce montage est conçu. Le contrôle est
+une lecture, il est donc joué — mais uniquement sur les instantanés dont aucun
+objet ne manque : sur un instantané incomplet il échouerait pour la mauvaise
+raison, et la simulation le dit (« divergence non évaluable »).
+
+**Constater la parité.** L'ancien script reste installé en
+`/usr/local/bin/pgbk-offsite` le temps de la comparaison :
+
+```bash
+pgbk-offsite --dry-run > /tmp/avant.txt 2>&1
+pg offsite   --dry-run > /tmp/apres.txt 2>&1
+diff <(cut -d' ' -f2- /tmp/avant.txt) <(cut -d' ' -f2- /tmp/apres.txt)
+```
+
+L'horodatage est retiré des deux côtés avant comparaison, sinon chaque ligne
+diffère. Attendu : les lignes de contrôle de divergence en plus côté `pg`.
+
 ### Le script tourne sur l'hôte, pas dans le CT
 
 Décision délibérée. Le CT PostgreSQL est le composant le plus sensible du

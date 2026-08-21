@@ -18,7 +18,15 @@ LIB = REPO / "lib"
 CORE = LIB / "core"
 PROXMOX = LIB / "proxmox"
 
-SOURCES = sorted(LIB.rglob("*.py"))
+# Les règles génériques valent aussi pour l'outillage d'un service : c'est du
+# code de production, poussé sur les mêmes machines.
+OUTILS = sorted((REPO / "pve-eranikus" / "pgsql" / "pgtool").rglob("*.py"))
+SOURCES = sorted(LIB.rglob("*.py")) + OUTILS
+LANCEURS = [REPO / "pve-eranikus" / "pgsql" / "pg"]
+
+
+def _relatif(chemin: Path) -> str:
+    return str(chemin.relative_to(REPO))
 
 # Ce que la bibliothèque standard fournit et que ce code utilise. Toute entrée
 # supplémentaire devrait être un ajout délibéré, pas une dérive.
@@ -43,16 +51,16 @@ def test_il_y_a_bien_des_sources_a_verifier():
     assert SOURCES, "aucun fichier trouvé sous lib/ — le test ne vérifie rien"
 
 
-@pytest.mark.parametrize("chemin", SOURCES, ids=lambda p: str(p.relative_to(LIB)))
+@pytest.mark.parametrize("chemin", SOURCES, ids=_relatif)
 def test_bibliotheque_standard_uniquement(chemin):
     """Aucun pip install sur l'hyperviseur ni dans un conteneur."""
-    interne = {"core", "proxmox"}
+    interne = {"core", "proxmox", "pgtool"}
     externes = _modules_importes(chemin) - STDLIB - interne
     assert not externes, f"{chemin.name} importe hors stdlib : {sorted(externes)}"
 
 
 @pytest.mark.parametrize(
-    "chemin", sorted(CORE.rglob("*.py")), ids=lambda p: str(p.relative_to(LIB))
+    "chemin", sorted(CORE.rglob("*.py")), ids=_relatif
 )
 def test_core_nimporte_jamais_proxmox(chemin):
     """core est le seul paquet poussé dans les conteneurs, où `pct` n'existe
@@ -60,7 +68,7 @@ def test_core_nimporte_jamais_proxmox(chemin):
     assert "proxmox" not in _modules_importes(chemin)
 
 
-@pytest.mark.parametrize("chemin", SOURCES, ids=lambda p: str(p.relative_to(LIB)))
+@pytest.mark.parametrize("chemin", sorted(LIB.rglob("*.py")), ids=_relatif)
 def test_aucun_nom_de_service_dans_lib(chemin):
     """« Si "postgres" apparaît dans lib/, le code est au mauvais endroit. »
 
@@ -72,7 +80,7 @@ def test_aucun_nom_de_service_dans_lib(chemin):
         assert interdit not in texte, f"{chemin.name} nomme « {interdit} »"
 
 
-@pytest.mark.parametrize("chemin", SOURCES, ids=lambda p: str(p.relative_to(LIB)))
+@pytest.mark.parametrize("chemin", SOURCES, ids=_relatif)
 def test_jamais_de_shell(chemin):
     """Le triple échappement Python → pct → shell du conteneur n'existe pas,
     parce qu'aucun shell n'intervient."""
@@ -86,7 +94,7 @@ def test_jamais_de_shell(chemin):
             assert base != "os", f"{chemin.name} : os.{noeud.attr}"
 
 
-@pytest.mark.parametrize("chemin", SOURCES, ids=lambda p: str(p.relative_to(LIB)))
+@pytest.mark.parametrize("chemin", SOURCES, ids=_relatif)
 def test_pas_de_commande_construite_par_concatenation(chemin):
     """Un argv est une liste d'arguments, jamais une phrase.
 
@@ -147,6 +155,19 @@ def test_core_simporte_sans_proxmox(tmp_path):
     )
     assert res.returncode == 0, res.stdout + res.stderr
     assert res.stdout.strip() == "ok"
+
+
+@pytest.mark.parametrize("chemin", LANCEURS, ids=_relatif)
+def test_le_lanceur_verifie_la_version_avant_tout(chemin):
+    """Le contrôle de version doit précéder l'import du reste : le message de
+    refus doit pouvoir s'afficher là où le reste ne s'analyserait pas."""
+    texte = chemin.read_text(encoding="utf-8")
+    assert texte.startswith("#!/usr/bin/python3"), (
+        "chemin absolu de l'interpréteur : le PATH de systemd et de pct exec "
+        "est minimal"
+    )
+    assert texte.index("require_python()") < texte.index("from pgtool")
+    ast.parse(texte)
 
 
 def test_pytest_nest_jamais_importe_par_la_production():
