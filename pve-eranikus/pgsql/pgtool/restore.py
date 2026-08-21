@@ -223,6 +223,14 @@ def verify(psql: Psql, *, database: str, owner: str | None = None) -> VerifyRepo
     )
 
 
+# Droits d'une base dans un ACL PostgreSQL. LA CASSE EST SIGNIFIANTE :
+#   C = CREATE      T = TEMPORARY      c = CONNECT
+# « C » et « c » sont deux droits différents que seule la casse sépare. Passer
+# la chaîne en minuscules les confond, et un PUBLIC qui peut CRÉER serait
+# rapporté comme un PUBLIC qui peut SE CONNECTER.
+DROIT_CONNECT = "c"
+
+
 def _public_can_connect(acl: str) -> bool:
     """Un `datacl` vide vaut « privilèges par défaut », donc PUBLIC connecté.
 
@@ -230,11 +238,17 @@ def _public_can_connect(acl: str) -> bool:
     PostgreSQL écrit PUBLIC : `=Tc/postgres`. Le bash cherchait la sous-chaîne
     « =Tc/ » n'importe où, ce qui matchait aussi `forge=Tc/postgres`, un droit
     accordé au locataire lui-même.
+
+    Les entrées arrivent séparées par des ESPACES — c'est ce que produit
+    `array_to_string(datacl, ' ')` — ou par des virgules si le tableau est
+    rendu tel quel. Les deux sont acceptés : ne découper que sur la virgule ne
+    verrait qu'une seule entrée, celle de tête, et manquerait une perte
+    d'isolation dès que l'ordre change.
     """
     if not acl.strip():
         return True
-    for entree in acl.strip().strip("{}").split(","):
-        beneficiaire, _, droits = entree.strip().partition("=")
-        if beneficiaire == "" and "c" in droits.split("/")[0].lower():
+    for entree in acl.strip().strip("{}").replace(",", " ").split():
+        beneficiaire, _, droits = entree.partition("=")
+        if beneficiaire == "" and DROIT_CONNECT in droits.split("/")[0]:
             return True
     return False

@@ -360,3 +360,59 @@ def test_aucun_filet_aucun_chown(instantane, tmp_path, chown_enregistre):
                       ref="20260820-093240", pre_dir=tmp_path / "filets")
     assert rapport.safety_net is None
     assert chown_enregistre == []
+
+
+# ─── lecture d'un datacl : deux lettres qui se ressemblent ──────────────────
+
+
+def test_le_datacl_de_production_est_lu_correctement():
+    """Relevé sur le nœud le 21 août 2026, après une restauration réussie :
+
+        =T/pra pra=CTc/pra
+
+    L'entrée à bénéficiaire vide est PUBLIC, et elle porte « T » —
+    TEMPORARY — pas « c » — CONNECT. L'isolation est donc intacte.
+    """
+    from pgtool.restore import _public_can_connect
+
+    assert _public_can_connect("=T/pra pra=CTc/pra") is False
+
+
+def test_creer_nest_pas_se_connecter():
+    """Dans un ACL PostgreSQL, « C » est CREATE et « c » est CONNECT : deux
+    droits distincts que la casse SEULE sépare. Passer la chaîne en minuscules
+    les confond, et un PUBLIC qui peut créer serait rapporté comme un PUBLIC
+    qui peut se connecter."""
+    from pgtool.restore import _public_can_connect
+
+    assert _public_can_connect("=C/pra pra=CTc/pra") is False, "C = CREATE"
+    assert _public_can_connect("=c/pra pra=CTc/pra") is True, "c = CONNECT"
+
+
+def test_les_entrees_sont_separees_par_des_espaces():
+    """`database_acl` interroge `array_to_string(datacl, ' ')` : les entrées
+    arrivent séparées par des ESPACES. Découper sur la virgule ne verrait
+    qu'une seule entrée — celle de tête — et manquerait une perte d'isolation
+    dès que l'ordre change."""
+    from pgtool.restore import _public_can_connect
+
+    assert _public_can_connect("pra=CTc/pra =Tc/pra") is True, "PUBLIC en second"
+    assert _public_can_connect("pra=CTc/pra =T/pra") is False
+
+
+def test_le_format_en_accolades_est_accepte_aussi():
+    """Selon la requête, un datacl peut arriver en « {a,b} » : accepter les
+    deux séparateurs coûte une ligne et évite un faux négatif silencieux."""
+    from pgtool.restore import _public_can_connect
+
+    assert _public_can_connect("{=Tc/pra,pra=CTc/pra}") is True
+    assert _public_can_connect("{=T/pra,pra=CTc/pra}") is False
+
+
+def test_un_datacl_vide_veut_dire_privileges_par_defaut():
+    """Une base neuve n'a pas d'ACL explicite, et les privilèges par défaut
+    autorisent PUBLIC à se connecter. C'est l'absence qui est le signal."""
+    from pgtool.restore import _public_can_connect
+
+    assert _public_can_connect("") is True
+    assert _public_can_connect("   ") is True
