@@ -323,3 +323,34 @@ def test_un_prerequis_bloque_rend_le_dependant_inevaluable():
     )
     assert rapports[0].state == "blocked"
     assert rapports[1].state == "unknown"
+
+
+def test_des_effets_finaux_sont_demandes_a_la_fin():
+    """Certains effets ne dépendent d'aucune action : le `reload` de PostgreSQL
+    est inconditionnel, parce que les fichiers de configuration sont des
+    symlinks vers le dépôt et qu'un `git pull` a pu en changer le contenu sans
+    que rien ici ne puisse s'en apercevoir."""
+    journal = []
+    ctx = _ctx(Mode.APPLY)
+    ctx.on_effect("ct.postgresql.refresh", lambda c: journal.append("refresh"))
+    traverse([Etape("a")], ctx, effets_finaux=("ct.postgresql.refresh",))
+    assert journal == ["refresh"]
+
+
+def test_aucun_effet_final_en_simulation():
+    journal = []
+    ctx = _ctx(Mode.DRY_RUN)
+    ctx.on_effect("ct.postgresql.refresh", lambda c: journal.append("refresh"))
+    traverse([Etape("a")], ctx, effets_finaux=("ct.postgresql.refresh",))
+    assert journal == [], "la simulation ne recharge rien"
+
+
+def test_un_effet_final_deja_demande_ne_joue_quune_fois():
+    journal = []
+    etape = Etape("conf", state="drift",
+                  actions=[_action("symlink", journal,
+                                   effects=frozenset({"ct.postgresql.refresh"}))])
+    ctx = _ctx(Mode.APPLY)
+    ctx.on_effect("ct.postgresql.refresh", lambda c: journal.append("refresh"))
+    traverse([etape], ctx, effets_finaux=("ct.postgresql.refresh",))
+    assert journal.count("refresh") == 1

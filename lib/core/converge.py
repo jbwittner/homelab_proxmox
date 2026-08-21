@@ -171,12 +171,25 @@ class Context:
         return joues
 
 
-def traverse(steps: Sequence[Step], ctx: Context) -> list[Report]:
+def traverse(
+    steps: Sequence[Step],
+    ctx: Context,
+    *,
+    effets_finaux: Sequence[str] = (),
+) -> list[Report]:
     """Le parcours unique. Renvoie une ligne de bilan par étape.
 
     Les effets demandés sont vidés APRÈS la dernière étape : c'est ainsi que
     « redémarrer après tous les `pct set` » s'exprime — en effet coalescé, pas
     en ordre de déclaration.
+
+    `effets_finaux` sont demandés systématiquement, qu'une action les ait
+    déclarés ou non. Un seul cas les justifie, et il est réel : les fichiers de
+    configuration du conteneur sont des symlinks vers le dépôt, un `git pull`
+    a donc pu en changer le contenu sans qu'aucun `check()` puisse s'en
+    apercevoir. Recharger est sans effet de bord ; l'économiser ferait manquer
+    un `pg_hba` modifié. Comme tous les effets, ils ne sont pas joués en
+    simulation.
     """
     connues = {getattr(s, "name") for s in steps}
     rapports: list[Report] = []
@@ -248,6 +261,8 @@ def traverse(steps: Sequence[Step], ctx: Context) -> list[Report]:
         rapports.append(rapport)
         par_nom[etape.name] = rapport
 
+    if ctx.mode.applies:
+        ctx.request(effets_finaux)
     for effet in ctx.flush():
         info(f"  effet : {effet}")
     return rapports
