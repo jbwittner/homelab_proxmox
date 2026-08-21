@@ -65,6 +65,20 @@ class Psql:
     def execute(self, sql: str, *, db: str | None = None) -> Result:
         return self.runner.write(*self._argv(db, ["-c", sql]))
 
+    def run_sql(self, sql: str, *, db: str | None = None, **params: str) -> Result:
+        """Joue du SQL avec des variables psql, sans passer par un fichier.
+
+        Même garantie que `run_file` : les identifiants arrivent par `-v` et
+        c'est psql qui les cite. Rien n'est interpolé dans le texte SQL, donc
+        un nom de rôle exotique ne peut pas en changer le sens.
+        """
+        extra: list[str] = []
+        for key, value in params.items():
+            pair = f"{key}={value}"
+            extra += ["-v", Secret(pair) if isinstance(value, Secret) else pair]
+        extra += ["-q", "-c", sql]
+        return self.runner.write(*self._argv(db, extra))
+
     def run_file(self, path: str, *, db: str | None = None, **params: str) -> Result:
         """Joue un script SQL avec des variables psql.
 
@@ -129,6 +143,51 @@ class Psql:
             "array_to_string(user_name,','), coalesce(address,''), auth_method, "
             "coalesce(error,'') FROM pg_hba_file_rules ORDER BY line_number"
         )
+
+    # -- outils de la famille (pg_dump, pg_restore, createdb, dropdb) --------
+    #
+    # Ce ne sont pas des commandes psql, mais ils partagent son utilisateur et
+    # sa socket : les regrouper ici évite de réécrire le préfixe `sudo -u` à
+    # chaque appel, et surtout de l'oublier une fois.
+
+    def _sudo(self, *argv: str) -> list[str]:
+        return ["sudo", "-u", self.user, *argv]
+
+    def dump(self, db: str, fichier: Path) -> Result:
+        """Sauvegarde d'une base au format personnalisé.
+
+        `-f` plutôt qu'une redirection : aucun shell n'intervient, donc aucun
+        échappement à faire sur le chemin. `--no-owner --no-acl` parce que ces
+        deux-là se reposent à la restauration, à partir du propriétaire capturé
+        avant destruction.
+        """
+        return self.runner.write(
+            *self._sudo("pg_dump", "-Fc", "--no-owner", "--no-acl",
+                        "-f", str(fichier), db),
+            timeout=None,
+        )
+
+    def restore_dump(self, db: str, fichier: Path, *, role: str) -> Result:
+        """`--role` est ce qui rend les tables au locataire. Sans lui elles
+        appartiennent à postgres et le locataire ne peut plus rien en faire."""
+        return self.runner.write(
+            *self._sudo("pg_restore", "-d", db, "--no-owner", f"--role={role}",
+                        str(fichier)),
+            timeout=None,
+            stream=True,
+        )
+
+    def createdb(self, db: str, *, owner: str) -> Result:
+        """LC_COLLATE C : l'ordre ne dépend plus de la libc de la machine, et un
+        index reste valide d'un hôte à l'autre."""
+        return self.runner.write(
+            *self._sudo("createdb", db, "-O", owner, "-T", "template0",
+                        "--encoding", "UTF8", "--lc-collate", "C",
+                        "--lc-ctype", "C")
+        )
+
+    def dropdb(self, db: str) -> Result:
+        return self.runner.write(*self._sudo("dropdb", db))
 
     def terminate_backends(self, db: str) -> int:
         out = self.runner.write(
