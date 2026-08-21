@@ -18,6 +18,25 @@ from pgtool.snapshots import Store
 # ─── mise en place ───────────────────────────────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def chown_enregistre(monkeypatch):
+    """Le changement de propriétaire est ENREGISTRÉ, pas exécuté.
+
+    La suite de tests ne tourne pas en root et la machine n'a pas forcément de
+    compte `postgres` : exécuter le chown ferait échouer des tests qui ne
+    parlent pas de lui. Ce qui compte est qu'il soit demandé, avec les bons
+    arguments — et c'est ce que vérifie le test qui, lui, parle de lui.
+    """
+    import shutil as _shutil
+
+    vus: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        _shutil, "chown",
+        lambda chemin, user, group: vus.append((str(chemin), user, group)),
+    )
+    return vus
+
+
 @pytest.fixture
 def instantane(tmp_path):
     dest = tmp_path / "postgresql"
@@ -289,3 +308,45 @@ def test_verify_compare_au_proprietaire_reel_pas_au_nom_de_la_base():
            Result(("psql",), 0, "5\n", ""))
     verify(Psql(r), database="forge", owner="proprietaire_different")
     assert "proprietaire_different" in _sql_envoye(r)
+
+
+# ─── le filet doit être écrivable par celui qui écrit dedans ────────────────
+
+
+def test_le_filet_appartient_a_postgres(instantane, tmp_path, chown_enregistre):
+    """Le répertoire est créé par `pg` — qui tourne en ROOT dans le CT — et le
+    `pg_dump` qui le remplit tourne en POSTGRES. Sans changement de
+    propriétaire, l'écriture est refusée, et elle l'est au moment précis où
+    l'on pose le filet avant d'écraser une base.
+
+    Le bash faisait « chown postgres:postgres » puis « chmod 700 ». Le portage
+    avait gardé le second et perdu le premier.
+    """
+    r = _cluster(base_existe=True)
+    rapport = restore(Psql(r), r, instantane, database="forge",
+                      ref="20260820-093240", pre_dir=tmp_path / "filets")
+
+    assert chown_enregistre, "aucun changement de propriétaire sur le filet"
+    chemin, user, group = chown_enregistre[0]
+    assert user == "postgres" and group == "postgres"
+    assert chemin == str(rapport.safety_net)
+
+
+def test_le_filet_reste_en_700(instantane, tmp_path):
+    """Il contient un dump complet de la base qu'on s'apprête à écraser."""
+    r = _cluster(base_existe=True)
+    rapport = restore(Psql(r), r, instantane, database="forge",
+                      ref="20260820-093240", pre_dir=tmp_path / "filets")
+    import stat as _stat
+
+    assert _stat.S_IMODE(rapport.safety_net.stat().st_mode) == 0o700
+
+
+def test_aucun_filet_aucun_chown(instantane, tmp_path, chown_enregistre):
+    """Sur une base qui n'existait pas, il n'y a rien à sauver — et donc rien
+    à créer ni à donner à qui que ce soit."""
+    r = _cluster(base_existe=False)
+    rapport = restore(Psql(r), r, instantane, database="forge",
+                      ref="20260820-093240", pre_dir=tmp_path / "filets")
+    assert rapport.safety_net is None
+    assert chown_enregistre == []

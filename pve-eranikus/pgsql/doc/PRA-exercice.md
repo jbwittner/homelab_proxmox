@@ -324,8 +324,11 @@ sudo -u postgres psql -d pra -tAc "SELECT count(*), sum(montant) FROM facture"
 mkdir -p /tmp/pra-backups && chmod 700 /tmp/pra-backups
 chown postgres:postgres /tmp/pra-backups
 
-PG_BACKUP_DEST=/tmp/pra-backups \
-  sudo -u postgres /usr/local/bin/pg-backup.sh --json > /tmp/pra.json
+# « sudo env VAR=… » et non « VAR=… sudo » : sudo efface l'environnement de
+# l'appelant, et le détournement du dépôt serait perdu — la sauvegarde
+# d'exercice atterrirait en production, puis dans le bucket.
+sudo -u postgres env PG_BACKUP_DEST=/tmp/pra-backups \
+  /usr/local/bin/pg-backup.sh --json > /tmp/pra.json
 python3 -m json.tool /tmp/pra.json | head -20
 ```
 
@@ -333,6 +336,9 @@ python3 -m json.tool /tmp/pra.json | head -20
 - [ ] `pra` figure dans `"databases"`.
 - [ ] **`/var/backups/postgresql` n'a pas bougé** :
       `ls /var/backups/postgresql | wc -l` donne le même nombre qu'avant.
+      Si ce nombre a augmenté, le détournement n'a pas pris : **arrêter là**,
+      supprimer l'instantané fautif avec `pg delete`, et vérifier avant 3h30
+      qu'il n'est pas parti dans le bucket.
 
 ### 3. Le dégât
 
@@ -402,6 +408,7 @@ echo "code de retour : $?"
 ### 7. Comparer au moteur bash
 
 ```bash
+# Ici pas de sudo : pgbk tourne en root et lit la variable directement.
 PG_BACKUP_DEST=/tmp/pra-backups /usr/local/bin/pgbk restore pra --yes --local
 echo "code de retour bash : $?"
 sudo -u postgres psql -d pra -tAc "SELECT count(*) FROM facture"

@@ -24,6 +24,7 @@ mais un appelant qui vérifie le code conclut à un échec.
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -111,6 +112,11 @@ def restore(
         racine = pre_dir or store.dest
         filet = racine / f"pre-restore-{_stamp(maintenant)}"
         filet.mkdir(parents=True, exist_ok=True)
+        # Le répertoire est créé par « pg », qui tourne en ROOT dans le CT ;
+        # le pg_dump qui va le remplir tourne en POSTGRES. Sans ce changement
+        # de propriétaire, l'écriture est refusée — au moment précis où l'on
+        # pose le filet avant d'écraser une base.
+        shutil.chown(filet, psql.user, psql.user)
         filet.chmod(0o700)
         step("filet de sécurité avant écrasement")
         psql.dump(database, filet / f"{database}.dump")
