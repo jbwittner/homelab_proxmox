@@ -80,11 +80,17 @@ Les exemples ci-dessus omettent le préfixe
 `/root/homelab_proxmox/pve-eranikus/forgejo/`. Les autres commandes `fj`, elles,
 sont bien dans le `PATH` du nœud.
 
-**Trois choses qu'il ne fait pas**, délibérément : créer le conteneur
-([§ 1](doc/RUNBOOK.md#1-création-du-conteneur)), déposer la clé du compte de
-service GCP ([§ 10](doc/RUNBOOK.md#10-copie-hors-site-vers-gcs)), et déposer la
-clé de publication Forgejo — un ancrage de confiance s'obtient hors du canal
-qu'il sert à valider ([§ 4](doc/RUNBOOK.md#la-clé-de-publication)).
+**Trois choses qu'il ne fait pas**, délibérément :
+
+| Geste | Pourquoi il reste à part |
+|---|---|
+| Créer le conteneur | Geste unique — [§ 1](doc/RUNBOOK.md#1-création-du-conteneur) |
+| Déposer la clé du compte de service GCP | C'est un secret — [§ 10](doc/RUNBOOK.md#10-copie-hors-site-vers-gcs) |
+| Récupérer la clé de signature Forgejo | C'est `fj key --fetch`, joué une fois — [§ 4](doc/RUNBOOK.md#la-clé-de-publication) |
+
+Le dernier n'est pas une corvée : **récupérer et vérifier sont deux gestes**,
+et c'est ce qui permet à `fj deploy` de n'interroger personne. Il compare la
+clé du dépôt à l'empreinte du dépôt, et refuse si elle a changé.
 
 ## La version épinglée
 
@@ -219,11 +225,11 @@ Avant de chercher : **`fj status`** dit lequel des quatre maillons est rompu.
 
 ## Reste à faire
 
-- [x] **Renseigner `REVERSE_PROXY_TRUSTED_PROXIES`** dans `ct/app.ini` — il
-      porte encore le marqueur `@@TRAEFIK_IP@@`, et `fj deploy` refuse de
-      rendre un bilan vert tant qu'il est là. C'est l'IP du CT 201.
-- [x] **Résoudre `ct/VERSION`** (`fj version --resolve`) et commiter — sans
-      elle, `fj deploy` n'installe rien, délibérément.
+- [x] **`REVERSE_PROXY_TRUSTED_PROXIES` renseigné** dans `ct/app.ini` :
+      `192.168.1.50`, l'IP de Traefik. Le marqueur `@@TRAEFIK_IP@@` a disparu,
+      et le contrôle « proxy de confiance » ne bloque plus.
+- [x] **`ct/VERSION` résolue** : `v15.0.7`, par `fj version --resolve` puis
+      commit. `fj deploy` pose désormais cette version-là, et elle seule.
 - [ ] **Épingler la clé de signature** : `fj key --fetch`, puis commiter les
       deux fichiers produits. Une minute. Ensuite, toute mise à jour dont la
       clé aurait changé est refusée
