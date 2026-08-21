@@ -62,6 +62,73 @@ def _mask(argv: Sequence[str]) -> tuple[str, ...]:
     return tuple("***" if isinstance(a, Secret) else a for a in argv)
 
 
+# Les lignes qu'un outil écrit sur la sortie d'erreur SANS que ce soit la
+# cause de quoi que ce soit. Elles arrivent en TÊTE, avant que la commande
+# lancée n'ait écrit un mot — d'où le piège : lire la première ligne, c'est
+# lire le bruit.
+#
+# `pct` est un programme Perl. Quand la locale de la session n'existe pas dans
+# le conteneur, il émet ses propres avertissements sur le canal d'erreur de la
+# commande distante. Constaté le 21 août 2026 :
+#
+#     KO  connexion à la base — perl: warning: Setting locale failed.
+#
+# Le vrai message, un `FATAL:` de PostgreSQL, était plus bas.
+_BRUIT = (
+    "perl: warning",
+    "locale: cannot set",
+    "setting locale failed",
+    "falling back to the standard locale",
+    "are supported and installed on your system",
+    "language = ",
+    "lc_all = ",
+    "lang = ",
+)
+
+# Ce qui, à l'inverse, désigne la cause — en DEUX niveaux, et l'ordre compte.
+#
+# Un serveur qui refuse dit deux choses, dans cet ordre :
+#
+#     psql: error: connection to server at "192.168.1.56" failed
+#     FATAL:  no pg_hba.conf entry for host "192.168.1.57"
+#
+# La première annonce l'échec, la seconde dit POURQUOI. Prendre la première
+# rendrait « la connexion a échoué » — vrai, et parfaitement inutile.
+_VERDICT = ("fatal:", "panic:", "does not exist", "denied", "refused")
+_ECHEC = ("error:", "erreur", "could not", "cannot ", "failed")
+
+
+def ligne_utile(stderr: str) -> str:
+    """La ligne d'une sortie d'erreur qui DIT quelque chose.
+
+    Quatre paris, dans cet ordre, et le dernier est le plus important :
+
+      1. une ligne qui porte un VERDICT (`FATAL:`, « does not exist »…) —
+         c'est celle qui dit pourquoi ;
+      2. à défaut, une ligne qui annonce un ÉCHEC (`error:`, « failed »…) ;
+      3. à défaut, la DERNIÈRE ligne non bruitée — le bruit vient en tête, le
+         verdict en queue ;
+      4. **s'il ne reste que du bruit, le dire.** Rendre le bruit serait
+         affirmer une fausse piste, et une fausse piste plausible coûte plus
+         cher qu'un aveu d'ignorance : on part corriger ce qui n'est pas cassé.
+    """
+    lignes = [ligne.strip() for ligne in stderr.splitlines() if ligne.strip()]
+    utiles = [
+        ligne for ligne in lignes
+        if not any(motif in ligne.lower() for motif in _BRUIT)
+    ]
+
+    for motifs in (_VERDICT, _ECHEC):
+        for ligne in utiles:
+            if any(motif in ligne.lower() for motif in motifs):
+                return ligne
+    if utiles:
+        return utiles[-1]
+    if lignes:
+        return "aucun message — seulement des avertissements de locale"
+    return "aucun message"
+
+
 class CommandError(RuntimeError):
     """Commande terminée sur un code non nul, avec de quoi diagnostiquer."""
 

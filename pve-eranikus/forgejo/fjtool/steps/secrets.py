@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from core.converge import Action, Outcome
 from core.log import info, warn
-from core.runner import Secret
+from core.runner import Secret, ligne_utile
 from fjtool.deploy import CT_BINAIRE, CT_SECRETS
 from fjtool.steps.conteneur import EFFET_FORGEJO_RESTART, SENTINELLE
 
@@ -169,7 +169,7 @@ class CompteAdmin(EtapeG):
             return Outcome(
                 "error",
                 "impossible de lister les comptes — Forgejo est-il démarré ? "
-                + (res.stderr.strip().splitlines() or [""])[0],
+                + ligne_utile(res.stderr),
             )
         # La première colonne est l'identifiant ; l'en-tête est ignoré parce
         # qu'aucun compte ne s'appelle « ID ».

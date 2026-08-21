@@ -29,6 +29,7 @@ et déposé dans `/etc/forgejo/secrets/db_password` — jamais dans le dépôt.
 from __future__ import annotations
 
 from core.converge import Outcome
+from core.runner import ligne_utile
 from fjtool.deploy import CT_SECRETS
 from fjtool.steps.conteneur import SENTINELLE
 
@@ -155,10 +156,15 @@ class ConnexionBase(EtapeP):
         if res.ok and res.out == "1":
             return Outcome("ok", f"{ROLE}@{HOTE_PG}:{PORT_PG}/{BASE}, SSL")
 
-        premiere = (res.stderr.strip().splitlines() or [""])[0]
+        # `ligne_utile` et NON la première ligne : `pct` est un programme Perl
+        # et ses avertissements de locale arrivent EN TÊTE, avant que psql
+        # n'ait écrit un mot. Constaté le 21 août 2026 — le bilan annonçait
+        # « perl: warning: Setting locale failed » comme cause d'un refus de
+        # connexion, et envoyait corriger des locales parfaitement saines.
+        cause = ligne_utile(res.stderr)
         return Outcome(
             "error",
-            f"Forgejo ne joint pas sa base sur le CT 200 — {premiere or 'aucun message'}\n"
+            f"Forgejo ne joint pas sa base sur le CT 200 — {cause}\n"
             "         créer le locataire : pg deploy --tenant forgejo (CT 200)\n"
             "         puis la ligne hostssl dans son pg_hba.conf, avant le reject",
         )

@@ -31,6 +31,8 @@ import re
 import urllib.request
 from pathlib import Path
 
+from core.runner import ligne_utile
+
 # Le Web Key Directory de `contact@forgejo.org`, tel que la page de
 # téléchargement officielle le désigne. Ce n'est pas une URL devinée : elle a
 # été relevée sur https://forgejo.org/download/ le 21 août 2026, et l'adresse
@@ -173,7 +175,7 @@ def empreintes(runner, bloc: Path) -> list[str]:
         raise CleError(
             "gpg n'a pas su lire ce bloc de clé — est-ce bien une clé "
             "publique au format ASCII ou binaire ?\n"
-            + (res.stderr.strip()[:300] or "")
+            + ligne_utile(res.stderr)
         )
     trouvees = [
         ligne.split(":")[9]

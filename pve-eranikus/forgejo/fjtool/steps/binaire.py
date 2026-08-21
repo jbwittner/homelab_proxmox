@@ -32,6 +32,7 @@ from pathlib import Path
 
 from core.converge import Action, Outcome
 from core.log import info
+from core.runner import ligne_utile
 from fjtool import version as V
 from fjtool.deploy import CT_BINAIRE, CT_SYMLINK
 from fjtool.steps.conteneur import EFFET_FORGEJO_RESTART, pousser
@@ -314,7 +315,7 @@ def _obtenir_verifie(ctx, release: V.Release) -> None:
             raise V.VersionError(
                 f"signature GPG NON vérifiée pour {release.binaire} — "
                 "rien ne sera installé\n"
-                + (res.stderr.strip() or res.stdout.strip())
+                + ligne_utile(res.stderr or res.stdout)
             )
         info("  signature GPG vérifiée")
     except Exception:

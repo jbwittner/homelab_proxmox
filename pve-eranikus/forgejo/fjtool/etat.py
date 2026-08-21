@@ -26,7 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from core.commands import Systemd
-from core.runner import CommandError
+from core.runner import CommandError, ligne_utile
 
 
 @dataclass
@@ -68,7 +68,7 @@ def _service(etat: Etat, ct) -> None:
         actif = Systemd(ct).is_active("forgejo")
     except CommandError as exc:
         etat.ajouter("service Forgejo", None,
-                     f"non constaté : {exc.result.stderr.strip()[:80]}")
+                     f"non constaté : {ligne_utile(exc.result.stderr)}")
         return
     etat.ajouter(
         "service Forgejo", actif,
@@ -129,11 +129,7 @@ def _base(etat: Etat, ct) -> None:
     if res.ok and res.out == "1":
         etat.ajouter("base (CT 200)", True, f"{ROLE}@{HOTE_PG}/{BASE}, SSL")
         return
-    premiere = (res.stderr.strip().splitlines() or [""])[0]
-    etat.ajouter(
-        "base (CT 200)", False,
-        premiere or "injoignable, sans message — le CT 200 tourne-t-il ?",
-    )
+    etat.ajouter("base (CT 200)", False, ligne_utile(res.stderr))
 
 
 def alarmes(etat: Etat) -> list[Maillon]:
