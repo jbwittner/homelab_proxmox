@@ -1,10 +1,11 @@
 """Moteur de convergence — la boucle que le bash réécrivait quarante fois.
 
-`pg-deploy.sh` répète, section après section, le triplet « constater / afficher
-en dry-run / appliquer ». Quarante-quatre fois, sans garantie qu'un cas de
-simulation n'ait été oublié — et sept de ses mutations ne passent d'ailleurs
-pas par le garde `run()`, ce qui rend le mode simulation moins sûr qu'il n'en a
-l'air. Ce module remplace cette répétition par une boucle unique.
+Le déployeur bash qu'il remplace répétait, section après section, le triplet
+« constater / afficher en dry-run / appliquer ». Quarante-quatre fois, sans
+garantie qu'un cas de simulation n'ait été oublié — et sept de ses mutations ne
+passaient d'ailleurs pas par le garde d'écriture, ce qui rendait le mode
+simulation moins sûr qu'il n'en avait l'air. Ce module remplace cette
+répétition par une boucle unique.
 
 L'IDÉE QUI SUPPRIME LA DUPLICATION : **le plan est produit par `check()`,
 jamais par `apply()`.** Une étape constate, et renvoie la liste des actions

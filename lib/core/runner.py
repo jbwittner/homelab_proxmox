@@ -32,11 +32,10 @@ from typing import Iterator, Protocol, Sequence
 from .log import CONT, error, info
 
 # Une commande ordinaire qui dépasse ça est bloquée, pas lente. Mais certaines
-# ont légitimement le droit de durer : `pgbk-offsite.service` accorde
-# TimeoutStartSec=2h à un `rclone copy`, et un `pg_dump` de plusieurs Go n'est
-# pas anormal. Ces appels-là passent `timeout=None` et laissent systemd être
-# la seule horloge — sinon un transfert sain remonterait un code 124 qui n'est
-# dans aucune table de retour.
+# ont légitimement le droit de durer : une unité qui accorde TimeoutStartSec=2h
+# à un transfert, une sauvegarde de plusieurs gigaoctets. Ces appels-là passent
+# `timeout=None` et laissent systemd être la seule horloge — sinon un transfert
+# sain remonterait un code 124 qui n'est dans aucune table de retour.
 DEFAULT_TIMEOUT = 300
 
 

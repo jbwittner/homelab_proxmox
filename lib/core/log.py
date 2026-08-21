@@ -1,9 +1,9 @@
-"""Journalisation — format identique à celui de pg-backup.sh (bash).
+"""Journalisation — format identique à celui des scripts bash qu'elle côtoie.
 
-Les journaux du CT et de l'hôte doivent rester corrélables dans journalctl :
-le format ne change pas parce que le langage change. `pg-backup.sh` reste en
-bash et continue d'émettre exactement ces lignes-là ; toute dérive ici les
-désolidariserait dans un même `journalctl -u`.
+Les journaux du conteneur et de l'hôte doivent rester corrélables dans
+journalctl : le format ne change pas parce que le langage change. Les scripts
+bash qui restent en place continuent d'émettre exactement ces lignes-là ; toute
+dérive ici les désolidariserait dans un même `journalctl -u`.
 
 Le contrat, tel que bash l'écrit :
 
