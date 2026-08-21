@@ -41,9 +41,9 @@ sécurité, pas de goût :
   point de montage renvoie « faut-il redémarrer » ; créer un pool ZFS sur un
   chemin instable lève ; un mot de passe est un `Secret`, qui ne peut pas
   ressortir dans un journal.
-- **`ct/` reçoit `core/` par `pct push`**, jamais par un second point de
-  montage : le montage est vivant, et un `git pull` en pleine nuit livrerait un
-  arbre à moitié à jour.
+- **Le conteneur reçoit `core/` par `pct push`**, jamais par un second point
+  de montage : le montage est vivant, et un `git pull` en pleine nuit livrerait
+  un arbre à moitié à jour.
 
 `tests/` à la racine, `pytest`, **sans infrastructure** : tout passe par des
 doubles. Un double doit tenir compte de ses propres écritures — un faux nœud
@@ -162,6 +162,13 @@ Ce qui reste vérifiable, et qui doit l'être avant de rendre :
   `--dry-run`, et **chaque cas de refus**. C'est ce qui a trouvé les vrais bugs
   (un `awk -F': *'` qui coupait un `volid` sur son deux-points, un timer armé
   sur un volume incertain).
+- **La documentation est un jeu de tests de la ligne de commande.** Extraire
+  mécaniquement des documents les liens, les chemins du dépôt, les
+  sous-commandes et les drapeaux, puis les confronter au parseur et à l'arbre
+  réels. Ce contrôle a trouvé que `pg deploy --ctid 299` — la forme écrite
+  partout, et celle dont l'exercice de PRA dépend — n'existait pas : `--ctid`
+  n'avait été posé que sur le parseur global. Une relecture à l'œil ne l'aurait
+  pas vu, parce qu'on lit ce qu'on croit avoir écrit.
 
 ### Un défaut se reproduit AVANT d'être corrigé
 

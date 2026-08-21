@@ -32,8 +32,8 @@ endroit : `pg deploy` a été écrit pour déployer, pas pour jouer.
 > **2. Remettre le CTID de production à la fin.**
 >
 > `pg deploy --ctid 299` consigne `PG_CTID=299` dans `/etc/default/pgbk` :
-> tous les `pgbk` suivants viseraient le CT d'exercice, y compris un
-> `pgbk restore` fait en urgence trois semaines plus tard. Le démontage le
+> toutes les commandes `pg` suivantes viseraient le CT d'exercice, y compris un
+> `pg restore` fait en urgence trois semaines plus tard. Le démontage le
 > remet — ne pas sauter cette étape.
 
 Troisième règle, qui ne relève pas d'un drapeau : **l'exercice ne lit que le
@@ -49,7 +49,7 @@ que ça se recharge. Se joue sur le CT 200 sans y toucher.
 
 ```bash
 # sur le nœud : quel instantané est aussi en ligne ?
-pgbk list
+pg list
 rclone --config /root/.config/rclone/rclone.conf \
        lsf gcs:homelab-pgsql-backups-dc93212a/pve-eranikus/postgresql/
 
@@ -189,18 +189,18 @@ done
 pct exec 299 -- chown -R postgres:postgres /var/backups/postgresql/<instantané>
 pct exec 299 -- chmod 700 /var/backups/postgresql/<instantané>
 
-# les rôles D'ABORD : pgbk restore refuse une base dont le rôle propriétaire
+# les rôles D'ABORD : pg restore refuse une base dont le rôle propriétaire
 # n'existe pas, et c'est le rappel que globals.sql passe en premier
 pct exec 299 -- sudo -u postgres psql -f /var/backups/postgresql/<instantané>/globals.sql
 
-pgbk --ctid 299 show    <instantané>
-pgbk --ctid 299 restore forgejo <instantané>
-pgbk --ctid 299 verify  forgejo
+pg --ctid 299 show    <instantané>
+pg --ctid 299 restore forgejo <instantané>
+pg --ctid 299 verify  forgejo
 ```
 
 - [ ] `globals.sql` recrée les rôles sans erreur.
-- [ ] `pgbk restore` va au bout.
-- [ ] `pgbk verify` montre une ACL non vide et « propriétaire des tables : OK ».
+- [ ] `pg restore` va au bout.
+- [ ] `pg verify` montre une ACL non vide et « propriétaire des tables : OK ».
 
 **Durée mesurée : ______**
 

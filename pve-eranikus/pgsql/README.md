@@ -189,7 +189,7 @@ sort en 1 s'il y en a un.
 | Une base est corrompue, un `DELETE` est parti trop loin | [PRA § 1](doc/PRA.md#1--une-base-perdue-ou-corrompue) |
 | PostgreSQL ne démarre plus | [PRA § 2](doc/PRA.md#2--le-cluster-ne-démarre-plus) |
 | Le CT 200 ou le nœud a disparu | [PRA § 3](doc/PRA.md#3--le-conteneur-est-détruit) et [§ 4](doc/PRA.md#4--le-nœud-est-perdu) |
-| Restaurer une base, cas ordinaire | [runbook § 8](doc/RUNBOOK.md#8-pgbk--interface-de-gestion), ou [§ 9](doc/RUNBOOK.md#9-restauration-manuelle) à la main |
+| Restaurer une base, cas ordinaire | [runbook § 8](doc/RUNBOOK.md#8-pg--interface-de-gestion), ou [§ 9](doc/RUNBOOK.md#9-restauration-manuelle) à la main |
 | Récupérer une sauvegarde depuis GCS | [runbook § 10](doc/RUNBOOK.md#restauration-depuis-gcs) |
 | `pgbk-offsite` sort en code 3 | objet distant divergent, [§ 10](doc/RUNBOOK.md#objet-distant-divergent--le-cas-à-traiter-à-la-main) — intervention humaine |
 | `pgbk-offsite.timer` reste inactif | clé GCP, `rclone` ou `mp2` : le bilan de `pg deploy` nomme le prérequis manquant ([§ 10](doc/RUNBOOK.md#installation)) |

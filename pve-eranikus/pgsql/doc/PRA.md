@@ -54,12 +54,12 @@ ordre :
 #    restauration par-dessus une application vivante recrée le problème.
 
 # 2. Regarder ce qu'on a, avant de toucher quoi que ce soit.
-pgbk list                                   # instantanés locaux
+pg list                                   # instantanés locaux
 rclone --config /root/.config/rclone/rclone.conf \
        lsf gcs:homelab-pgsql-backups-dc93212a/pve-eranikus/postgresql/
 ```
 
-`pgbk restore` prend un filet `pre-restore-*` de l'état courant avant
+`pg restore` prend un filet `pre-restore-*` de l'état courant avant
 d'écraser. C'est la seule protection contre « je me suis trompé
 d'instantané » — ne pas la contourner, et ne pas purger ces répertoires tant
 que la reprise n'est pas validée.
@@ -73,20 +73,20 @@ instantanés locaux.
 l'opération.
 
 ```bash
-pgbk list                                 # choisir l'instantané
-pgbk show 20260820-093240                 # vérifier qu'il contient la base
-pgbk restore forgejo 20260820-093240      # demande de retaper le nom
-pgbk verify forgejo
+pg list                                 # choisir l'instantané
+pg show 20260820-093240                 # vérifier qu'il contient la base
+pg restore forgejo 20260820-093240      # demande de retaper le nom
+pg verify forgejo
 ```
 
-`pgbk restore` ferme les connexions, prend le filet `pre-restore-*`, recrée la
+`pg restore` ferme les connexions, prend le filet `pre-restore-*`, recrée la
 base, charge le dump avec `--role`, **réapplique les ACL** et enchaîne sur
-`verify`. Détail : [runbook § 8](RUNBOOK.md#ce-que-fait-pgbk-restore).
+`verify`. Détail : [runbook § 8](RUNBOOK.md#ce-que-fait-pg-restore).
 
 **Contrôles avant de rouvrir le service** :
 
 ```bash
-pgbk verify forgejo      # ACL et propriétaires des tables
+pg verify forgejo      # ACL et propriétaires des tables
 ```
 
 `verify` doit montrer une ACL non vide et « propriétaire des tables : OK ».
@@ -191,13 +191,13 @@ voir [scénario 4](#4--le-nœud-est-perdu) pour la commande exacte —, le pouss
 dans le CT et restaurer :
 
 ```bash
-pgbk show    20260820-093240
-pgbk restore forgejo 20260820-093240
-pgbk verify  forgejo
+pg show    20260820-093240
+pg restore forgejo 20260820-093240
+pg verify  forgejo
 ```
 
 Les rôles n'existent pas encore dans un cluster neuf : rejouer `globals.sql`
-**avant** le premier `pgbk restore`, sans quoi il refuse (le rôle propriétaire
+**avant** le premier `pg restore`, sans quoi il refuse (le rôle propriétaire
 manque).
 
 ```bash
@@ -251,8 +251,8 @@ pct exec 200 -- chmod 700 /var/backups/postgresql/20260820-093240
 
 # 5. Les rôles d'abord, les bases ensuite.
 pct exec 200 -- sudo -u postgres psql -f /var/backups/postgresql/20260820-093240/globals.sql
-pgbk restore forgejo 20260820-093240
-pgbk verify  forgejo
+pg restore forgejo 20260820-093240
+pg verify  forgejo
 ```
 
 **Si le nœud de remplacement porte un autre nom**, la copie hors-site s'y
@@ -326,11 +326,11 @@ divergent.
 locale et des 365 jours distants :
 
 ```bash
-pgbk list                                 # instantanés locaux, du plus récent
-pgbk restore forgejo 20260819-234306      # celui d'avant
+pg list                                 # instantanés locaux, du plus récent
+pg restore forgejo 20260819-234306      # celui d'avant
 ```
 
-**Si c'est l'objet distant qui diverge** (`pgbk-offsite` sorti en code 3), il
+**Si c'est l'objet distant qui diverge** (`pg offsite` sorti en code 3), il
 ne peut pas être corrigé depuis le nœud — le compte de service n'a pas le
 droit d'écraser. Suppression avec le compte personnel, puis renvoi :
 
@@ -350,14 +350,14 @@ ce qui reste tant que la cause n'est pas comprise.
 
 ## Après toute reprise
 
-- [ ] `pgbk verify <base>` sur chaque base restaurée — ACL et propriétaires.
+- [ ] `pg verify <base>` sur chaque base restaurée — ACL et propriétaires.
 - [ ] Le service applicatif redémarre **et écrit**.
-- [ ] `pgbk backup` : une sauvegarde fraîche de l'état reconstruit.
+- [ ] `pg backup` : une sauvegarde fraîche de l'état reconstruit.
 - [ ] `systemctl start pgbk-offsite.service` : la copie hors-site repart.
 - [ ] `systemctl list-timers pg-backup.timer pgbk-offsite.timer` dans le CT et
       sur l'hôte : les deux automatismes sont réarmés.
 - [ ] Les `pre-restore-*` sont supprimés une fois la reprise validée
-      (`pgbk delete`), pas avant.
+      (`pg delete`), pas avant.
 - [ ] Ce document est corrigé de ce qu'on a appris. **Une reprise réelle est
       le seul exercice qui ne ment pas** : ce qui a manqué doit y entrer
       pendant qu'on s'en souvient.

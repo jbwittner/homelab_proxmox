@@ -521,7 +521,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sous = parser.add_subparsers(dest="commande", required=True)
 
-    offsite = sous.add_parser(
+    def ajouter(nom: str, **kw):
+        """Un sous-parseur qui accepte `--ctid` APRÈS le verbe, lui aussi.
+
+        Le bash prenait « pg-deploy.sh --ctid 201 » : il n'y avait pas de
+        sous-commande, les drapeaux venaient après le nom du script. Sans ce
+        doublon, `--ctid` n'existerait qu'AVANT le verbe et toutes les
+        invocations documentées — dont celles de l'exercice de PRA qui monte
+        le CT 299 — auraient cessé de fonctionner.
+
+        `SUPPRESS` est la clé : sans lui, le défaut du sous-parseur écraserait
+        la valeur déjà analysée par le parseur global, et « pg --ctid 299
+        deploy » viserait la PRODUCTION en silence. Avec lui, l'attribut n'est
+        posé que s'il a été tapé — donc le plus proche de la commande gagne.
+        """
+        p = sous.add_parser(nom, **kw)
+        p.add_argument("--ctid", metavar="ID", default=argparse.SUPPRESS,
+                       help=argparse.SUPPRESS)
+        return p
+
+    offsite = ajouter(
         "offsite",
         help="copie les instantanés absents du bucket distant",
         description=(
@@ -545,7 +564,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     offsite.set_defaults(fonction=_offsite)
 
-    etat = sous.add_parser(
+    etat = ajouter(
         "status",
         help="l'état du montage : sauvegardes, timers des deux côtés, hors-site",
         description=(
@@ -563,7 +582,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     etat.set_defaults(fonction=_status)
 
-    deploy = sous.add_parser(
+    deploy = ajouter(
         "deploy",
         help="pose et vérifie tout le montage : conteneur, nœud, hors-site",
         description=(
@@ -632,7 +651,7 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.set_defaults(fonction=_deploy)
 
     for nom, positionnels in DELEGUEES.items():
-        p = sous.add_parser(
+        p = ajouter(
             nom,
             help=AIDE[nom],
             description=(

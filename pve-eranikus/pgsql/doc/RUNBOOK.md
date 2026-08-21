@@ -17,7 +17,7 @@ taper.
 5. [Compte d'administration (`jbwittner`)](#5-compte-dadministration-jbwittner)
 6. [Ajout d'un locataire](#6-ajout-dun-locataire)
 7. [Sauvegarde](#7-sauvegarde)
-8. [`pgbk` — interface de gestion](#8-pgbk--interface-de-gestion)
+8. [`pg` — interface de gestion](#8-pg--interface-de-gestion)
 9. [Restauration manuelle](#9-restauration-manuelle)
 10. [Copie hors-site vers GCS — `pgbk-offsite`](#10-copie-hors-site-vers-gcs--pgbk-offsite)
 11. [`pg status` — l'état du montage](#11-pg-status--létat-du-montage)
@@ -176,13 +176,20 @@ Ce qu'il fait, dans l'ordre :
 
 | # | Étape | Détail |
 |---|---|---|
-| A | Prérequis du conteneur | démarre le CT s'il est à l'arrêt, corrige `features=nesting=1`, pose `mp1` (le répertoire `ct/` du dépôt) et **`mp2` (le volume des sauvegardes)**, `startup order=1`, redémarre si un point de montage a bougé — section 3 |
-| B | Pose dans le CT | `sudo` et `fstrim.timer` si absents, symlinks de configuration (section 4), scripts et unités de sauvegarde (section 7), `reload`/`restart` de PostgreSQL |
-| C | `/etc/default/pgbk` | le CTID, consigné à un seul endroit |
-| D | `pgbk` sur l'hôte | même fichier que dans le CT (section 8) |
-| E | Première sauvegarde | déclenchée s'il n'en existe aucune — sans elle, il n'y a rien à copier hors-site ni à restaurer |
-| F | Copie hors-site | `apt install rclone`, `rclone.conf`, script et unités, drop-in du nœud, armement du timer et **première copie** — section 10 |
-| G | Contrôles | `pg_hba_file_rules`, sockets d'écoute, état des timers |
+| A | Prérequis du conteneur | démarre le CT s'il est à l'arrêt, constate la **protection**, corrige `features=nesting=1`, pose `mp1` (le répertoire `ct/` du dépôt) et **`mp2` (le volume des sauvegardes)**, `startup order=1` — section 3 |
+| — | *barrière* | **redémarre le CT** si un point de montage a bougé, avant que la suite ne regarde le montage |
+| B | Pose dans le CT | sentinelle du montage, `sudo`, `python3`, `fstrim.timer`, symlinks de configuration (section 4), scripts et unités de sauvegarde (section 7), **arbre d'import Python et lanceur `pg`** |
+| — | *barrière* | `daemon-reload` du CT, avant d'armer `pg-backup.timer` |
+| D | Outillage du nœud | `/etc/default/pgbk` (le CTID, consigné à un seul endroit), `pgbk`, `pg`, et l'arbre d'import de l'hôte |
+| G | Première sauvegarde | déclenchée s'il n'en existe aucune — sans elle, il n'y a rien à copier hors-site ni à restaurer |
+| E/F | Copie hors-site | `apt install rclone`, clé GCP, `rclone.conf`, unités, drop-in du nœud, armement du timer — section 10 |
+| H | Retraits | ce que plus rien n'appelle, conditionné à son remplaçant |
+| C | Contrôles | `pg_hba_file_rules`, sockets d'écoute, état des timers |
+
+Les lettres sont celles des modules de `pgtool/steps/`, pas un ordre : c'est la
+colonne de gauche à droite qui donne l'ordre réel, et il est reproduit tel quel
+dans le bilan. Les **barrières** sont les seuls endroits où un effet coalescé
+est joué — redémarrer après tous les `pct set`, recharger avant d'armer.
 
 Il se termine par un résumé d'une ligne par élément (`OK` / `POSE` / `KO`).
 
@@ -218,9 +225,9 @@ dans OpenBao. Le mot de passe généré est affiché **une seule fois**.
 PG_CTID=200
 ```
 
-`pgbk` le relit de là. Changer de conteneur ne demande donc que de rejouer
+`pg` le relit de là. Changer de conteneur ne demande donc que de rejouer
 `pg deploy --ctid <ID>` — il n'y a pas de second fichier à penser à mettre à
-jour, et `pgbk` **refuse de démarrer** si rien n'est consigné plutôt que de
+jour, et `pg` **refuse de démarrer** si rien n'est consigné plutôt que de
 taper dans un CT supposé. Priorité : `--ctid`, puis `$PG_CTID`, puis le
 fichier.
 
@@ -512,7 +519,7 @@ restaurer — la chaîne n'est pas prouvée. `--no-first-run` s'en abstient.
 Ensuite, à la demande :
 
 ```bash
-pgbk backup
+pg backup
 ```
 
 L'unité pointe vers `/usr/local/bin/pg-backup.sh` : le script doit être copié,
@@ -587,24 +594,28 @@ panne de SSD, pas d'un vol, d'un incendie ou d'un `pct destroy` malencontreux �
 qui emporterait le conteneur *et* son volume de sauvegardes. La copie hors-site
 vers GCS reste le seul vrai filet — c'est `pgbk-offsite`, section 10.
 
-## 8. `pgbk` — interface de gestion
+## 8. `pg` — interface de gestion
 
-`pg-backup.sh` est le moteur, appelé par le timer. `pgbk` est l'interface
-humaine : il n'écrit aucune sauvegarde lui-même, il orchestre.
+`pg-backup.sh` est le moteur, appelé par le timer. `pg` est l'interface
+humaine : elle n'écrit aucune sauvegarde elle-même, elle orchestre.
+
+> `pgbk` reste posé et accepte les mêmes commandes. Il n'est pas retiré
+> tant que l'exercice de bascule n'a pas prouvé le moteur Python — mais
+> c'est `pg` qu'il faut taper.
 
 **Les commandes se tapent sur le nœud**, pas dans le CT :
 
 ```bash
-pgbk backup                        # lance une sauvegarde via systemd
-pgbk list                          # instantanés, âge, taille, bases
-pgbk show 20260820-093240          # MANIFEST + fichiers
-pgbk restore forgejo               # depuis le dernier instantané
-pgbk restore forgejo 20260819      # depuis le plus récent de ce jour
-pgbk verify forgejo                # contrôle ACL et propriétaires
-pgbk delete 20260819-233627        # supprime une sauvegarde
+pg backup                          # lance une sauvegarde via systemd
+pg list                            # instantanés, âge, taille, bases
+pg show 20260820-093240            # MANIFEST + fichiers
+pg restore forgejo                 # depuis le dernier instantané
+pg restore forgejo 20260819        # depuis le plus récent de ce jour
+pg verify forgejo                  # contrôle ACL et propriétaires
+pg delete 20260819-233627          # supprime une sauvegarde
 ```
 
-### `pgbk delete` — et ce qu'il refuse
+### `pg delete` — et ce qu'il refuse
 
 La rétention de `pg-backup.sh` fait le ménage courant ; `delete` est pour les
 cas ponctuels — récupérer de la place, ou effacer un `pre-restore-*` une fois la
@@ -620,9 +631,9 @@ souvent le dernier instantané sans jamais le nommer. Les trois formulations
 sont donc refusées de la même façon :
 
 ```bash
-pgbk delete latest              # refusé
-pgbk delete 20260820-020000     # refusé si c'est la cible de latest
-pgbk delete 20260820            # refusé — résout vers la même
+pg delete latest              # refusé
+pg delete 20260820-020000     # refusé si c'est la cible de latest
+pg delete 20260820            # refusé — résout vers la même
 ```
 
 Si le lien `latest` manque, la protection se reporte sur la plus récente : un
@@ -634,7 +645,7 @@ Comme pour `restore`, il faut retaper le nom pour confirmer, et `--yes` court-
 circuite la question. `--plan` dit ce qui serait supprimé sans rien effacer :
 
 ```bash
-pgbk delete 20260819 --plan     # affiche la cible réelle et s'arrête
+pg delete 20260819 --plan     # affiche la cible réelle et s'arrête
 ```
 
 C'est ce que le nœud utilise pour poser sa question, le CT étant seul à savoir
@@ -693,9 +704,10 @@ Ce qui ne change pas, et ne doit pas changer : la détection par la présence de
 devienne celui de la commande — `pg` se fait remplacer par `pct exec`, il ne
 capture rien.
 
-**Reste à corriger, côté moteur** (étape suivante de la migration) : `pgbk
-restore` d'une base qui **n'existait pas** se termine sur un code 1 alors que
-la restauration a réussi. La dernière ligne de la fonction est un test qui
+**Un défaut qui subsiste dans le moteur BASH**, et c'est lui qui tourne tant
+que l'exercice de bascule n'a pas été joué : `pgbk restore` d'une base qui
+**n'existait pas** se termine sur un code 1 alors que la restauration a réussi.
+Le moteur Python (`restore.py`) ne l'a pas. La dernière ligne de la fonction est un test qui
 échoue quand le filet `pre-restore-*` n'a pas eu lieu d'être. Sans conséquence
 sur les données, gênant pour un script appelant.
 
@@ -721,7 +733,7 @@ est autonome, question comprise.
 Un instantané se désigne par `latest`, une date `AAAAMMJJ` (le plus récent de
 ce jour), ou un horodatage exact `AAAAMMJJ-HHMMSS`.
 
-`pgbk backup` passe par `systemctl start`, donc avec le même environnement que
+`pg backup` passe par `systemctl start`, donc avec le même environnement que
 les exécutions du timer — pas de divergence entre lancement manuel et
 automatique.
 
@@ -789,7 +801,7 @@ façon honnête de vérifier un script qu'on a décidé de ne pas porter.
 ([doc/PRA-exercice.md](PRA-exercice.md)). Tant qu'elle n'a pas été jouée,
 `ct/pgbk.sh` reste le moteur.
 
-### Ce que fait `pgbk restore`
+### Ce que fait `pg restore`
 
 1. Capture le propriétaire **avant** le `dropdb` : il disparaît avec la base.
 2. Demande de retaper le nom de la base (contournable par `--yes`).
@@ -802,7 +814,7 @@ façon honnête de vérifier un script qu'on a décidé de ne pas porter.
 Les répertoires `pre-restore-*` ne sont **pas** purgés par la rétention : ce
 sont des filets, à supprimer à la main une fois la restauration validée.
 
-### `pgbk verify`
+### `pg verify`
 
 Contrôle les deux pièges constatés lors du test de rollback du 20 août 2026 :
 `PUBLIC` qui retrouve le droit `CONNECT`, et des tables appartenant à
@@ -1130,7 +1142,7 @@ Ce qu'il faut observer pour conclure que ça marche :
 systemctl list-timers pgbk-offsite.timer    # prochaine échéance à 3h30 (+ délai aléatoire)
 ```
 
-4. Le contenu distant correspond à `pgbk list` :
+4. Le contenu distant correspond à `pg list` :
 
 ```bash
 rclone --config /root/.config/rclone/rclone.conf \
@@ -1157,7 +1169,7 @@ rien.
 | Écarté | Pourquoi |
 |---|---|
 | `latest` | symlink **absolu** vers `/var/backups/postgresql/...`, chemin qui n'existe que dans le CT — donc cassé vu de l'hôte |
-| `pre-restore-*` | filets posés par `pgbk restore` avant d'écraser une base : locaux, temporaires, sans valeur distante |
+| `pre-restore-*` | filets posés par `pg restore` avant d'écraser une base : locaux, temporaires, sans valeur distante |
 | `*.part` | exécution en cours ou interrompue. Par construction de `pg-backup.sh`, un répertoire **sans** ce suffixe est complet |
 
 Le timer est à **3h30**, une heure après la sauvegarde locale du CT (2h30) :
@@ -1234,19 +1246,19 @@ pct exec 200 -- chmod 700 /var/backups/postgresql/20260820-093240
 comme les autres :
 
 ```bash
-pgbk show    20260820-093240      # contrôle : MANIFEST et fichiers attendus
-pgbk restore forgejo 20260820-093240
-pgbk verify  forgejo
+pg show    20260820-093240        # contrôle : MANIFEST et fichiers attendus
+pg restore forgejo 20260820-093240
+pg verify  forgejo
 ```
 
-`pgbk restore` prend au passage un filet `pre-restore-*` de l'état courant, et
+`pg restore` prend au passage un filet `pre-restore-*` de l'état courant, et
 réapplique les ACL — l'étape que la restauration manuelle de la section 9
 oublie le plus souvent.
 
 **Reconstruction complète** (cluster perdu) : récupérer le répertoire, rejouer
 d'abord `globals.sql` — les rôles et leurs mots de passe ne sont dans aucun
 `pg_dump` de base —, puis les dumps un par un, puis les ACL de chaque
-locataire. `pgbk restore` refuse de restaurer une base dont le rôle
+locataire. `pg restore` refuse de restaurer une base dont le rôle
 propriétaire n'existe pas : c'est le rappel que `globals.sql` passe en premier.
 
 **`globals.sql` contient les empreintes SCRAM de tous les rôles.** C'est le
