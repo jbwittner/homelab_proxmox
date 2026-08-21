@@ -1,11 +1,11 @@
 # /etc/systemd/system/fjbk-offsite.service
 #
-# UNITÉ DE L'HÔTE PROXMOX (pve-ysera), pas du CT 400.
+# UNITÉ DE L'HÔTE PROXMOX (pve-eranikus), pas du CT 400.
 # Ne pas confondre avec fj-backup.service, qui vit DANS le conteneur.
 #
 [Unit]
 Description=Copie hors-site des sauvegardes Forgejo vers GCS
-Documentation=file:///root/homelab_proxmox/pve-ysera/forgejo/doc/RUNBOOK.md
+Documentation=file:///root/homelab_proxmox/pve-eranikus/forgejo/doc/RUNBOOK.md
 # Sans réseau, rclone échoue bruyamment — ce qui est le comportement voulu,
 # mais autant ne pas produire une alerte à chaque démarrage du nœud.
 After=network-online.target
@@ -24,7 +24,7 @@ Group=root
 # sa VUE HÔTE, et le conteneur ne sait rien de tout ceci.
 #
 # Ce nœud-ci, décrit à un seul endroit.
-Environment=FJBK_OFFSITE_NODE=pve-ysera
+Environment=FJBK_OFFSITE_NODE=pve-eranikus
 # Vue HÔTE du volume mp2 du CT 400 — pas sa vue conteneur
 # (/var/backups/forgejo). « fj deploy » la résout par pvesm et pose un drop-in
 # 10-noeud.conf qui remplace cette valeur : celle-ci n'est qu'un repli lisible.

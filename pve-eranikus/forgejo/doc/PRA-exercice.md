@@ -82,7 +82,7 @@ Si l'un de ces points n'est pas clair au moment de taper : **s'arrêter**.
 - [ ] Créer le CT 199, en reprenant [runbook § 1](RUNBOOK.md#1-création-du-conteneur)
       avec ces différences :
       ```bash
-      pct create 199 local:vztmpl/debian-13-standard_13.0-1_amd64.tar.zst \
+      pct create 199 local:vztmpl/debian-13-standard_13.6-1_amd64.tar.zst \
           --hostname forgejo-pra \
           --unprivileged 1 --features nesting=1 \
           --cores 2 --memory 2048 --swap 512 \
@@ -102,7 +102,7 @@ Si l'un de ces points n'est pas clair au moment de taper : **s'arrêter**.
 
 - [ ] ```bash
       cd /root/homelab_proxmox
-      pve-ysera/forgejo/fj deploy --ctid 199 --no-offsite --secrets
+      pve-eranikus/forgejo/fj deploy --ctid 199 --no-offsite --secrets
       ```
 - [ ] Le bilan est-il exploitable ? Noter **chaque ligne KO** et si elle était
       attendue :
@@ -198,9 +198,9 @@ par :
 
 ```bash
 rclone --config /root/.config/rclone/rclone.conf --gcs-bucket-policy-only \
-  lsf gcs:homelab-pgsql-backups-dc93212a/pve-ysera/forgejo/
+  lsf gcs:homelab-pgsql-backups-dc93212a/pve-eranikus/forgejo/
 rclone --config /root/.config/rclone/rclone.conf --gcs-bucket-policy-only \
-  copy gcs:homelab-pgsql-backups-dc93212a/pve-ysera/forgejo/<stamp>/ \
+  copy gcs:homelab-pgsql-backups-dc93212a/pve-eranikus/forgejo/<stamp>/ \
   /tmp/pra-forgejo/
 ```
 

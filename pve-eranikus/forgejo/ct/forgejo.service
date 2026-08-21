@@ -1,6 +1,6 @@
 [Unit]
 Description=Forgejo — source de vérité des dépôts (version épinglée LTS)
-Documentation=file:///root/homelab_proxmox/pve-ysera/forgejo/doc/RUNBOOK.md
+Documentation=file:///root/homelab_proxmox/pve-eranikus/forgejo/doc/RUNBOOK.md
 After=network-online.target
 Wants=network-online.target
 

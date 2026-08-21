@@ -1,4 +1,4 @@
-# PRA — CT Forgejo (`pve-ysera`, CTID 400)
+# PRA — CT Forgejo (`pve-eranikus`, CTID 400)
 
 Une procédure de reprise **par scénario**, du dégât local à la perte du nœud.
 
@@ -51,7 +51,7 @@ Le dire explicitement, pour qu'une reprise réussie ne se confonde pas avec
 | `forgejo.service` ne démarre plus, redémarre en boucle | [2 — le service ne démarre plus](#2--le-service-ne-démarre-plus) |
 | Les sessions sautent, les jetons ne marchent plus, les miroirs échouent | [2 — le service ne démarre plus](#2--le-service-ne-démarre-plus), section « secrets éphémères » |
 | `pct list` ne montre plus le CT 400, ou il est irrécupérable | [3 — le conteneur est détruit](#3--le-conteneur-est-détruit) |
-| `pve-ysera` ne répond plus, disque mort, machine perdue | [4 — le nœud est perdu](#4--le-nœud-est-perdu) |
+| `pve-eranikus` ne répond plus, disque mort, machine perdue | [4 — le nœud est perdu](#4--le-nœud-est-perdu) |
 | `secret_key` est introuvable et le CT est à reconstruire | [5 — les secrets sont perdus](#5--les-secrets-sont-perdus) |
 | Forgejo répond en local mais `forgejo.lan.wittner.tech` non | [6 — Traefik est absent](#6--traefik-est-absent) |
 | ArgoCD n'arrive plus à tirer ses manifests | commencer par `fj status`, puis le scénario correspondant |
@@ -243,7 +243,7 @@ qui n'est pas dans le vzdump :
 ```bash
 pct set 400 --protection 1
 cd /root/homelab_proxmox && git pull
-pve-ysera/forgejo/fj deploy
+pve-eranikus/forgejo/fj deploy
 fj status
 ```
 
@@ -261,7 +261,7 @@ d'abord `REPOS_LAST_MTIME` du manifeste au vzdump retenu.
 3. **Déployer** :
    ```bash
    cd /root/homelab_proxmox && git pull
-   pve-ysera/forgejo/fj deploy
+   pve-eranikus/forgejo/fj deploy
    ```
 4. **Restaurer la base** — [scénario 1](#1--la-base-est-perdue-ou-corrompue).
 5. **Restaurer les dépôts** depuis le vzdump le plus proche, ou depuis le
@@ -280,8 +280,22 @@ d'abord `REPOS_LAST_MTIME` du manifeste au vzdump retenu.
 
 ## 4 — Le nœud est perdu
 
-`pve-ysera` ne répond plus. **Traefik (CT 201) est sur ce nœud aussi** : le
-routage est perdu avec lui.
+`pve-eranikus` ne répond plus. Deux constats, et ils tirent en sens opposés.
+
+**Traefik survit** : il est sur `pve-ysera` (CT 201). Le routage tient donc
+debout — il pointe simplement vers un dos mort. `forgejo.lan.wittner.tech`
+répondra en 502 tant que le conteneur n'est pas remonté quelque part, et il
+recommencera à servir dès qu'un CT reprendra l'IP `192.168.1.57`, sans
+qu'aucune configuration Traefik ne soit à toucher. C'est le gain de ce
+placement.
+
+**On perd DEUX services d'un coup** : Forgejo et le cluster PostgreSQL
+mutualisé du CT 200. Tous les locataires du CT 200 tombent avec. Cette
+procédure ne traite que Forgejo ; l'autre est dans
+[le PRA du CT 200](../../pgsql/doc/PRA.md#4--le-nœud-est-perdu), et l'ordre
+dans lequel on les remonte est une décision à prendre sur le moment — la
+source de vérité d'ArgoCD d'abord si le cluster Kubernetes est aussi à
+réconcilier.
 
 ### Ce qu'on a ailleurs
 
@@ -302,18 +316,20 @@ Depuis n'importe quelle machine ayant la clé du compte de service :
 
 ```bash
 rclone --config /root/.config/rclone/rclone.conf --gcs-bucket-policy-only \
-  lsf gcs:homelab-pgsql-backups-dc93212a/pve-ysera/forgejo/
+  lsf gcs:homelab-pgsql-backups-dc93212a/pve-eranikus/forgejo/
 
 rclone --config /root/.config/rclone/rclone.conf --gcs-bucket-policy-only \
-  copy gcs:homelab-pgsql-backups-dc93212a/pve-ysera/forgejo/<stamp>/ /tmp/<stamp>/
+  copy gcs:homelab-pgsql-backups-dc93212a/pve-eranikus/forgejo/<stamp>/ /tmp/<stamp>/
 ```
 
 ### Reconstruire ailleurs
 
 1. Sur le nœud de repli, cloner ce dépôt.
-2. Créer le CT — [runbook § 1](RUNBOOK.md#1-création-du-conteneur). **Garder
-   l'IP `192.168.1.57`** si possible : la configuration Traefik et les entrées
-   DNS la nomment.
+2. Créer le CT — [runbook § 1](RUNBOOK.md#1-création-du-conteneur). **Reprendre
+   l'IP `192.168.1.57`.** Ce n'est pas un confort : Traefik est resté debout
+   sur `pve-ysera` et route déjà vers cette adresse. La reprendre remet le
+   service en ligne sans toucher à une seule ligne de configuration Traefik ni
+   à une entrée DNS. En changer transforme une reprise en chantier.
 3. Reposer les secrets depuis OpenBao **avant le premier démarrage**.
 4. `fj deploy --ctid 400` depuis le dépôt.
 5. Pousser le dump récupéré dans le CT et le restaurer :
@@ -323,9 +339,16 @@ rclone --config /root/.config/rclone/rclone.conf --gcs-bucket-policy-only \
    puis suivre le [scénario 1](#1--la-base-est-perdue-ou-corrompue) à partir du
    `pg_restore`.
 6. Restaurer les dépôts depuis les miroirs GitHub.
-7. **Rétablir le routage** : Traefik est à remonter aussi, avec
-   `pve-ysera/traefik/` de ce dépôt. En attendant, Forgejo est joignable en
-   direct — voir [scénario 6](#6--traefik-est-absent).
+7. **Vérifier le routage — il n'y a rien à remonter.** Traefik est sur
+   `pve-ysera`, il n'est pas tombé. Si l'IP a été reprise,
+   `https://forgejo.lan.wittner.tech/` répond dès que le service démarre.
+   Si elle n'a pas pu l'être, corriger l'adresse du backend dans
+   [`pve-ysera/traefik/dynamic/forgejo.yaml`](../../../pve-ysera/traefik/dynamic/forgejo.yaml)
+   — deux lignes, `http://…:3000` pour le web et `…:2222` pour le routeur TCP
+   SSH — puis commiter. Traefik surveille son répertoire dynamique et reprend
+   sans redémarrage.
+8. **Ne pas oublier le CT 200.** Il est tombé avec le nœud, et tous ses
+   locataires avec lui : [PRA du CT 200](../../pgsql/doc/PRA.md).
 
 ---
 

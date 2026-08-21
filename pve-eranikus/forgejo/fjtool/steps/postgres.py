@@ -1,11 +1,13 @@
 """Section P — la base de Forgejo, dans le cluster CO-LOCALISÉ du CT.
 
-POURQUOI CO-LOCALISÉ, ET PAS SUR LE CLUSTER MUTUALISÉ DU CT 200. Mutualiser
-créerait la chaîne `pve-eranikus → CT 200 → Forgejo → ArgoCD → cluster` : une
-panne d'un nœud qui n'héberge même pas Forgejo bloquerait alors toute
-réconciliation GitOps. L'autonomie de la source de vérité prime sur l'économie
-de ressources — c'est la seule contrainte qui prime sur toutes les autres pour
-ce service.
+POURQUOI CO-LOCALISÉ, ET PAS SUR LE CLUSTER MUTUALISÉ DU CT 200. Les deux sont
+sur le même nœud : l'argument n'est donc pas la disponibilité. Il est que les
+CYCLES DE VIE sont incompatibles — le CT 200 se met à jour par script
+communautaire, le CT 400 a sa version gelée — et que le RAYON DE PANNE d'un
+cluster mutualisé est celui de son locataire le plus bruyant. Un redémarrage
+décidé pour un autre service arrêterait la source de vérité d'ArgoCD au moment
+où c'est elle qui doit permettre de réparer le reste. Voir doc/RUNBOOK.md
+section 3.
 
 Deux étapes, et la seconde n'est pas un doublon de la première.
 

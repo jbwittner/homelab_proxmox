@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-SERVICE = REPO / "pve-ysera" / "forgejo"
+SERVICE = REPO / "pve-eranikus" / "forgejo"
 
 DOCUMENTS = sorted(SERVICE.rglob("*.md"))
 SOURCES = sorted((SERVICE / "fjtool").rglob("*.py"))

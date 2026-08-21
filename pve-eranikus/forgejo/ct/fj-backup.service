@@ -1,11 +1,11 @@
 # /etc/systemd/system/fj-backup.service
 #
 # UNITÉ DU CT 400, pas du nœud. Ne pas confondre avec fjbk-offsite.service,
-# qui vit sur pve-ysera et copie ces sauvegardes vers GCS.
+# qui vit sur pve-eranikus et copie ces sauvegardes vers GCS.
 #
 [Unit]
 Description=Sauvegarde logique Forgejo (dump PostgreSQL + app.ini + manifeste)
-Documentation=file:///root/homelab_proxmox/pve-ysera/forgejo/doc/RUNBOOK.md
+Documentation=file:///root/homelab_proxmox/pve-eranikus/forgejo/doc/RUNBOOK.md
 After=postgresql.service
 Requires=postgresql.service
 

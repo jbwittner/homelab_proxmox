@@ -6,15 +6,20 @@ nœud, un sous-répertoire par service. Les conventions du dépôt sont dans
 
 | Nœud | Adresse | Ce qu'il porte |
 |---|---|---|
-| `pve-ysera` | 192.168.1.10 | Traefik (ingress), Homepage, **Forgejo** |
-| `pve-eranikus` | 192.168.1.11 | PostgreSQL mutualisé |
+| `pve-ysera` | 192.168.1.10 | Traefik (ingress), Homepage |
+| `pve-eranikus` | 192.168.1.11 | PostgreSQL mutualisé, **Forgejo** |
+
+L'ingress et la source de vérité sont **sur deux nœuds différents**, et c'est
+délibéré : la perte de `pve-ysera` coûte le routage mais laisse Forgejo
+joignable en direct, et la perte de `pve-eranikus` laisse Traefik debout,
+prêt à resservir dès qu'un conteneur reprend l'IP.
 
 ## Services
 
 | Service | Nœud | CTID | Documentation |
 |---|---|---|---|
 | PostgreSQL mutualisé | `pve-eranikus` | 200 | [pve-eranikus/pgsql/](pve-eranikus/pgsql/README.md) |
-| Forgejo — source de vérité d'ArgoCD | `pve-ysera` | 400 | [pve-ysera/forgejo/](pve-ysera/forgejo/README.md) |
+| Forgejo — source de vérité d'ArgoCD | `pve-eranikus` | 400 | [pve-eranikus/forgejo/](pve-eranikus/forgejo/README.md) |
 
 ## Convention de numérotation des conteneurs
 

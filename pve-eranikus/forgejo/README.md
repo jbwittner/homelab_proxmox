@@ -1,4 +1,4 @@
-# CT Forgejo — `pve-ysera`
+# CT Forgejo — `pve-eranikus`
 
 Instance Forgejo **à version épinglée**, source de vérité d'ArgoCD. Elle doit
 rester disponible et réconciliable **quand le cluster Kubernetes est
@@ -17,15 +17,15 @@ Ce fichier ne porte que **ce qu'on tape**. Le reste est dans `doc/` :
 |---|---|
 | CTID | 400, hostname `forgejo` — tier 400–499, [installation manuelle épinglée](../../README.md#le-tier-400499--installations-manuelles) |
 | IP | 192.168.1.57/24, passerelle 192.168.1.254 |
-| Nœud | `pve-ysera` (192.168.1.10), Debian 13 |
+| Nœud | `pve-eranikus` (192.168.1.11), Debian 13 |
 | Forgejo | branche **15.0 LTS**, fin de support **15 juillet 2027** — version exacte dans [`ct/VERSION`](ct/VERSION) |
 | PostgreSQL | **co-localisé dans le CT**, socket Unix + peer, aucune écoute TCP |
 | Ingress | Traefik (CT 201) → `forgejo.lan.wittner.tech`, SSH en 2222 |
 | Base système | 32 Go minimum |
 | Sauvegardes | `mp2` → `/var/backups/forgejo`, 20 Go, 14 j — **base seulement** |
 | Dépôts | par `vzdump` du CT — **pas** dans la sauvegarde logique |
-| Hors-site | `gs://homelab-pgsql-backups-dc93212a/pve-ysera/forgejo/`, 03:50 |
-| Dépôt monté | `/root/homelab_proxmox/pve-ysera/forgejo/ct` → `/etc/forgejo-git` (ro) |
+| Hors-site | `gs://homelab-pgsql-backups-dc93212a/pve-eranikus/forgejo/`, 03:50 |
+| Dépôt monté | `/root/homelab_proxmox/pve-eranikus/forgejo/ct` → `/etc/forgejo-git` (ro) |
 
 > **Ce conteneur ne se met jamais à jour tout seul.** Ni par timer, ni par
 > script communautaire. Passer en 16 ou 17 est une décision qui se prend en
@@ -40,7 +40,7 @@ rien si l'état est déjà conforme.
 
 ```bash
 cd /root/homelab_proxmox && git pull
-pve-ysera/forgejo/fj deploy
+pve-eranikus/forgejo/fj deploy
 ```
 
 L'enchaîner à chaque `git pull` est le geste normal : les scripts, les unités
@@ -77,7 +77,7 @@ complet quels que soient les drapeaux.
 
 `fj deploy` se joue **depuis le dépôt** — c'est de là qu'il lit ce qu'il pose.
 Les exemples ci-dessus omettent le préfixe
-`/root/homelab_proxmox/pve-ysera/forgejo/`. Les autres commandes `fj`, elles,
+`/root/homelab_proxmox/pve-eranikus/forgejo/`. Les autres commandes `fj`, elles,
 sont bien dans le `PATH` du nœud.
 
 **Trois choses qu'il ne fait pas**, délibérément : créer le conteneur

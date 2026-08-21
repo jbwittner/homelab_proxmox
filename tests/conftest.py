@@ -19,7 +19,7 @@ LIB = REPO / "lib"
 # disposition : `lib/` puis le répertoire du service, tous deux à plat.
 SERVICES = [
     REPO / "pve-eranikus" / "pgsql",
-    REPO / "pve-ysera" / "forgejo",
+    REPO / "pve-eranikus" / "forgejo",
 ]
 
 for chemin in [LIB, *SERVICES]:
@@ -38,4 +38,4 @@ def depot_forgejo() -> Path:
     `ct/VERSION`, `ct/app.ini`, les unités. Recalculer ce chemin dans chaque
     fichier de test finirait par produire deux vérités.
     """
-    return REPO / "pve-ysera" / "forgejo"
+    return REPO / "pve-eranikus" / "forgejo"

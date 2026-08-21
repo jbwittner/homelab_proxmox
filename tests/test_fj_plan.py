@@ -184,9 +184,10 @@ def test_le_volume_de_sauvegarde_est_hors_vzdump(etapes, depot_forgejo):
 
 
 def test_un_stockage_inconnu_est_refuse_et_non_devine(etapes, depot_forgejo):
-    """`data` existe sur pve-eranikus ; rien ne dit qu'il existe sur pve-ysera.
+    """`data` existe sur `pve-eranikus` — mais rien dans le code ne le sait.
 
-    Un `pct set` sur un stockage inconnu échouerait au MILIEU du parcours,
+    Le service pourrait être redéployé ailleurs, ou le pool renommé. Un
+    `pct set` sur un stockage inconnu échouerait au MILIEU du parcours,
     protection déjà levée. Le refus nomme ce qui existe, pour que la
     correction se tape sans aller chercher ailleurs.
     """

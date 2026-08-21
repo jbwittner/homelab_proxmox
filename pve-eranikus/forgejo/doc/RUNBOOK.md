@@ -1,4 +1,4 @@
-# Runbook — CT Forgejo (`pve-ysera`, CTID 400)
+# Runbook — CT Forgejo (`pve-eranikus`, CTID 400)
 
 Le détail : création, conception, pièges. Ce qu'on tape au quotidien est dans
 le [README](../README.md).
@@ -93,7 +93,7 @@ pveam list local | grep debian-13
 ```
 
 ```bash
-pct create 400 local:vztmpl/debian-13-standard_13.0-1_amd64.tar.zst \
+pct create 400 local:vztmpl/debian-13-standard_13.6-1_amd64.tar.zst \
     --hostname forgejo \
     --unprivileged 1 \
     --features nesting=1 \
@@ -107,7 +107,7 @@ pct create 400 local:vztmpl/debian-13-standard_13.0-1_amd64.tar.zst \
     --startup order=1 \
     --description 'Forgejo — source de vérité ArgoCD. Version ÉPINGLÉE 15.0 LTS.
 NE JAMAIS mettre à jour par script communautaire. Voir
-pve-ysera/forgejo/doc/RUNBOOK.md section 4.'
+pve-eranikus/forgejo/doc/RUNBOOK.md section 4.'
 
 pct start 400
 ```
@@ -210,20 +210,33 @@ d'*avant* les poses qui le suivent.
 
 ### Pourquoi dans ce conteneur, et pas sur le CT 200
 
-Le cluster mutualisé du CT 200 (`pve-eranikus`) aurait suffi techniquement. Il
-crée en revanche cette chaîne :
+Le cluster mutualisé du CT 200 est sur le **même nœud**. L'argument n'est donc
+pas la disponibilité — une panne de `pve-eranikus` emporte les deux de toute
+façon, et prétendre le contraire serait se raconter une histoire. Il est
+ailleurs, et il tient en trois points.
 
-```
-pve-eranikus → CT 200 → Forgejo → ArgoCD → cluster Kubernetes
-```
+**Les cycles de vie sont incompatibles.** Le CT 200 relève du tier 200–299 :
+il est posé et mis à jour par un script communautaire. Le CT 400 relève du
+tier 400–499 : sa version est gelée et ne bouge que sur décision. Faire
+dépendre un service dont on gèle la version d'un cluster qui, lui, se met à
+jour tout seul réintroduit par la bande exactement ce que l'épinglage
+empêche.
 
-Une panne d'un nœud qui **n'héberge même pas Forgejo** bloque alors toute
-réconciliation GitOps. L'autonomie de la source de vérité prime sur l'économie
-de ressources : c'est la seule contrainte qui prime sur toutes les autres pour
-ce service.
+**Le rayon de panne.** Le CT 200 sert plusieurs locataires, donc ses fenêtres
+de maintenance sont celles du plus bruyant. Un `pg deploy` malheureux, un
+redémarrage du cluster, la restauration d'un autre locataire : chacun arrête
+la source de vérité d'ArgoCD — au moment précis où c'est elle qui doit
+permettre de réparer le reste.
+
+**La reprise tient dans un seul conteneur.** Restaurer Forgejo, c'est
+restaurer un CT : la base et les dépôts reviennent ensemble, depuis un dump et
+un vzdump du même objet. Avec la base ailleurs, il faudrait apparier deux
+conteneurs et deux jeux de sauvegardes — dont un mutualisé, qu'on ne peut pas
+restaurer sans toucher aux autres locataires.
 
 Conséquence assumée : un second cluster PostgreSQL à faire vivre, à sauvegarder
-et à mettre à jour. C'est le prix, et il est payé sciemment.
+et à mettre à jour, sur la même machine que le premier. C'est le prix, et il
+est payé sciemment.
 
 ### Socket Unix, peer, et aucune écoute TCP
 
@@ -346,7 +359,7 @@ présente sur une autre machine de confiance).
 
 ```bash
 # Sur le nœud, une fois la clé obtenue et vérifiée hors bande :
-cp forgejo-release.asc /root/homelab_proxmox/pve-ysera/forgejo/ct/RELEASE-KEY.asc
+cp forgejo-release.asc /root/homelab_proxmox/pve-eranikus/forgejo/ct/RELEASE-KEY.asc
 cd /root/homelab_proxmox && git add -A && git commit -m 'clé de publication Forgejo'
 ```
 
@@ -461,8 +474,8 @@ Deux chemins, un seul nom d'hôte.
 | HTTPS | `websecure` (443) | `Host(forgejo.lan.wittner.tech)` → `http://192.168.1.57:3000` |
 | SSH | `ssh` (2222) | `HostSNI(*)` → `192.168.1.57:2222` |
 
-Fichiers : [`../../traefik/dynamic/forgejo.yaml`](../../traefik/dynamic/forgejo.yaml)
-et l'entryPoint `ssh` dans [`../../traefik/traefik.yaml`](../../traefik/traefik.yaml).
+Fichiers : [`pve-ysera/traefik/dynamic/forgejo.yaml`](../../../pve-ysera/traefik/dynamic/forgejo.yaml)
+et l'entryPoint `ssh` dans [`pve-ysera/traefik/traefik.yaml`](../../../pve-ysera/traefik/traefik.yaml).
 Traefik surveille son répertoire dynamique (`watch: true`) : la route HTTP est
 prise en compte sans redémarrage. **L'entryPoint, lui, est statique** — ajouter
 `ssh` demande de redémarrer Traefik.
@@ -735,7 +748,7 @@ même compte de service aux droits volontairement incomplets. Son nom parle de
 « pgsql » pour des raisons historiques ; le sous-chemin distingue les services :
 
 ```
-gs://homelab-pgsql-backups-dc93212a/pve-ysera/forgejo/<stamp>/
+gs://homelab-pgsql-backups-dc93212a/pve-eranikus/forgejo/<stamp>/
 ```
 
 ### Droits volontairement incomplets
@@ -778,7 +791,7 @@ laissé par un transfert interrompu.
 Le remède demande un compte **humain** ayant le droit de supprimer :
 
 ```bash
-gcloud storage rm gs://homelab-pgsql-backups-dc93212a/pve-ysera/forgejo/<stamp>/<fichier>
+gcloud storage rm gs://homelab-pgsql-backups-dc93212a/pve-eranikus/forgejo/<stamp>/<fichier>
 fj offsite        # qui le retransférera
 ```
 

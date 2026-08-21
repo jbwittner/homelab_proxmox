@@ -1,0 +1,21 @@
+# /etc/systemd/system/fj-backup.timer
+#
+# UNITÉ DU CT 400, pas du nœud.
+#
+[Unit]
+Description=Sauvegarde Forgejo quotidienne
+
+[Timer]
+# 02:45, et non 02:30 comme le CT 200. Les deux conteneurs sont sur le MÊME
+# nœud : deux pg_dump simultanés se disputeraient les mêmes disques et le même
+# processeur, et la sauvegarde du cluster mutualisé — qui sert plusieurs
+# locataires — n'a pas à ralentir pour la nôtre. Un quart d'heure d'écart
+# suffit : le dump de Forgejo pèse quelques centaines de mégaoctets.
+OnCalendar=*-*-* 02:45:00
+RandomizedDelaySec=10m
+# Le nœud est parfois éteint la nuit : rattraper au démarrage, sinon la
+# sauvegarde saute silencieusement les jours d'arrêt.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

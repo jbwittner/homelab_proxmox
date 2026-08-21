@@ -51,22 +51,22 @@ def test_le_prefixe_distant_nomme_le_noeud_et_le_service():
     """Un bucket partagé entre deux nœuds et deux services n'est lisible que
     si le chemin dit d'où vient chaque objet — sinon une reprise commence par
     deviner."""
-    cfg = O.OffsiteConfig(node="pve-ysera", src=None, subpath="forgejo")
-    assert cfg.prefix == "pve-ysera/forgejo"
+    cfg = O.OffsiteConfig(node="pve-eranikus", src=None, subpath="forgejo")
+    assert cfg.prefix == "pve-eranikus/forgejo"
 
 
 def test_le_noeud_vient_de_l_unite_pas_du_hostname():
     """Le drop-in du nœud fait autorité : c'est lui qui rend la copie juste
     sur une machine renommée."""
     cfg = O.OffsiteConfig.from_env(
-        {"FJBK_OFFSITE_NODE": "pve-ysera"}, hostname="autre"
+        {"FJBK_OFFSITE_NODE": "pve-eranikus"}, hostname="autre"
     )
-    assert cfg.node == "pve-ysera"
+    assert cfg.node == "pve-eranikus"
 
 
 def test_le_hostname_sert_de_repli():
-    cfg = O.OffsiteConfig.from_env({}, hostname="pve-ysera")
-    assert cfg.node == "pve-ysera"
+    cfg = O.OffsiteConfig.from_env({}, hostname="pve-eranikus")
+    assert cfg.node == "pve-eranikus"
 
 
 def test_une_valeur_entiere_illisible_est_un_refus():
@@ -83,7 +83,7 @@ def test_une_valeur_entiere_illisible_est_un_refus():
 
 def _cfg(tmp_path, **surcharges):
     defauts = dict(
-        node="pve-ysera",
+        node="pve-eranikus",
         src=tmp_path / "src",
         config=tmp_path / "rclone.conf",
         key=tmp_path / "cle.json",

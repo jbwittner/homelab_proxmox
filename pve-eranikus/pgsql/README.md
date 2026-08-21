@@ -205,11 +205,12 @@ sort en 1 s'il y en a un.
       conteneur tant que la restauration Python n'a pas été éprouvée.
 - [ ] **Retirer** la ligne du locataire `forgejo` de `ct/pg_hba.conf`, et sa
       base si elle a été créée. Elle n'a plus d'objet : Forgejo a désormais
-      **son propre cluster, co-localisé dans le CT 400** de `pve-ysera`.
-      Mutualiser aurait créé la chaîne `pve-eranikus → CT 200 → Forgejo →
-      ArgoCD → cluster`, où une panne d'un nœud qui n'héberge même pas Forgejo
-      bloque toute réconciliation GitOps — voir
-      [pve-ysera/forgejo/doc/RUNBOOK.md § 3](../../pve-ysera/forgejo/doc/RUNBOOK.md#3-postgresql-co-localisé).
+      **son propre cluster, co-localisé dans le CT 400** — sur ce nœud-ci, mais
+      hors de ce conteneur-ci. Le motif n'est pas la disponibilité, c'est que
+      ce cluster-ci se met à jour par script communautaire là où le CT 400 a sa
+      version gelée, et que ses fenêtres de maintenance sont celles de son
+      locataire le plus bruyant — voir
+      [../forgejo/doc/RUNBOOK.md § 3](../forgejo/doc/RUNBOOK.md#3-postgresql-co-localisé).
       Tant qu'elle est là, elle décrit un accès qui ne servira jamais.
 - [ ] Copier `postgresql.vars` dans ce dépôt après vérification des secrets.
 - [ ] **Jouer l'exercice de bascule**

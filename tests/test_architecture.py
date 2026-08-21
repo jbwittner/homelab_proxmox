@@ -27,7 +27,7 @@ PROXMOX = LIB / "proxmox"
 # aucun autre test ne le rattraperait.
 SERVICES = [
     (REPO / "pve-eranikus" / "pgsql", "pgtool", "pg"),
-    (REPO / "pve-ysera" / "forgejo", "fjtool", "fj"),
+    (REPO / "pve-eranikus" / "forgejo", "fjtool", "fj"),
 ]
 
 OUTILS = [
@@ -211,7 +211,7 @@ def test_pytest_nest_jamais_importe_par_la_production():
     [
         (REPO / "pve-eranikus" / "pgsql", "pgtool",
          "pgtool.cli, pgtool.engine, pgtool.snapshots, pgtool.restore"),
-        (REPO / "pve-ysera" / "forgejo", "fjtool",
+        (REPO / "pve-eranikus" / "forgejo", "fjtool",
          "fjtool.cli, fjtool.backup, fjtool.version"),
     ],
     ids=["pgtool", "fjtool"],

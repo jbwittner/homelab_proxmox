@@ -12,7 +12,7 @@
 #
 # Pour résoudre ou faire évoluer cette valeur, depuis le nœud :
 #
-#     pve-ysera/forgejo/fj version --resolve
+#     pve-eranikus/forgejo/fj version --resolve
 #
 # Elle interroge l'API Codeberg, ne retient que le préfixe « v15.0. », écarte
 # les pré-versions et les brouillons, prend la plus récente, et réécrit ce
