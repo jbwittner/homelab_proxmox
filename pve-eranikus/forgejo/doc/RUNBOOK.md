@@ -373,10 +373,46 @@ Deux fichiers en sortent, et ce n'est pas une redondance :
 | `ct/RELEASE-KEY.asc` | le bloc de clé — un pavé dont le `git diff` ne dit rien à un humain |
 | `ct/RELEASE-KEY.fingerprint` | l'empreinte, sur une ligne — **c'est elle qui rend un changement de clé visible en revue** |
 
-**L'URL par défaut n'a pas pu être vérifiée** au moment de l'écriture (le
-domaine était injoignable depuis la machine de développement). Si elle ne
-répond pas, `--from` accepte n'importe quelle source, y compris un fichier
-récupéré à la main par le moyen qu'on veut.
+### D'où vient la clé, et pourquoi de là
+
+Du **Web Key Directory** de `contact@forgejo.org`, que la page de
+téléchargement officielle désigne :
+
+```
+https://openpgpkey.forgejo.org/.well-known/openpgpkey/forgejo.org/hu/dj3498u4hyyarh35rkjfnghbjxug6b19
+```
+
+Ce n'est pas un détail d'implémentation. **Ce WKD vit sur un domaine différent
+de celui d'où vient le binaire** (`openpgpkey.forgejo.org` contre
+`codeberg.org`) : la clé et l'artefact ne voyagent donc pas par le même canal,
+ce qui est précisément la propriété qui fait qu'une vérification de signature
+vaut mieux qu'une somme de contrôle.
+
+L'adresse est **dérivée** de l'adresse de courriel — le `hu/…` est un hachage
+de sa partie locale — donc elle est stable tant que l'adresse l'est. `--from`
+reste disponible pour n'importe quelle autre source, URL ou fichier local.
+
+### La confrontation à deux canaux, faite le 21 août 2026
+
+Elle est reproductible, et elle prend une minute :
+
+```bash
+# Canal 1 — ce que la signature du binaire déclare (codeberg.org)
+curl -fLO https://codeberg.org/forgejo/forgejo/releases/download/v15.0.7/forgejo-15.0.7-linux-amd64.asc
+gpg --list-packets forgejo-15.0.7-linux-amd64.asc | grep 'issuer fpr'
+#   → issuer fpr v4 3BF4E813F84812411DA01E5BC4186DF66F4B6750
+
+# Canal 2 — ce que le projet publie (openpgpkey.forgejo.org)
+fj key --fetch
+#   → empreinte : EB114F5E6C0DC2BCDD183550A4B61A2DC5923710
+gpg --show-keys --with-colons ct/RELEASE-KEY.asc | grep ^fpr
+#   → …3BF4E813F84812411DA01E5BC4186DF66F4B6750  (sous-clé)
+```
+
+Les deux concordent : la clé qui a signé `v15.0.7` est une **sous-clé** de
+`Forgejo Releases <release@forgejo.org>`, dont l'empreinte principale est
+`EB114F5E…3710`. C'est cette empreinte principale qui est épinglée — les
+sous-clés de signature tournent, l'identité du projet non.
 
 ### Ce que l'épinglage protège, et ce qu'il ne protège pas
 

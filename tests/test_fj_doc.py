@@ -124,14 +124,13 @@ CHEMIN = re.compile(r"`((?:ct|host|fjtool|doc)/[A-Za-z0-9_./-]+)`")
 
 # Les fichiers que la documentation nomme et qui sont DÉLIBÉRÉMENT absents du
 # dépôt. Chaque entrée doit porter sa raison : sans cette liste, on finirait
-# par committer un fichier bidon pour faire taire le test — ce qui, pour une
-# clé de publication, serait exactement la mauvaise idée.
-ABSENTS_DELIBERES = {
-    # Un ancrage de confiance s'obtient HORS du canal qu'il sert à valider.
-    # Le déposer dans le dépôt est un geste humain, fait une fois, après
-    # confrontation à une source indépendante — voir RUNBOOK § 4.
-    "ct/RELEASE-KEY.asc",
-}
+# par committer un fichier bidon pour faire taire le test.
+#
+# Vide aujourd'hui, et c'est une bonne nouvelle : `ct/RELEASE-KEY.asc` y a
+# figuré tant que la clé de publication devait être déposée à la main. Elle est
+# maintenant récupérée par `fj key --fetch` et commitée comme le reste, donc
+# l'exception n'a plus lieu d'être — c'est le test ci-dessous qui l'a signalé.
+ABSENTS_DELIBERES: set[str] = set()
 
 
 @pytest.mark.parametrize("document", DOCUMENTS, ids=_relatif)

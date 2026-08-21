@@ -31,12 +31,25 @@ import re
 import urllib.request
 from pathlib import Path
 
-# Où la clé est récupérée par défaut. **À CONFIRMER À LA PREMIÈRE UTILISATION :**
-# cette URL n'a pas pu être vérifiée au moment de l'écriture (le domaine est
-# injoignable depuis l'environnement de développement). Si elle ne répond pas,
-# `fj key --fetch --from <url-ou-fichier>` accepte n'importe quelle source, y
-# compris un fichier local déjà téléchargé à la main.
-URL_PAR_DEFAUT = "https://forgejo.org/forgejo.gpg"
+# Le Web Key Directory de `contact@forgejo.org`, tel que la page de
+# téléchargement officielle le désigne. Ce n'est pas une URL devinée : elle a
+# été relevée sur https://forgejo.org/download/ le 21 août 2026, et l'adresse
+# elle-même est DÉRIVÉE de l'adresse de courriel — le « hu/… » est un hachage
+# de la partie locale. Elle est donc stable tant que l'adresse l'est.
+#
+# CE QUE CE CHOIX APPORTE, et c'est le point : le WKD vit sur
+# `openpgpkey.forgejo.org`, un domaine DIFFÉRENT de `codeberg.org` d'où vient
+# le binaire. La clé et l'artefact ne voyagent donc pas par le même canal, ce
+# qui est exactement la propriété qu'une vérification de signature exige pour
+# valoir mieux qu'une somme de contrôle.
+#
+# Une première version de ce fichier portait « https://forgejo.org/forgejo.gpg »,
+# devinée faute d'accès réseau. Elle rendait 404 — pire que rien : ça ressemble
+# à un défaut du code plutôt qu'à un geste manquant.
+URL_PAR_DEFAUT = (
+    "https://openpgpkey.forgejo.org/.well-known/openpgpkey/forgejo.org/hu/"
+    "dj3498u4hyyarh35rkjfnghbjxug6b19"
+)
 
 TIMEOUT = 30
 

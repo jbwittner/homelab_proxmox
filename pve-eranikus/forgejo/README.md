@@ -230,10 +230,11 @@ Avant de chercher : **`fj status`** dit lequel des quatre maillons est rompu.
       et le contrôle « proxy de confiance » ne bloque plus.
 - [x] **`ct/VERSION` résolue** : `v15.0.7`, par `fj version --resolve` puis
       commit. `fj deploy` pose désormais cette version-là, et elle seule.
-- [ ] **Épingler la clé de signature** : `fj key --fetch`, puis commiter les
-      deux fichiers produits. Une minute. Ensuite, toute mise à jour dont la
-      clé aurait changé est refusée
-      ([§ 4](doc/RUNBOOK.md#la-clé-de-publication)).
+- [x] **Clé de signature épinglée** : `EB114F5E6C0DC2BCDD183550A4B61A2DC5923710`
+      (`Forgejo Releases <release@forgejo.org>`), récupérée du WKD du projet.
+      Confrontée au canal de Codeberg le 21 août 2026 : la sous-clé qui signe
+      `v15.0.7` en fait bien partie
+      ([§ 4](doc/RUNBOOK.md#la-confrontation-à-deux-canaux-faite-le-21-août-2026)).
 - [ ] **Le credential ArgoCD → Forgejo doit être un Sealed Secret**, pas un
       ExternalSecret : un ExternalSecret réintroduirait la dépendance
       ESO → OpenBao au démarrage, ce qui viole le principe « Sealed Secrets
