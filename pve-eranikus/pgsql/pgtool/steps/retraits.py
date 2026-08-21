@@ -47,10 +47,10 @@ class RetraitOrphelin:
         if not self.chemin.exists():
             # Une fois fait, un retrait ne se redit pas : « zéro modification
             # sur un état conforme » vaut aussi pour ce qui n'est plus là.
-            return Outcome("ok", f"déjà retiré — {self.remplace_par} le remplace")
+            return Outcome("ok", f"déjà retiré, remplacé par {self.remplace_par}")
         return Outcome(
             "drift",
-            f"{self.chemin} est périmé — {self.remplace_par} le remplace",
+            f"{self.chemin} est périmé, remplacé par {self.remplace_par}",
             (
                 Action(
                     f"rm {self.chemin}",

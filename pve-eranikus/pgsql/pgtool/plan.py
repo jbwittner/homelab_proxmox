@@ -131,7 +131,7 @@ def etapes(ctx: Context) -> list:
         # remplaçant est en défaut laisserait le nœud sans copie hors-site.
         H.RetraitOrphelin(
             SCRIPT_HORSSITE,
-            remplace_par="« pg offsite », appelé par l'unité",
+            remplace_par="« pg offsite », que l'unité appelle",
             requires=("pgbk-offsite.service",),
         ),
 
