@@ -233,6 +233,24 @@ class Systemd:
         res = self.runner.read("systemctl", "show", unit, "-p", prop, "--value")
         return res.out
 
+    def environment(self, unit: str) -> dict[str, str]:
+        """L'environnement que systemd donnera au processus.
+
+        Drop-in compris, et c'est tout l'intérêt : c'est le drop-in qui porte
+        les valeurs propres à CETTE machine. Une commande lancée à la main
+        n'hérite de rien, donc lire le shell courant ne dirait rien de ce qui
+        tournera cette nuit.
+
+        Un fragment sans « = » est ignoré plutôt que de fabriquer une clé vide,
+        qui écraserait ensuite une vraie valeur.
+        """
+        valeurs: dict[str, str] = {}
+        for fragment in self.show(unit, "Environment").split():
+            cle, sep, valeur = fragment.partition("=")
+            if sep and cle:
+                valeurs[cle] = valeur
+        return valeurs
+
     def next_run(self, timer: str) -> str:
         return self.show(timer, "NextElapseUSecRealtime")
 

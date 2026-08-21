@@ -83,6 +83,53 @@ def _offsite(args: argparse.Namespace) -> int:
     return run(cfg, runner, dry_run=args.dry_run, now=time.time())
 
 
+# ─── pg status ───────────────────────────────────────────────────────────────
+
+
+def _status(args: argparse.Namespace) -> int:
+    """Les trois maillons du montage, regardés ENSEMBLE.
+
+    `pg deploy --status` dit si les fichiers sont en place ; celui-ci dit si le
+    montage fonctionne. Ce sont deux questions différentes, et la seconde est
+    celle qui manquait : un timer armé qui échoue chaque nuit reste armé.
+    """
+    import os
+
+    from core.log import error, info, step, warn
+    from core.runner import Runner
+    from pgtool.deploy import Options, Paths
+    from pgtool.etat import alarmes, code_de_sortie, relever, render_etat
+    from pgtool.location import Refus, read_conf, resolve_ctid
+
+    if os.geteuid() != 0:
+        raise Refus("à lancer en root sur le nœud (pct l'exige)")
+
+    runner = Runner()
+    ctid = resolve_ctid(flag=args.ctid, env=os.environ, conf=read_conf())
+
+    from types import SimpleNamespace
+
+    ctx = SimpleNamespace(
+        runner=runner,
+        opts=Options(ctid=ctid, do_offsite=not args.no_offsite),
+    )
+    etat = relever(ctx)
+
+    # Le tableau est une DONNÉE : il se recopie tel quel, sans horodatage. Les
+    # alarmes sont des messages sur cette donnée, elles passent donc par la
+    # journalisation — la distinction posée dans core.log.
+    print(render_etat(etat))
+    dits = alarmes(etat)
+    if not dits:
+        print()
+        step("tout est en ligne")
+        return 0
+    print()
+    for ligne in dits:
+        warn(ligne)
+    return code_de_sortie(etat)
+
+
 # ─── pg deploy ───────────────────────────────────────────────────────────────
 
 # CTID par défaut, et le seul de tout l'outillage. `pg deploy` doit pouvoir
@@ -457,6 +504,24 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     offsite.set_defaults(fonction=_offsite)
+
+    etat = sous.add_parser(
+        "status",
+        help="l'état du montage : sauvegardes, timers des deux côtés, hors-site",
+        description=(
+            "Constate, ne modifie rien. « pg deploy --status » dit si les "
+            "fichiers sont en place ; celui-ci dit si le montage fonctionne."
+        ),
+        epilog=(
+            "Codes de retour : 0 tout en ligne | 1 au moins une alarme. Un "
+            "maillon non constaté est une alarme, pas un silence."
+        ),
+    )
+    etat.add_argument(
+        "--no-offsite", action="store_true",
+        help="n'interroge pas le bucket (utile hors ligne)",
+    )
+    etat.set_defaults(fonction=_status)
 
     deploy = sous.add_parser(
         "deploy",
