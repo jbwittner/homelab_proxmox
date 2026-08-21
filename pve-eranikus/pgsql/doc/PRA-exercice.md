@@ -456,7 +456,44 @@ exit
 
 | Date | Type | Instantané joué | RTO mesuré | Anomalies | Corrigé dans |
 |---|---|---|---|---|---|
-| *(à remplir au premier exercice)* | court / complet / bascule | | | | |
+| 2026-08-21 | bascule | `20260821-110735` (local, dépôt détourné) | sans objet | **4**, détaillées ci-dessous | `851f90f`, `07f263f`, `ced80d1` |
+| *(prochain : exercice court, trimestriel)* | | | | | |
+
+### 2026-08-21 — exercice de bascule
+
+Joué sur le CT 200, locataire `pra` (500 lignes), dépôt détourné vers
+`/tmp/pra-backups`. La production n'a pas bougé : 8 instantanés avant et après,
+même `latest`, rien de nouveau dans le bucket.
+
+**Résultat : le moteur Python restaure correctement.** 500 lignes rendues après
+un `DELETE` de 400, somme identique, ACL réappliquées (`pra=CTc/pra`, `PUBLIC`
+sans `CONNECT`), aucune table étrangère, code de retour 0.
+
+**Le défaut qui justifiait la bascule est constaté côte à côte**, sur le même
+instantané et la même base : restaurer une base qui n'existe pas rend **0** en
+Python et **1** en bash, alors que les deux réussissent et produisent le même
+état. Un appelant qui vérifie le code conclurait à un échec.
+
+**Quatre anomalies, toutes corrigées dans le dépôt** — c'est pour les trouver
+qu'on joue l'exercice :
+
+| Ce qui n'allait pas | Conséquence | Corrigé dans |
+|---|---|---|
+| Le filet `pre-restore-*` était créé par root, sans `chown` vers `postgres` | le `pg_dump` du filet aurait été refusé, **au moment précis où l'on sauvegarde avant d'écraser** | `851f90f` |
+| La procédure écrivait `VAR=… sudo …` | `sudo` efface l'environnement : la sauvegarde d'exercice serait partie en production puis **dans le bucket**, où rien ne peut l'effacer | `851f90f` |
+| `psql -c` ne substitue pas les variables `:"var"` | la **réapplication des ACL n'a jamais fonctionné** depuis la création de `restore.py` | `07f263f` |
+| Le contrôle d'isolation passait le `datacl` en minuscules et découpait sur la virgule | `C` (CREATE) confondu avec `c` (CONNECT), et une seule entrée examinée : faux positif d'un côté, **faux négatif** de l'autre | `ced80d1` |
+
+La troisième est la plus grave : sans cet exercice, la bascule se serait faite
+avec une réapplication des ACL morte, et on l'aurait découvert un jour de
+restauration réelle — en constatant que `PUBLIC` peut se connecter à une base
+de locataire.
+
+**Décision :** *(à cocher après le démontage — tant qu'elle n'est pas prise,
+`ct/pgbk.sh` reste posé)*
+
+- [ ] Le moteur bash peut être retiré du conteneur (étape 8 de la migration).
+
 
 ## Ce que l'exercice ne couvre pas
 
