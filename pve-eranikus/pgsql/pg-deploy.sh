@@ -73,6 +73,8 @@ MP=/etc/pgsql-git                                    # cible du montage dans le 
 HOST_PGBK=/usr/local/sbin/pgbk
 HOST_PG=/usr/local/sbin/pg                           # point d'entree unique
 HOST_LIB=/usr/local/lib/pgtool                       # arbre d'import de pg
+CT_LIB=/usr/local/lib/pgtool                         # le meme, dans le CT
+CT_PG=/usr/local/bin/pg                              # point d'entree du CT
 LIB_SRC="$(cd "$SRC/../.." && pwd)/lib"              # briques partagees du depot
 HOST_OFFSITE=/usr/local/bin/pgbk-offsite             # copie hors-site, cote HOTE
 OFFSITE_UNIT=/etc/systemd/system/pgbk-offsite.service
@@ -399,6 +401,22 @@ container_packages() {
         note POSE "sudo (CT)"
     fi
 
+    # python3 vient du template Debian, pas d'une decision explicite : le
+    # moteur en depend, autant le constater ici que le decouvrir au moment
+    # d'une restauration.
+    if ct test -x /usr/bin/python3 2>/dev/null; then
+        log "  python3 present (CT)"
+        note OK "python3 (CT)"
+    elif [[ $DO_INSTALL -eq 0 ]]; then
+        warn "python3 absent du CT et --no-install : le moteur pg ne sera pas pose"
+        note KO "python3 (CT, absent)"
+    else
+        log "  installation de python3 dans le CT"
+        run ct apt-get update -qq
+        run ct env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-minimal
+        note POSE "python3 (CT)"
+    fi
+
     # LVM-thin : sans fstrim, les blocs liberes ne sont jamais rendus au pool,
     # qui est surprovisionne. Un pool sature arrete net le serveur.
     if ct systemctl is-enabled --quiet fstrim.timer 2>/dev/null; then
@@ -466,6 +484,98 @@ container_setup() {
         log "  reload de postgresql"
         run ct systemctl reload postgresql
     fi
+}
+
+# Arbre d'import DANS le conteneur. Seuls core et pgtool y vont : proxmox ne
+# quitte JAMAIS l'hote, et un conteneur n'a rien a faire avec pct.
+CT_PY_TREE=("$LIB_SRC/core" "$SRC/pgtool")
+
+ct_py_manifest() {
+    local src f
+    for src in "${CT_PY_TREE[@]}"; do
+        while IFS= read -r f; do
+            printf '%s/%s\t%s\n' "$(basename "$src")" "${f#"$src"/}" "$f"
+        done < <(find "$src" -type f -name '*.py' | sort)
+    done
+}
+
+# Empreintes des fichiers deja presents dans le CT, en UN aller-retour plutot
+# qu'un « pct exec cmp » par fichier.
+ct_digests() {
+    # Ne retenir QUE des lignes « <64 hex><2 espaces><chemin> ». Sans ce filtre,
+    # n'importe quelle sortie inattendue du conteneur — un avertissement, une
+    # ligne de shell — serait lue comme un fichier present, donc comme un
+    # fichier a RETIRER a l'etape d'elagage. Constate au banc d'essai, qui
+    # produisait « rm -f /usr/local/lib/pgtool/1 ».
+    ct sh -c 'cd "$1" 2>/dev/null && find . -type f -exec sha256sum {} + || true' \
+       sh "$CT_LIB" 2>/dev/null \
+      | sed -n 's#^\([0-9a-f]\{64\}\)  \./#\1  #p'
+}
+
+container_pgtool() {
+    log "== Moteur Python du CT $CTID"
+
+    if ! ct test -x /usr/bin/python3 2>/dev/null; then
+        warn "python3 absent du CT $CTID — moteur non pose, pgbk reste en place"
+        note KO "$CT_LIB (python3 absent)"
+        return 0
+    fi
+
+    # POUSSE, PAS MONTE. Le bind-mount ne couvre que ct/, et l'y ajouter
+    # exposerait le moteur a un « git pull » en cours : un arbre d'import a
+    # moitie a jour donne un ImportError au pire moment. « pct push » depose
+    # une copie figee jusqu'au prochain deploiement.
+    local changed=0 rel src empreinte
+    local want; want=$(mktemp)
+    local have; have=$(mktemp)
+    ct_digests > "$have" || true
+
+    while IFS=$'\t' read -r rel src; do
+        printf '%s\n' "$rel" >> "$want"
+        empreinte=$(sha256sum "$src" | cut -d' ' -f1)
+        grep -qxF "$empreinte  $rel" "$have" || changed=1
+    done < <(ct_py_manifest)
+
+    # Ce que le depot ne contient plus doit partir : un module renomme
+    # laisserait son ancetre, qui continuerait de s'importer.
+    local -a extra=()
+    while IFS= read -r rel; do
+        [[ -n $rel ]] || continue
+        grep -qxF "$rel" "$want" || extra+=("$rel")
+    done < <(cut -d' ' -f3- "$have")
+    [[ ${#extra[@]} -gt 0 ]] && changed=1
+
+    if [[ $changed -eq 0 ]]; then
+        log "  $CT_LIB a jour dans le CT"
+        note OK "$CT_LIB (CT)"
+    else
+        log "  depot de $CT_LIB dans le CT"
+        while IFS=$'\t' read -r rel src; do
+            run ct mkdir -p "$CT_LIB/$(dirname "$rel")"
+            run pct push "$CTID" "$src" "$CT_LIB/$rel" --perms 0644
+        done < <(ct_py_manifest)
+        for rel in "${extra[@]}"; do
+            log "  retrait de $rel (absent du depot)"
+            run ct rm -f "$CT_LIB/$rel"
+        done
+        note POSE "$CT_LIB (CT)"
+    fi
+    rm -f "$want" "$have"
+
+    # Le lanceur, seul fichier executable de l'ensemble. Compare par empreinte
+    # et non par redirection : « pct exec » n'est pas un tube ordinaire.
+    local pg_local pg_distant
+    pg_local=$(sha256sum "$SRC/pg" | cut -d' ' -f1)
+    pg_distant=$(ct sha256sum "$CT_PG" 2>/dev/null | cut -d' ' -f1 || true)
+    if [[ $pg_local == "${pg_distant:-}" ]]; then
+        log "  $CT_PG a jour"
+        note OK "$CT_PG (CT)"
+    else
+        log "  pose de $CT_PG"
+        run pct push "$CTID" "$SRC/pg" "$CT_PG" --perms 0755
+        note POSE "$CT_PG (CT)"
+    fi
+    log
 }
 
 # ------------------------------------------------------------ C. controles
@@ -1010,6 +1120,7 @@ fi
 container_setup
 log
 write_conf
+container_pgtool
 host_wrapper
 host_pgtool
 

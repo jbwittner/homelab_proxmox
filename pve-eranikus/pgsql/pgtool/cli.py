@@ -99,6 +99,115 @@ def _positionnels(args: argparse.Namespace, commande: str) -> list[str]:
 
 
 def _deleguer(args: argparse.Namespace) -> int:
+    """Répartition selon l'endroit : le nœud achemine, le conteneur travaille.
+
+    Un seul fichier, deux rôles, et c'est la présence de `pct` qui tranche.
+    """
+    from core.runner import Runner
+    from pgtool.location import Where, detect
+
+    runner = Runner()
+    if detect(runner) is Where.CONTAINER:
+        return _moteur(args, runner)
+    return _acheminer(args, runner)
+
+
+def _moteur(args: argparse.Namespace, runner) -> int:
+    """Mode moteur : on est DANS le conteneur, on fait le travail.
+
+    Aucune trace de Proxmox ici — on ne voit que le dépôt de sauvegardes, un
+    cluster sur sa socket locale et systemd. Les imports sont locaux à la
+    fonction : `pgtool` est poussé dans le CT sans `proxmox`, et un import en
+    tête de module ferait échouer la commande sur un manque sans rapport.
+    """
+    import os
+    import time
+    from pathlib import Path
+
+    from core.commands import Psql, Systemd
+    from core.log import detail, info, step, warn
+    from pgtool.engine import (
+        DeleteRefused,
+        describe_delete,
+        do_delete,
+        plan_delete,
+        render_list,
+        render_show,
+    )
+    from pgtool.location import Refus, confirm
+    from pgtool.restore import RestoreError, restore, verify
+    from pgtool.snapshots import Store
+
+    if os.geteuid() != 0:
+        raise Refus(
+            "à lancer en root : « pg » depuis le nœud, "
+            "ou dans le CT après « pct enter »"
+        )
+
+    dest = Path(os.environ.get("PG_BACKUP_DEST", "/var/backups/postgresql"))
+    store = Store(dest)
+    psql = Psql(runner)
+    commande = args.commande
+
+    try:
+        if commande == "list":
+            print(render_list(store, maintenant=time.time()))
+            return 0
+
+        if commande == "show":
+            print(render_show(store, args.instantane or "latest"))
+            return 0
+
+        if commande == "backup":
+            step("déclenchement de pg-backup.service")
+            systemd = Systemd(runner)
+            try:
+                systemd.start("pg-backup.service")
+            except Exception:
+                for ligne in systemd.journal("pg-backup", lines=20):
+                    warn(ligne)
+                raise Refus("la sauvegarde a échoué — voir le journal ci-dessus")
+            detail("\n".join(systemd.journal("pg-backup", lines=12)))
+            return 0
+
+        if commande == "verify":
+            verify(psql, database=args.base)
+            return 0
+
+        if commande == "restore":
+            if not args.yes:
+                # Atteignable seulement depuis « pct enter » : le nœud, lui,
+                # pose la question là où il y a un terminal et passe --yes.
+                confirm(f"ÉCRASE la base {args.base}", args.base,
+                        "le nom de la base")
+            rapport = restore(psql, runner, store, database=args.base,
+                              ref=args.instantane or "latest")
+            verify(psql, database=rapport.database, owner=rapport.owner)
+            return 0
+
+        if commande == "delete":
+            vise = plan_delete(store, args.instantane)
+            if args.plan:
+                # Contrat : la sortie standard ne porte QUE le nom résolu, le
+                # nœud la lit pour formuler sa question.
+                print(describe_delete(vise), file=sys.stderr, flush=True)
+                print(vise.name)
+                return 0
+            if not args.yes:
+                confirm(f"SUPPRIME l'instantané {vise.name}", vise.name,
+                        "son nom")
+            do_delete(store, vise)
+            return 0
+
+    except (DeleteRefused, RestoreError) as refus:
+        raise Refus(str(refus)) from refus
+    except LookupError as absent:
+        raise Refus(str(absent)) from absent
+
+    raise Refus(f"commande non portée dans le conteneur : {commande}")
+
+
+def _acheminer(args: argparse.Namespace, runner) -> int:
     """Mode hôte : on achemine, le conteneur travaille.
 
     Toute la valeur ajoutée est ici — les gardes, la résolution du CTID et les
@@ -107,26 +216,15 @@ def _deleguer(args: argparse.Namespace) -> int:
     """
     import os
 
-    from core.runner import Runner
     from pgtool.location import (
         Delegate,
         Refus,
-        Where,
         confirm,
-        detect,
         read_conf,
         resolve_ctid,
     )
 
-    runner = Runner()
     commande = args.commande
-
-    if detect(runner) is Where.CONTAINER:
-        # Le moteur est encore en bash à ce stade de la migration.
-        raise Refus(
-            "dans le conteneur, le moteur est « pgbk » — "
-            f"« pg {commande} » s'utilise depuis le nœud"
-        )
 
     if os.geteuid() != 0:
         raise Refus("à lancer en root sur le nœud (pct l'exige)")

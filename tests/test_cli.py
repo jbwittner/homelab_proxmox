@@ -165,13 +165,45 @@ def test_delete_annule_ne_delegue_pas(noeud, monkeypatch, capsys):
 # ─── refus d'emplacement ─────────────────────────────────────────────────────
 
 
-def test_dans_le_conteneur_la_facade_renvoie_au_moteur(monkeypatch, capsys):
-    """À ce stade de la migration le moteur est encore en bash. Le dire, plutôt
-    que de tomber sur un « pct : command not found »."""
+def test_dans_le_conteneur_cest_le_moteur_qui_repond(monkeypatch, capsys, tmp_path):
+    """Un seul fichier, deux rôles : sur le nœud il achemine, dans le CT il
+    travaille. C'est la présence de `pct` qui tranche, et rien d'autre."""
+    dest = tmp_path / "postgresql" / "20260820-093240"
+    dest.mkdir(parents=True)
+    for f in ("globals.sql", "forge.dump", "MANIFEST"):
+        (dest / f).write_text("x")
+
     monkeypatch.setattr(location, "detect", lambda _r: Where.CONTAINER)
     monkeypatch.setattr(runner_mod, "Runner", lambda *a, **k: FakeRunner())
+    monkeypatch.setattr("os.geteuid", lambda: 0)
+    monkeypatch.setenv("PG_BACKUP_DEST", str(tmp_path / "postgresql"))
+
+    assert main(["list"]) == 0
+    sortie = capsys.readouterr().out
+    assert "20260820-093240" in sortie
+    assert "← latest" in sortie
+
+
+def test_dans_le_conteneur_pct_nest_jamais_appele(monkeypatch, tmp_path):
+    """Le moteur ne connaît pas Proxmox. S'il appelait `pct`, il échouerait
+    dans le seul endroit où il est censé tourner."""
+    (tmp_path / "postgresql").mkdir()
+    faux = FakeRunner()
+    monkeypatch.setattr(location, "detect", lambda _r: Where.CONTAINER)
+    monkeypatch.setattr(runner_mod, "Runner", lambda *a, **k: faux)
+    monkeypatch.setattr("os.geteuid", lambda: 0)
+    monkeypatch.setenv("PG_BACKUP_DEST", str(tmp_path / "postgresql"))
+
+    main(["list"])
+    assert not any(argv and argv[0] == "pct" for argv in faux.calls)
+
+
+def test_dans_le_conteneur_sans_root_on_refuse(monkeypatch, capsys):
+    monkeypatch.setattr(location, "detect", lambda _r: Where.CONTAINER)
+    monkeypatch.setattr(runner_mod, "Runner", lambda *a, **k: FakeRunner())
+    monkeypatch.setattr("os.geteuid", lambda: 1000)
     assert main(["list"]) == 1
-    assert "pgbk" in capsys.readouterr().err
+    assert "pct enter" in capsys.readouterr().err
 
 
 def test_sans_root_on_refuse_avant_de_toucher_a_quoi_que_ce_soit(

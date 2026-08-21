@@ -690,6 +690,46 @@ ce jour), ou un horodatage exact `AAAAMMJJ-HHMMSS`.
 les exécutions du timer — pas de divergence entre lancement manuel et
 automatique.
 
+### Le moteur Python du conteneur — 21 août 2026
+
+`pg` sait désormais travailler des deux côtés : sur le nœud il achemine, dans
+le CT il fait le travail. **Le moteur bash reste posé et reste celui qui
+tourne** ; le Python est déposé à côté, et la bascule n'aura lieu qu'après une
+répétition de restauration sur base jetable.
+
+**Comment il arrive dans le conteneur.** Par `pct push`, pas par le montage.
+`ct/` est la charge utile du `mp1`, et y ajouter le moteur l'exposerait à un
+`git pull` en cours : un arbre d'import à moitié à jour donne un `ImportError`
+au pire moment. `pct push` dépose une copie figée jusqu'au prochain
+déploiement. Le CT reçoit `core/` et `pgtool/` en `/usr/local/lib/pgtool`,
+**jamais `proxmox/`** — il n'a rien à faire avec `pct`, et un test vérifie que
+la charge utile s'importe entièrement sans lui.
+
+`pg-deploy.sh` compare les empreintes en un seul aller-retour, ne pousse que ce
+qui diffère, et retire ce que le dépôt ne contient plus — sans quoi un module
+renommé laisserait son ancêtre, qui continuerait de s'importer.
+
+**Ce que le portage corrige.**
+
+| Défaut du bash | Effet |
+|---|---|
+| `cmd_restore` finit par `[[ -n ${pre:-} ]] && log …` | code 1 sur une restauration **réussie** d'une base qui n'existait pas |
+| `verify` cherche `=Tc/` n'importe où dans le `datacl` | `forge=Tc/postgres` — un droit du locataire — était lu comme « PUBLIC peut se connecter » |
+| `verify` compare `tableowner` au **nom de la base** | avertissement à chaque contrôle si le rôle porte un autre nom |
+| `resolve` accepte `<horodatage>.part` | un instantané incomplet passait l'analyse, seul `delete` le rattrapait |
+
+**Ce que le portage unifie.** La rétention est celle de `find -mtime`, et elle
+n'est pas exprimée en jours calendaires : l'âge est tronqué en périodes de 24 h
+et comparé strictement, donc `-mtime +14` supprime à partir de **15 × 24 h**.
+Le bash comptait autrement dans `pgbk list` (jours) et dans `prune`
+(`find -mtime`) ; il n'y a plus qu'une implémentation, et elle est testée au
+passage à l'heure d'hiver — l'epoch ignore les heures d'été, une implémentation
+calendaire se décalerait d'un cran ce jour-là.
+
+**Ce qui reste à faire avant la bascule** : le `--json` de `pg-backup.sh`, et
+surtout la répétition de restauration ([doc/PRA-exercice.md](PRA-exercice.md)).
+Tant qu'elle n'a pas été jouée, `ct/pgbk.sh` reste le moteur.
+
 ### Ce que fait `pgbk restore`
 
 1. Capture le propriétaire **avant** le `dropdb` : il disparaît avec la base.

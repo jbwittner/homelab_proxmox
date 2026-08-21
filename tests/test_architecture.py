@@ -174,3 +174,30 @@ def test_pytest_nest_jamais_importe_par_la_production():
     """pytest est admis en développement, jamais importé par le code livré."""
     for chemin in SOURCES:
         assert "pytest" not in _modules_importes(chemin), chemin.name
+
+
+def test_la_charge_utile_du_conteneur_simporte_seule(tmp_path):
+    """Ce que `pct push` dépose dans le CT : `core/` et `pgtool/`, jamais
+    `proxmox/`. Le moteur doit s'importer entièrement dans ces conditions —
+    sinon il échoue dans le seul endroit où il est censé tourner.
+
+    C'est aussi ce qui impose les imports paresseux de `cli.py`.
+    """
+    faux_ct = tmp_path / "usr-local-lib-pgtool"
+    faux_ct.mkdir()
+    (faux_ct / "core").symlink_to(CORE, target_is_directory=True)
+    (faux_ct / "pgtool").symlink_to(
+        REPO / "pve-eranikus" / "pgsql" / "pgtool", target_is_directory=True
+    )
+
+    code = (
+        f"import sys; sys.path.insert(0, {str(faux_ct)!r}); "
+        "import importlib.util as u; "
+        "assert u.find_spec('proxmox') is None, 'proxmox ne doit pas être dans le CT'; "
+        "import pgtool.cli, pgtool.engine, pgtool.snapshots, pgtool.restore; "
+        "print('ok')"
+    )
+    res = subprocess.run([sys.executable, "-I", "-c", code],
+                         capture_output=True, text=True, cwd=str(tmp_path))
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert res.stdout.strip() == "ok"

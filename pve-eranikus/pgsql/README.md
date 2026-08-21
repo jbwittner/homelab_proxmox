@@ -85,7 +85,9 @@ TTY, une question posée depuis le conteneur ne verrait jamais la réponse. Pour
 `delete`, la question porte sur l'instantané **réellement visé** et non sur ce
 qui a été tapé — `20260819` désigne la plus récente de ce jour-là.
 
-`pgbk` reste installé le temps de constater la parité.
+`pgbk` reste installé le temps de constater la parité — **des deux côtés** : le
+moteur Python est posé dans le CT à côté du bash, et c'est encore le bash qui
+tourne tant qu'une répétition de restauration n'a pas été jouée.
 
 Créer un compte ou un locataire — le mot de passe généré n'est affiché
 **qu'une fois**, et rien ne bouge si le rôle existe déjà :
@@ -126,6 +128,7 @@ clé GCS. `pg-deploy.sh`, ce fichier et `doc/` restent à la racine du service.
 | `pg-deploy.sh` | **hôte** | joué depuis le dépôt |
 | `pg`, `pgtool/` + `lib/` (racine du dépôt) | **hôte** | `/usr/local/sbin/pg`, arbre d'import en `/usr/local/lib/pgtool` |
 | `ct/pgbk.sh` | **hôte** et **CT** | `/usr/local/sbin/pgbk` (hôte), `/usr/local/bin/pgbk` (CT) |
+| `pgtool/` + `lib/core/` poussés par `pct push` | **CT 200** | `/usr/local/lib/pgtool/`, lanceur en `/usr/local/bin/pg` |
 | `host/pgbk-offsite.sh` | **hôte** | `/usr/local/bin/pgbk-offsite` |
 | `host/pgbk-offsite.service` / `.timer` | **hôte** | `/etc/systemd/system/` de l'hôte |
 | `ct/pg-backup.sh` | **CT 200** | `/usr/local/bin/pg-backup.sh` |
