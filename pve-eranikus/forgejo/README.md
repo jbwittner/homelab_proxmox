@@ -102,6 +102,33 @@ pose exactement ce que `ct/VERSION` dit.
 Après un `--resolve`, **commiter le changement** : l'épinglage n'a de valeur
 que tracé. Puis `fj deploy`.
 
+### Depuis un poste de développement
+
+`fj version` ne touche ni à `pct` ni au conteneur : il lit le dépôt et
+interroge Codeberg. Il se joue donc très bien depuis le Mac, dans le dépôt,
+au moment où l'on s'apprête à commiter l'épinglage.
+
+Une réserve, et elle surprend : le lanceur porte `#!/usr/bin/python3` — un
+chemin **absolu**, parce que le PATH de systemd et de `pct exec` est minimal.
+Sur macOS, `/usr/bin/python3` est celui des Command Line Tools, souvent bien
+plus ancien que le `python3` du PATH. D'où un refus qui n'a rien à voir avec
+la version qu'on croit avoir :
+
+```
+python3 3.11 minimum requis, 3.9.6 trouvé
+(/Library/Developer/CommandLineTools/usr/bin/python3).
+```
+
+Passer l'interpréteur explicitement suffit — le lanceur retrouve seul le reste :
+
+```bash
+python3 ./pve-eranikus/forgejo/fj version --resolve
+```
+
+Le refus dit lui-même quoi taper depuis le 21 août 2026 ; il envoyait
+auparavant « installer python3 dans le conteneur », c'est-à-dire corriger la
+bonne chose au mauvais endroit.
+
 ## Gestes courants
 
 Tout se tape **sur le nœud**, pas dans le CT.
