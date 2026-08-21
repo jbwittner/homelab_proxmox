@@ -23,3 +23,11 @@ __pycache__/
 
 # Worktrees et etat local de l'outillage d'assistance.
 .claude/
+
+# Metadonnees du Finder macOS. Elles etaient SUIVIES par git (commit d6ee7c9,
+# « debug line test »), et ce n'etait pas anodin : le Finder les reecrit des
+# qu'un repertoire change de contenu. Une fusion qui cree un repertoire salit
+# donc l'arbre de travail dans la foulee, et la fusion SUIVANTE peut se voir
+# refuser pour une modification que personne n'a faite. Retirees du suivi le
+# 21 aout 2026, par prevention : ce jour-la elles n'etaient pas en cause.
+.DS_Store
