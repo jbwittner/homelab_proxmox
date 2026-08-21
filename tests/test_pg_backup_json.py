@@ -233,3 +233,45 @@ esac
         {"bin": binaires, "dest": dest}, "--json"
     ).stdout)
     assert '"' in donnees["postgresql"] and "\\" in donnees["postgresql"]
+
+
+def test_un_echec_dans_une_substitution_ne_corrompt_pas_lobjet(cluster):
+    """`set -E` fait hériter le trap ERR aux sous-shells. Un `psql` qui échoue
+    dans une substitution de commande déclenchait donc l'émission du JSON
+    À L'INTÉRIEUR de la substitution, et l'objet entier se retrouvait capturé
+    comme valeur d'un champ.
+
+    Constaté en production le 21 août 2026, sur un pg-backup.sh lancé en root
+    au lieu de postgres :
+
+        "postgresql": "{\\"schema_version\\":1,\\"status\\":\\"error\\",…}"
+
+    Le rapport machine était corrompu exactement au moment où il sert.
+    """
+    _stub(cluster["bin"], "psql", """
+case "$*" in
+  *"SHOW server_version"*) echo 'role "root" does not exist' >&2; exit 2 ;;
+  *)                       printf '' ;;
+esac
+""")
+    res = _lancer(cluster, "--json", attendu=2)
+    donnees = json.loads(res.stdout)          # un SEUL objet, et il est valide
+    assert donnees["status"] == "error"
+    for cle, valeur in donnees.items():
+        if isinstance(valeur, str):
+            assert "schema_version" not in valeur, (
+                f"le champ {cle} contient un objet imbriqué"
+            )
+
+
+def test_un_seul_objet_est_emis_par_execution(cluster):
+    """Deux objets à la suite ne forment pas un JSON valide, et un appelant qui
+    lit le premier croirait avoir tout su."""
+    _stub(cluster["bin"], "psql", """
+case "$*" in
+  *"SHOW server_version"*) exit 2 ;;
+  *)                       printf '' ;;
+esac
+""")
+    res = _lancer(cluster, "--json", attendu=2)
+    assert res.stdout.count('"schema_version"') == 1

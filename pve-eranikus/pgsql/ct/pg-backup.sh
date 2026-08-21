@@ -118,8 +118,19 @@ jnum() {
   esac
 }
 
+# PID du shell principal. `set -E` fait hériter le trap ERR aux sous-shells :
+# un psql qui échoue dans une substitution de commande y déclencherait
+# l'émission du rapport, et l'objet entier serait capturé comme valeur de la
+# variable qu'on affectait. Constaté le 21 août 2026 sur un lancement en root :
+# le champ « postgresql » contenait un objet JSON complet.
+#
+# Le rapport n'est donc émis QUE depuis le shell principal ; le trap du parent
+# le produira de toute façon, une fois, au bon endroit.
+MAIN_PID=$$
+
 emit_json() {
   [[ $JSON -eq 1 ]] || return 0
+  [[ $BASHPID == "$MAIN_PID" ]] || return 0
   local statut=$1 code=$2
   local final='null'
   [[ -n $FINAL_OK ]] && final=$(jstr "$FINAL_OK")
