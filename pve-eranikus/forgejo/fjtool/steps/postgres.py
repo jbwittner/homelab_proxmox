@@ -47,6 +47,20 @@ MOT_DE_PASSE = f"{CT_SECRETS}/db_password"
 
 NOM_CONNEXION = "connexion à la base (CT 200)"
 
+# Une ligne de `.pgpass` est `hôte:port:base:utilisateur:motdepasse` : les
+# DEUX-POINTS séparent, l'ANTISLASH échappe. Un mot de passe qui en contient
+# casse la ligne, psql lit une valeur tronquée, et le serveur répond :
+#
+#     FATAL:  password authentication failed for user "forgejo"
+#
+# c'est-à-dire EXACTEMENT le message d'un mauvais mot de passe. On part alors
+# vérifier le secret — qui est juste — et rien n'y fait.
+#
+# L'ordre des deux substitutions n'est pas indifférent : l'antislash d'abord,
+# sinon celui qu'on vient d'ajouter devant un deux-points serait échappé à son
+# tour et rendrait la ligne fausse d'une autre façon.
+ECHAPPE_PGPASS = r"sed -e 's/\\/\\\\/g' -e 's/:/\\:/g'"
+
 
 class EtapeP:
     section = "P"
@@ -143,7 +157,7 @@ class ConnexionBase(EtapeP):
         # PGPASSWORD : un `ps` pendant l'opération le montrerait.
         res = ct.read(
             "sh", "-c",
-            'p=$(cat "$1") || exit 1; '
+            'p=$(cat "$1" | ' + ECHAPPE_PGPASS + ') || exit 1; '
             'f=$(mktemp) || exit 1; '
             'chmod 600 "$f"; '
             'printf "%s:%s:%s:%s:%s\\n" "$2" "$3" "$4" "$5" "$p" > "$f"; '
@@ -165,6 +179,38 @@ class ConnexionBase(EtapeP):
         return Outcome(
             "error",
             f"Forgejo ne joint pas sa base sur le CT 200 — {cause}\n"
-            "         créer le locataire : pg deploy --tenant forgejo (CT 200)\n"
-            "         puis la ligne hostssl dans son pg_hba.conf, avant le reject",
+            + _remede(cause),
         )
+
+
+# À chaque cause son remède, et à un seul. Donner les trois à chaque fois
+# obligerait à choisir soi-même celui qui s'applique — c'est-à-dire à refaire
+# le diagnostic que le message vient de faire.
+_REMEDES = (
+    ("no pg_hba.conf entry",
+     "la ligne du locataire manque, ou elle est APRÈS le reject.\n"
+     "         L'ajouter dans pve-eranikus/pgsql/ct/pg_hba.conf, avant le\n"
+     "         reject, puis : pg deploy"),
+    ("password authentication failed",
+     "le mot de passe déposé n'est pas celui du rôle.\n"
+     "         Si « pg deploy --tenant forgejo » répond « existe — inchangé »,\n"
+     "         c'est normal : il ne fait jamais tourner un secret déjà rangé.\n"
+     "         Reprendre la valeur dans OpenBao, ou en poser une nouvelle par\n"
+     "         ALTER ROLE depuis la porte peer du CT 200 — voir\n"
+     "         doc/RUNBOOK.md section 3."),
+    ("does not exist",
+     "le locataire n'a jamais été créé : pg deploy --tenant forgejo (CT 200)"),
+    ("could not connect",
+     "le CT 200 ne répond pas sur 192.168.1.56:5432 — pct status 200"),
+)
+
+
+def _remede(cause: str) -> str:
+    for motif, remede in _REMEDES:
+        if motif in cause:
+            return f"         {remede}"
+    return (
+        "         cause non reconnue — vérifier dans l'ordre : le CT 200 tourne,\n"
+        "         le locataire existe (pg deploy --tenant forgejo), la ligne\n"
+        "         hostssl est avant le reject, le mot de passe correspond."
+    )

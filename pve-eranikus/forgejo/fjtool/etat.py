@@ -112,11 +112,16 @@ def _base(etat: Etat, ct) -> None:
     répondre au CT 200 lui-même et refuser celui-ci, faute d'une ligne dans
     `pg_hba.conf`.
     """
-    from fjtool.steps.postgres import BASE, HOTE_PG, MOT_DE_PASSE, PORT_PG, ROLE
+    from fjtool.steps.postgres import (
+        BASE, ECHAPPE_PGPASS, HOTE_PG, MOT_DE_PASSE, PORT_PG, ROLE,
+    )
 
     res = ct.read(
         "sh", "-c",
-        'p=$(cat "$1" 2>/dev/null) || exit 1; '
+        # Même échappement que la sonde du déploiement : les deux-points d'un
+        # mot de passe casseraient la ligne `.pgpass` et produiraient un
+        # « password authentication failed » indiscernable d'un mauvais secret.
+        'p=$(cat "$1" 2>/dev/null | ' + ECHAPPE_PGPASS + ') || exit 1; '
         'f=$(mktemp) || exit 1; '
         'chmod 600 "$f"; '
         'printf "%s:%s:%s:%s:%s\\n" "$2" "$3" "$4" "$5" "$p" > "$f"; '

@@ -442,8 +442,72 @@ quelle, parce que c'est elle qui tranche :
 | Message | Cause | Remède |
 |---|---|---|
 | `no pg_hba.conf entry for host "192.168.1.57"` | la ligne du locataire manque, ou est après le `reject` | l'ajouter sur le CT 200, puis `pg deploy` |
-| `password authentication failed for user "forgejo"` | le mot de passe déposé n'est pas celui du rôle | le reprendre dans OpenBao, ou `ALTER ROLE` depuis la porte `peer` du CT 200 |
+| `password authentication failed for user "forgejo"` | le mot de passe déposé n'est pas celui du rôle | voir ci-dessous |
 | `database "forgejo" does not exist` | le locataire n'a jamais été créé | `pg deploy --tenant forgejo` |
+
+### Reposer le mot de passe du locataire
+
+**Le cas le plus fréquent, et il surprend.** `pg deploy --tenant forgejo`
+répond « forgejo existe — inchangé » et n'affiche aucun mot de passe. Ce n'est
+pas un bug : il ne fait **jamais** tourner un secret déjà rangé dans OpenBao.
+Rejouer un déploiement de routine ne doit pas invalider un mot de passe que
+quelqu'un a noté quelque part.
+
+Conséquence : si la base existait déjà — parce qu'un `--tenant` a été joué un
+jour, ou parce qu'un déploiement précédent l'avait créée — vous n'obtiendrez
+jamais le mot de passe par cette commande. Il faut soit le retrouver, soit en
+poser un nouveau.
+
+**Le retrouver**, si OpenBao l'a :
+
+```bash
+bao kv get -field=db_password homelab/forgejo \
+  | pct exec 400 -- sh -c 'umask 027 && cat > /etc/forgejo/secrets/db_password'
+pct exec 400 -- chown root:git /etc/forgejo/secrets/db_password
+```
+
+**En poser un nouveau**, sinon. La porte `peer` du CT 200 permet de le faire
+sans connaître l'ancien — c'est exactement à ça qu'elle sert :
+
+```bash
+# Sur le nœud. Alphanumérique : rien à échapper nulle part, ni dans un
+# .pgpass, ni dans app.ini, ni dans un gestionnaire de mots de passe.
+NOUVEAU=$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 32)
+
+# Le poser sur le rôle. Le SQL part sur l'entrée standard et la valeur par
+# -v : c'est psql qui cite, donc aucun caractère ne peut changer le sens.
+printf "ALTER ROLE forgejo PASSWORD :'p';\n" \
+  | pct exec 200 -- sudo -u postgres psql -v ON_ERROR_STOP=1 -v p="$NOUVEAU" -q
+
+# Le déposer dans le CT 400
+printf '%s' "$NOUVEAU" \
+  | pct exec 400 -- sh -c 'umask 027 && cat > /etc/forgejo/secrets/db_password'
+pct exec 400 -- chown root:git /etc/forgejo/secrets/db_password
+
+# LE RANGER DANS OPENBAO, puis l'effacer du shell
+echo "$NOUVEAU"
+unset NOUVEAU
+```
+
+Puis rejouer `fj deploy` : `app.ini` est **rendu** à partir de ce fichier, donc
+il reprendra la nouvelle valeur tout seul.
+
+> Le mot de passe traverse brièvement l'argv de `psql` (via `-v`). C'est le
+> même compromis que `pg deploy --tenant`, et il est assumé : l'alternative —
+> un fichier temporaire — laisserait le secret sur un disque. Ici il ne vit que
+> le temps d'un appel, dans un `ps` que seul root peut lire.
+
+### Les deux-points dans un mot de passe
+
+La sonde de connexion écrit une ligne `.pgpass`, où **les deux-points séparent
+les champs et l'antislash échappe**. Un mot de passe qui en contient casserait
+la ligne, et le serveur répondrait `password authentication failed` — c'est-à-dire
+exactement le message d'un mauvais mot de passe, alors que le secret serait
+juste.
+
+`fj` échappe donc les deux caractères avant d'écrire la ligne. Mais tant qu'à
+faire, **s'en tenir à de l'alphanumérique** : c'est ce que produit
+`pg deploy --tenant`, et ça évite le problème partout à la fois.
 
 ### L'ordre de démarrage au boot du nœud
 
