@@ -134,6 +134,7 @@ def _moteur(args: argparse.Namespace, runner) -> int:
         plan_delete,
         render_list,
         render_show,
+        show_anomalies,
     )
     from pgtool.location import Refus, confirm
     from pgtool.restore import RestoreError, restore, verify
@@ -159,7 +160,10 @@ def _moteur(args: argparse.Namespace, runner) -> int:
             return 0
 
         if commande == "show":
-            print(render_show(store, args.instantane or "latest"))
+            reference = args.instantane or "latest"
+            print(render_show(store, reference))
+            for anomalie in show_anomalies(store.resolve(reference)):
+                warn(f"  {anomalie}")
             return 0
 
         if commande == "backup":

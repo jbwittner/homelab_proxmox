@@ -17,6 +17,7 @@ from pgtool.engine import (
     plan_delete,
     render_list,
     render_show,
+    show_anomalies,
 )
 from pgtool.snapshots import Store
 
@@ -250,3 +251,92 @@ def test_lespace_libre_sarrondit_au_dessus_comme_df(monkeypatch):
     monkeypatch.setattr(engine.shutil, "disk_usage",
                         lambda _p: Usage(51200 * MIO))
     assert engine.free_mb(_shutil.__file__) == 51200
+
+
+# ─── pg show : le mode et le propriétaire sont des faits de sécurité ─────────
+
+
+def test_show_affiche_le_mode_et_le_proprietaire(store):
+    """Les dumps doivent être en 600 et appartenir à postgres : `globals.sql`
+    porte les empreintes SCRAM de TOUS les rôles du cluster. `pg show` est la
+    commande avec laquelle on inspecte un instantané — l'information doit y
+    être. Le `ls -l` du bash la donnait ; le premier portage l'avait perdue."""
+    d = _snap(store.dest, "20260820-093240", fichiers=("forgejo.dump",))
+    (d / "forgejo.dump").chmod(0o600)
+    texte = render_show(store, "20260820-093240")
+    assert "600" in texte
+    import pwd
+
+    assert pwd.getpwuid(os.getuid()).pw_name in texte
+
+
+def test_show_trie_de_facon_lisible(store):
+    """MANIFEST en tête parce que « M » majuscule précède « f » minuscule
+    serait un artefact d'encodage, pas un choix.
+
+    On lit la SEULE section des fichiers : la phrase « pas de MANIFEST »
+    contient elle aussi le mot, et un filtre trop large la ramasserait — elle
+    l'a fait à la première écriture de ce test.
+    """
+    _snap(store.dest, "20260820-093240",
+          fichiers=("MANIFEST", "forgejo.dump", "globals.sql"))
+    lignes = render_show(store, "20260820-093240").splitlines()
+    debut = lignes.index("fichiers :")
+    noms = [l.split()[0] for l in lignes[debut + 1:]]
+    assert noms == ["forgejo.dump", "globals.sql", "MANIFEST"]
+
+
+def _sous_mon_compte(monkeypatch):
+    """Le propriétaire attendu est `postgres` en production ; la suite de
+    tests, elle, tourne sous un autre compte. On vérifie donc la RÈGLE, pas
+    l'environnement de celui qui lance les tests."""
+    import pwd
+
+    from pgtool import engine
+
+    monkeypatch.setattr(engine, "PROPRIETAIRE_ATTENDU",
+                        pwd.getpwuid(os.getuid()).pw_name)
+
+
+def test_un_mode_trop_ouvert_est_une_anomalie(store, monkeypatch):
+    """Le bash affichait le mode sans jamais le commenter. Une garantie qu'on
+    veut voir violée mérite d'être dite, pas seulement montrée."""
+    _sous_mon_compte(monkeypatch)
+    d = _snap(store.dest, "20260820-093240",
+              fichiers=("forgejo.dump", "globals.sql"))
+    (d / "forgejo.dump").chmod(0o644)
+    (d / "globals.sql").chmod(0o600)
+    anomalies = show_anomalies(store.resolve("20260820-093240"))
+    assert any("forgejo.dump" in a and "644" in a for a in anomalies)
+    assert not any("globals.sql" in a for a in anomalies)
+
+
+def test_un_proprietaire_inattendu_est_une_anomalie(store, monkeypatch):
+    """Un dump qui n'appartient pas à postgres est illisible par le moteur au
+    moment où l'on en a besoin."""
+    from pgtool import engine
+
+    monkeypatch.setattr(engine, "PROPRIETAIRE_ATTENDU", "un-autre-compte")
+    d = _snap(store.dest, "20260820-093240", fichiers=("forgejo.dump",))
+    (d / "forgejo.dump").chmod(0o600)
+    anomalies = show_anomalies(store.resolve("20260820-093240"))
+    assert any("appartient" in a for a in anomalies)
+
+
+def test_globals_absent_est_une_anomalie(store, monkeypatch):
+    """Sans les rôles, une restauration refusera : mieux vaut l'apprendre en
+    inspectant l'instantané qu'au moment de s'en servir."""
+    _sous_mon_compte(monkeypatch)
+    d = _snap(store.dest, "20260820-093240", fichiers=("forgejo.dump",))
+    (d / "forgejo.dump").chmod(0o600)
+    anomalies = show_anomalies(store.resolve("20260820-093240"))
+    assert any("globals.sql absent" in a for a in anomalies)
+
+
+def test_un_instantane_bien_range_na_pas_danomalie(store, monkeypatch):
+    _sous_mon_compte(monkeypatch)
+    d = _snap(store.dest, "20260820-093240",
+              fichiers=("forgejo.dump", "globals.sql", "MANIFEST"))
+    for f in d.iterdir():
+        f.chmod(0o600)
+    assert show_anomalies(store.resolve("20260820-093240")) == []

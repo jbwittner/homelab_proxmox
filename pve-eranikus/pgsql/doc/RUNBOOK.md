@@ -709,6 +709,13 @@ la charge utile s'importe entièrement sans lui.
 qui diffère, et retire ce que le dépôt ne contient plus — sans quoi un module
 renommé laisserait son ancêtre, qui continuerait de s'importer.
 
+**`pg show` en dit plus que son ancêtre.** Le `ls -l` du bash montrait le mode
+et le propriétaire sans jamais les commenter ; `pg show` les affiche ET signale
+ce qui s'en écarte — un fichier qui n'est pas en `600`, un propriétaire autre
+que `postgres`, un `globals.sql` manquant. `globals.sql` porte les empreintes
+SCRAM de **tous** les rôles du cluster : c'est le fichier le plus sensible de
+l'ensemble, et personne ne relit une colonne de `ls -l` en cherchant l'intrus.
+
 **Ce que le portage corrige.**
 
 | Défaut du bash | Effet |

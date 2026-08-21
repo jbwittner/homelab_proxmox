@@ -19,6 +19,7 @@ refus. Deux d'entre eux méritent d'être compris :
 from __future__ import annotations
 
 import math
+import pwd
 import shutil
 from pathlib import Path
 
@@ -181,6 +182,60 @@ def list_summary(store: Store) -> str:
     )
 
 
+# Ce qu'un fichier de sauvegarde doit être. `globals.sql` porte les empreintes
+# SCRAM de TOUS les rôles du cluster : c'est le fichier le plus sensible de
+# l'ensemble, et un mode trop ouvert le rend lisible par n'importe quel compte
+# du conteneur.
+MODE_ATTENDU = 0o600
+PROPRIETAIRE_ATTENDU = "postgres"
+
+
+def _proprietaire(uid: int) -> str:
+    """Nom du compte, ou son numéro si le passwd ne le connaît pas."""
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:  # pragma: no cover - dépend du système
+        return str(uid)
+
+
+def _fichiers_tries(instantane: Snapshot) -> list[str]:
+    """Tri insensible à la casse.
+
+    Un tri sur les octets mettrait MANIFEST en tête parce que « M » majuscule
+    précède « f » minuscule — un artefact d'encodage, pas un choix de lecture.
+    """
+    return sorted(instantane.files, key=str.lower)
+
+
+def show_anomalies(instantane: Snapshot) -> list[str]:
+    """Ce qui ne devrait pas être. Séparé du rendu : ce sont des messages.
+
+    Le bash affichait le mode et le propriétaire sans jamais les commenter.
+    Une garantie qu'on veut voir violée mérite d'être dite, pas seulement
+    montrée — personne ne relit une colonne de `ls -l` en cherchant l'intrus.
+    """
+    anomalies: list[str] = []
+    for nom in _fichiers_tries(instantane):
+        etat = (instantane.path / nom).stat()
+        mode = etat.st_mode & 0o777
+        if mode != MODE_ATTENDU:
+            anomalies.append(
+                f"{nom} est en {mode:o} — attendu {MODE_ATTENDU:o}"
+            )
+        proprietaire = _proprietaire(etat.st_uid)
+        if proprietaire != PROPRIETAIRE_ATTENDU:
+            anomalies.append(
+                f"{nom} appartient à {proprietaire} — attendu "
+                f"{PROPRIETAIRE_ATTENDU}"
+            )
+    if not instantane.has_globals:
+        anomalies.append(
+            "globals.sql absent — les rôles ne sont pas dans cet instantané, "
+            "une restauration refusera"
+        )
+    return anomalies
+
+
 def render_show(store: Store, ref: str = "latest") -> str:
     instantane = store.resolve(ref)
     lignes = [f"instantané : {instantane.name}"]
@@ -190,11 +245,13 @@ def render_show(store: Store, ref: str = "latest") -> str:
                    for cle, valeur in manifeste.items()]
     else:
         lignes.append(f"{CONT}pas de MANIFEST — instantané incomplet ?")
+
     lignes.append("fichiers :")
-    for nom in instantane.files:
-        octets = (instantane.path / nom).stat().st_size
-        lignes.append(f"{CONT}{nom:<24} {human_size(octets)}")
-    if not instantane.has_globals:
-        lignes.append(f"{CONT}globals.sql absent — les rôles ne sont pas dans "
-                      "cet instantané")
+    for nom in _fichiers_tries(instantane):
+        etat = (instantane.path / nom).stat()
+        lignes.append(
+            f"{CONT}{nom:<18}{etat.st_mode & 0o777:>5o} "
+            f"{_proprietaire(etat.st_uid):<10}"
+            f"{human_size(etat.st_size):>6}"
+        )
     return "\n".join(lignes)
