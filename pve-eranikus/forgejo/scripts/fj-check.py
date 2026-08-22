@@ -23,6 +23,7 @@ from pathlib import Path
 COMPOSE = Path(__file__).resolve().parent.parent / "compose.yaml"
 BACKUPS = Path("/srv/forgejo/backups")
 SRV = Path("/srv")
+PAQUETS = Path("/srv/packages")
 URL = "http://127.0.0.1:3000/api/healthz"
 AGE_MAX_H = 48
 LIBRE_MIN_MO = 4096
@@ -88,12 +89,31 @@ def espace():
     return libre >= LIBRE_MIN_MO, f"{libre} Mio libres sur {SRV} (plancher {LIBRE_MIN_MO})"
 
 
+def paquets():
+    """Le registre est sur son propre disque, et il n'est PAS sauvegardé.
+
+    Si ce disque n'est pas monté, le répertoire existe quand même sur /srv et
+    Forgejo démarre sans rien dire, en écrivant les artefacts sur le volume des
+    dépôts — qui se remplit, lui, et arrête PostgreSQL. C'est le seul mode de
+    panne silencieux de ce montage, d'où ce contrôle.
+    """
+    if not PAQUETS.is_dir():
+        return False, f"{PAQUETS} n'existe pas"
+    r = run(["mountpoint", "-q", str(PAQUETS)])
+    if r.returncode != 0:
+        return False, (f"{PAQUETS} N'EST PAS UN POINT DE MONTAGE — les artefacts "
+                       "vont sur le disque des dépôts (mount /srv/packages)")
+    libre = shutil.disk_usage(PAQUETS).free // 1048576
+    return True, f"monté, {libre} Mio libres (non sauvegardé, c'est voulu)"
+
+
 CONTROLES = (
     ("conteneurs", conteneurs),
     ("api", api),
     ("base", base),
     ("sauvegarde", sauvegarde),
     ("espace", espace),
+    ("paquets", paquets),
 )
 
 

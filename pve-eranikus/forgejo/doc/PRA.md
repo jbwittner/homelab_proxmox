@@ -22,6 +22,7 @@ est un choix.
 | **RTO** | **À MESURER.** Laissé vide tant qu'un exercice ne l'a pas chronométré — voir [PRA-exercice.md](PRA-exercice.md). Une durée estimée de tête n'a aucune valeur le jour où on en a besoin. |
 | Ce qui survit ailleurs | les objets git des dépôts **miroités** sur GitHub ; les clones locaux sur les postes ; les paires de sauvegarde dans GCS |
 | Ce qui ne survit **que** dans la paire | les tickets, les demandes d'ajout, les comptes, les clés SSH des utilisateurs, les jetons, les dépôts non miroités |
+| **Ce qui n'est PAS sauvegardé** | **le registre d'artefacts** — images OCI, paquets Java, npm, Go. Décision assumée : ils se reconstruisent depuis le code, et le code est sauvegardé. Après une reprise, **le registre est vide** et il faut republier. |
 
 ## Ce que ce plan ne couvre pas
 
@@ -34,6 +35,10 @@ est un choix.
   locaux et le miroir GitHub, c'est-à-dire les objets git et rien d'autre.
 - **La compromission.** Restaurer une sauvegarde compromise restaure la
   compromission.
+- **Le registre d'artefacts.** Il n'est ni dans la paire, ni dans le vzdump
+  (`backup=0` sur son disque), ni dans GCS. Le perdre est prévu ; le
+  reconstruire est le travail de la CI, pas celui de ce plan —
+  [pourquoi](RUNBOOK.md#le-cas-des-artefacts).
 
 ---
 
@@ -49,7 +54,7 @@ cd /opt/homelab/forgejo
 ./scripts/fj-check.py
 ```
 
-Cinq lignes sortent, une par contrôle. La première qui porte `KO` désigne la
+Six lignes sortent, une par contrôle. La première qui porte `KO` désigne la
 suite.
 
 ```bash
@@ -125,7 +130,37 @@ sudo rm /srv/forgejo/backups/db-<vieil-horodatage>.dump
 sudo rm /srv/forgejo/backups/data-<vieil-horodatage>.tar.gz
 ```
 
-### Cas E — les données sont corrompues
+### Cas E — `fj-check.py` dit que le registre n'est pas monté
+
+```
+  [KO ] paquets      /srv/packages N'EST PAS UN POINT DE MONTAGE — les artefacts
+                     vont sur le disque des dépôts (mount /srv/packages)
+```
+
+**À traiter tout de suite, même si le site répond.** Tant que le disque n'est
+pas monté, chaque image poussée s'entasse sur le volume des dépôts et le remplit
+— jusqu'à ce que PostgreSQL ne puisse plus écrire son WAL.
+
+```bash
+lsblk
+blkid -L packages          # doit répondre /dev/sdc
+sudo mount /srv/packages
+./scripts/fj-check.py
+```
+
+Si des artefacts ont déjà été écrits sur le mauvais volume, ils sont **cachés**
+sous le point de montage une fois celui-ci monté : les récupérer demande de
+démonter, de déplacer, puis de remonter.
+
+```bash
+sudo umount /srv/packages
+sudo du -sh /srv/packages          # ce qui s'est écrit au mauvais endroit
+# les déplacer si l'on y tient — sinon les supprimer, ils se republient
+sudo rm -rf /srv/packages/*
+sudo mount /srv/packages
+```
+
+### Cas F — les données sont corrompues
 
 Passer à une restauration de paire, la pile étant saine :
 
@@ -252,6 +287,9 @@ qm disk import 300 /var/lib/vz/template/iso/debian-13-genericcloud-amd64.qcow2 l
 qm set 300 --scsi0 local-lvm:vm-300-disk-0
 qm disk resize 300 scsi0 20G
 qm set 300 --scsi1 data:80
+# Le registre d'artefacts. backup=0 : il n'est jamais dans un vzdump, et il
+# repart VIDE — les images se republient depuis la CI.
+qm set 300 --scsi2 data:200,backup=0
 
 qm set 300 --ide2 local-lvm:cloudinit
 qm set 300 --boot order=scsi0
@@ -272,8 +310,13 @@ qm start 300
 ```bash
 ssh admin@192.168.1.56
 lsblk
-sudo mkfs.ext4 -L srv /dev/sdb
-sudo blkid -L srv        # doit répondre /dev/sdb
+# attendu : sdb 80G → /srv | sdc 200G → registre
+# NE PAS INTERVERTIR : les dépôts iraient sur le disque backup=0, donc hors de
+# tout vzdump, et personne ne le verrait avant d'en avoir besoin.
+sudo mkfs.ext4 -L srv      /dev/sdb
+sudo mkfs.ext4 -L packages /dev/sdc
+sudo blkid -L srv          # doit répondre /dev/sdb
+sudo blkid -L packages     # doit répondre /dev/sdc
 ```
 
 ### 3.4 — Poser le dépôt et provisionner
@@ -405,6 +448,13 @@ sudo systemctl list-timers fjbk.timer
 
 ```bash
 cd /opt/homelab/forgejo && ./scripts/fj-check.py
+```
+
+Les six contrôles doivent être au vert. **Le registre, lui, est vide** : c'est
+attendu. Republier les images depuis la CI, ou depuis les postes :
+
+```bash
+docker push forgejo.wittner.tech/<org>/<image>:<tag>
 ```
 
 Puis, **depuis une machine du LAN et non depuis le nœud** — le but est

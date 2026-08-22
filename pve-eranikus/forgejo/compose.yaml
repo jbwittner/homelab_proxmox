@@ -58,6 +58,16 @@ services:
       # confondre avec SSH_PORT ci-dessus : l'un route, l'autre s'affiche.
       FORGEJO__server__SSH_LISTEN_PORT: "22"
       FORGEJO__server__APP_DATA_PATH: /data/gitea
+      # LE REGISTRE DE PAQUETS VIT HORS DE /data, ET C'EST LE POINT. Par défaut
+      # il serait sous APP_DATA_PATH/packages, donc dans l'archive nocturne de
+      # `fjbk` — des dizaines de Go d'images recomprimées et réexpédiées chaque
+      # nuit pour un contenu immuable. Ici il est sur SON disque, qui n'est ni
+      # sauvegardé ni repris dans le vzdump : les artefacts se reconstruisent
+      # depuis le code, le code est ce qu'on sauvegarde.
+      # Vérifié sur l'image 15.0.7 — au démarrage, Forgejo journalise
+      # « Creating new Local Storage at /packages » et ÉCHOUE À DÉMARRER s'il
+      # ne peut pas y écrire. Il ne dégrade pas en silence.
+      FORGEJO__storage_0X2E_packages__PATH: /packages
       FORGEJO__server__LFS_START_SERVER: "true"
       FORGEJO__server__LFS_JWT_SECRET: ${FORGEJO_LFS_JWT_SECRET:?}
       # Aucune ressource distante (avatars Gravatar, contrôle de version en
@@ -145,6 +155,11 @@ services:
       FORGEJO__actions__ENABLED: "false"
     volumes:
       - /srv/forgejo/data:/data
+      # Disque dédié, monté par LABEL=packages. S'il n'est pas monté, le
+      # répertoire existe quand même sur /srv et Forgejo démarre en écrivant les
+      # artefacts sur le mauvais volume — d'où le contrôle de `fj-check.py`, qui
+      # vérifie que c'est bien un point de montage.
+      - /srv/packages:/packages
       - /etc/localtime:/etc/localtime:ro
     ports:
       - "3000:3000"

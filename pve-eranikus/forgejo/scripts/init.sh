@@ -7,10 +7,11 @@
 # de repasser. Ce qui se met à jour ensuite le fait par `sys-update.sh` et par
 # `docker compose pull`.
 #
-# IL NE FORMATE JAMAIS RIEN. Le `mkfs.ext4 -L srv` du second disque est une
-# commande du runbook, tapée à la main, une fois — voir doc/RUNBOOK.md
-# section 2. C'est le seul geste de tout ce montage qui puisse détruire les
-# dépôts, et il n'a rien à faire dans un script qu'on lance sans relire.
+# IL NE FORMATE JAMAIS RIEN. Les deux `mkfs.ext4` — étiquettes « srv » et
+# « packages » — sont des commandes du runbook, tapées à la main, une fois
+# chacune : voir doc/RUNBOOK.md section 2. C'est le seul geste de tout ce
+# montage qui puisse détruire les dépôts, et il n'a rien à faire dans un script
+# qu'on lance sans relire.
 #
 # À jouer en root, dans une VM Debian 13 fraîchement créée (runbook § 1).
 #
@@ -31,10 +32,12 @@ if [[ -e $TEMOIN ]]; then
   die "déjà provisionné le $(cat "$TEMOIN") — voir doc/RUNBOOK.md section 3"
 fi
 
-# Le volume de données AVANT tout le reste : inutile d'installer Docker sur une
-# VM dont /srv n'existera pas.
+# Les volumes de données AVANT tout le reste : inutile d'installer Docker sur
+# une VM dont /srv n'existera pas.
 blkid -L srv >/dev/null 2>&1 \
   || die "aucun volume étiqueté « srv » — le formater d'abord, voir doc/RUNBOOK.md section 2"
+blkid -L packages >/dev/null 2>&1 \
+  || die "aucun volume étiqueté « packages » — le formater d'abord, voir doc/RUNBOOK.md section 2"
 
 log "mise à jour du système"
 export DEBIAN_FRONTEND=noninteractive
@@ -42,13 +45,23 @@ apt-get update -qq
 apt-get -y -qq dist-upgrade
 apt-get -y -qq install ca-certificates curl gnupg rclone qemu-guest-agent unattended-upgrades
 
-log "montage de /srv par étiquette"
+log "montage des volumes par étiquette"
 # Par LABEL et non par /dev/sdX : l'ordre d'énumération des disques n'est pas
 # garanti, et un /srv monté sur le disque système remplirait la racine.
 mkdir -p /srv
 grep -q 'LABEL=srv' /etc/fstab || echo 'LABEL=srv /srv ext4 defaults,noatime 0 2' >> /etc/fstab
 mountpoint -q /srv || mount /srv
-mkdir -p /srv/forgejo/data /srv/forgejo/db /srv/forgejo/backups
+mkdir -p /srv/forgejo/data /srv/forgejo/db /srv/forgejo/backups /srv/packages
+
+# Le registre d'artefacts, sur SON disque : il n'est ni sauvegardé par `fjbk`
+# ni repris par le vzdump (backup=0). Monté APRÈS /srv, sinon le point de
+# montage disparaîtrait sous celui de /srv.
+grep -q 'LABEL=packages' /etc/fstab \
+  || echo 'LABEL=packages /srv/packages ext4 defaults,noatime 0 2' >> /etc/fstab
+mountpoint -q /srv/packages || mount /srv/packages
+# 1000:1000 : Forgejo CRÉE ce répertoire au démarrage et refuse de démarrer
+# s'il ne peut pas y écrire — vérifié sur l'image 15.0.7.
+chown 1000:1000 /srv/packages
 
 log "dépôt Docker CE officiel"
 # Le dépôt de Docker, pas les paquets Debian : `docker-compose-plugin` (la

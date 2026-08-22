@@ -3,16 +3,16 @@
 
 UNE PAIRE, PAS DEUX SAUVEGARDES : un dump de base et une archive des dépôts pris
 au même instant, Forgejo arrêté entre les deux. Le pourquoi et la doctrine
-hors-site sont dans doc/RUNBOOK.md section 7 ; ce fichier en tient trois choses.
+hors-site sont dans doc/RUNBOOK.md section 7 ; ce fichier en tient quatre choses.
 `copy` et jamais `sync`, en `--ignore-existing` : le compte de service n'écrase
-ni ne supprime, et LA RÉTENTION DISTANTE EST UNE RÈGLE DE CYCLE DE VIE DU BUCKET
-— `purge()` ne touche que le local. Tout s'écrit en `.part` puis est renommé :
-sans ce suffixe, un fichier est complet par construction. Le redémarrage de
-Forgejo est dans un `finally`.
+ni ne supprime. LA RÉTENTION DISTANTE EST UNE RÈGLE DU BUCKET — `purge()` ne
+touche que le local. Tout s'écrit en `.part` puis est renommé : sans ce suffixe un
+fichier est complet par construction. Le redémarrage est dans un `finally`.
+LE REGISTRE D'ARTEFACTS N'EST PAS DE SON RESSORT : hors de `data/`, sur son
+disque, non sauvegardé — doc/RUNBOOK.md, « Le cas des artefacts ».
 
-Codes de retour (contrat systemd) : 0 va bien | 1 environnement inutilisable |
-2 échec | 3 intervention humaine | 130 interrompu. Les constantes ci-dessous
-sont surchargées par les FJBK_* que `fjbk.service` lit dans /etc/default/fjbk.
+Codes (contrat systemd) : 0 va bien | 1 environnement inutilisable | 2 échec |
+3 intervention humaine | 130 interrompu. Constantes surchargées via FJBK_*.
 """
 
 import argparse

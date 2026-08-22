@@ -78,6 +78,14 @@ qm disk resize 300 scsi0 20G
 # 80 Go n'est pas une valeur évidente : voir « Dimensionner /srv » ci-dessous.
 qm set 300 --scsi1 data:80
 
+# TROISIÈME DISQUE : le registre d'artefacts, 200 Go, avec backup=0.
+# `backup=0` EST LE CŒUR DE LA DÉCISION : vzdump saute ce disque. Les artefacts
+# ne sont pas sauvegardés — ni ici, ni par `fjbk`, ni vers GCS — parce qu'ils se
+# reconstruisent depuis le code, et que le code, lui, est sauvegardé. Sans ce
+# drapeau, chaque vzdump traînerait 200 Go de binaires reconstructibles et le
+# PRA scénario 2 deviendrait inutilisable.
+qm set 300 --scsi2 data:200,backup=0
+
 # cloud-init
 qm set 300 --ide2 local-lvm:cloudinit
 qm set 300 --boot order=scsi0
@@ -97,6 +105,7 @@ qm start 300
 | **2 vCPU, 4 Go** | Forgejo et PostgreSQL pour quelques utilisateurs. L'indexation d'un gros dépôt est le seul pic ; elle passe. |
 | **`--cpu host`** | Pas de migration à froid vers un autre modèle de processeur à prévoir : ce nœud est seul. |
 | **Disque système 20 Go** | Le système, les images Docker et les journaux. Les données n'y sont pas. |
+| **Trois disques, pas un** | Chacun a un cycle de vie différent : le système se réinstalle, `/srv` se sauvegarde, le registre se reconstruit. Et surtout : remplir l'un ne peut pas arrêter les autres — un registre saturé n'empêche pas PostgreSQL d'écrire son WAL. |
 | **`--onboot 1`, `--startup order=1`** | La source de vérité remonte la première après une coupure. Il n'y a plus d'ordre à respecter entre deux conteneurs : la base est dans la VM. |
 | **`--agent enabled=1`** | `qm shutdown` obtient un arrêt propre plutôt qu'une coupure d'alimentation. Nécessaire aussi pour qu'un `qm snapshot` sache geler le système de fichiers. |
 | **`--ciupgrade 0`** | cloud-init ne met pas à jour au premier démarrage : `init.sh` le fait, et il est le seul à décider quand. |
@@ -108,16 +117,13 @@ contraint** :
 
 | | |
 |---|---|
-| `/srv/forgejo/data` | dépôts, LFS, pièces jointes — appelons-le **R** |
+| `/srv/forgejo/data` | dépôts, LFS, pièces jointes — appelons-le **R**. Le registre d'artefacts n'y est PAS, il a son disque. |
 | `/srv/forgejo/db` | PostgreSQL : tickets, comptes, métadonnées. Quelques centaines de Mo, et il ne bouge quasiment pas. |
 | `/srv/forgejo/backups` | **7 paires**, soit environ **7 × R comprimé** |
 
 La rétention locale de sept jours est le terme dominant : à 5 Go de dépôts, les
 sauvegardes locales pèsent déjà une vingtaine de Go. **80 Go tiennent donc de
-l'ordre de 10 Go de contenu, pas 80.**
-
-> **Si Forgejo sert de registre d'artefacts, cette arithmétique ne tient plus
-> du tout** — voir [Le cas des artefacts](#le-cas-des-artefacts).
+l'ordre de 10 Go de dépôts, pas 80.**
 
 Trois leviers, dans l'ordre où on les tire :
 
@@ -131,15 +137,14 @@ Trois leviers, dans l'ordre où on les tire :
    ```
 
    Pas de table de partitions à décaler : le système de fichiers occupe le
-   disque entier ([§ 2](#2-formater-et-étiqueter-srv)). Si le stockage ZFS est
-   déclaré en *thin provision*, un volume plus grand ne consomme d'ailleurs que
-   ce qui est réellement écrit.
+   disque entier ([§ 2](#2-formater-et-étiqueter-srv)). Le disque du registre
+   s'agrandit exactement pareil, en visant `scsi2` et `/dev/sdc`.
 
 2. **Baisser la rétention locale** — `FJBK_RETENTION=3` dans
    `/etc/default/fjbk`. L'historique long vit dans GCS ; le local n'est là que
    pour restaurer vite, sans rapatrier.
 
-3. **Sortir `backups/` sur un troisième disque**, pour que saturer les
+3. **Sortir `backups/` sur un quatrième disque**, pour que saturer les
    sauvegardes ne puisse jamais empêcher PostgreSQL d'écrire.
 
 `fjbk backup` refuse de démarrer sous **4 Gio libres** (`FJBK_MIN_LIBRE_MO`) :
@@ -148,33 +153,57 @@ arrêterait la base faute de pouvoir écrire son WAL.
 
 ### Le cas des artefacts
 
-**Question ouverte, et elle ne se règle pas en agrandissant le disque.**
+Forgejo sert ici de registre de paquets — **conteneurs OCI, Java, npm, Go** — et
+ce registre est **délibérément hors de la sauvegarde**. C'est une décision, pas
+un oubli, et elle est tenue par trois mécanismes plutôt que par une intention.
 
-Forgejo sait servir un registre de paquets — OCI, Helm, Maven, npm — sous
-`data/gitea/packages`, et **ce registre est actif par défaut** : rien dans
-`compose.yaml` ne le désarme. Si on s'en sert pour de bon, deux choses changent.
+**Ce qui est sauvegardé : le code. Ce qui ne l'est pas : ce qui se reconstruit
+depuis le code.** Un artefact perdu se republie ; un dépôt perdu ne se retrouve
+nulle part. Sauvegarder les deux au même niveau reviendrait à payer le RTO du
+second sur le volume du premier — et sur un registre d'images, ce volume écrase
+tout le reste d'un facteur dix ou cent.
 
-**L'ordre de grandeur.** Des images de conteneurs se comptent en centaines de Mo
-pièce, en dizaines de versions. On passe de dizaines de Go à des centaines, et
-la rétention locale multiplie encore par sept.
+Trois mécanismes, et c'est ce qui empêche la décision de se déliter :
 
-**La forme de la sauvegarde, et c'est le vrai sujet.** `fjbk backup` tare
-aujourd'hui tout `data/` en **un seul objet**, chaque nuit. Sur 100 Go de
-paquets, cela veut dire 100 Go à comprimer localement *et* à envoyer vers GCS
-toutes les nuits, pour un contenu qui n'a pas bougé d'un octet.
+| | |
+|---|---|
+| `FORGEJO__storage_0X2E_packages__PATH: /packages` | le registre vit **hors de `/data`**. Par défaut il serait sous `APP_DATA_PATH/packages`, donc happé par le `tar` nocturne de `fjbk` sans que personne ne le décide. |
+| Un **disque dédié** monté sur `/srv/packages` | remplir le registre ne peut pas remplir `/srv`, donc ne peut pas arrêter PostgreSQL. |
+| `backup=0` sur ce disque | **vzdump le saute.** Sans ce drapeau, chaque sauvegarde de VM traînerait des centaines de Go de binaires reconstructibles, et le [PRA scénario 2](PRA.md#2--vm-cassée) deviendrait inutilisable. |
 
-Les blobs d'un registre sont **immuables et adressés par leur contenu** — c'est
-exactement le cas de figure pour lequel `rclone copy --ignore-existing` a été
-retenu. La forme qui tiendrait à l'échelle est donc d'**exclure
-`data/gitea/packages` du tar** et de le copier fichier par fichier, Forgejo
-étant arrêté : la première nuit coûte tout, les suivantes ne coûtent que les
-nouveaux blobs. La restauration devient un `tar -x` pour les dépôts et un
-`rclone copy` en sens inverse pour les paquets.
+**Ce que ça coûte le jour d'un sinistre** : après une reprise, **le registre est
+vide**. Les images doivent être republiées — par la CI, ou à la main depuis les
+postes. C'est écrit dans [le PRA](PRA.md#ce-quon-perd-et-ce-quon-ne-perd-pas),
+et c'est le prix accepté.
 
-Ce n'est **pas** ce que fait le code aujourd'hui. Tant que la question n'est pas
-tranchée, le dimensionnement ci-dessus vaut pour un Forgejo **sans registre**,
-et y pousser des images sans changer `fjbk` donnerait des nuits de plus en plus
-longues, puis un `/srv` plein.
+#### Le mode de panne à connaître
+
+Vérifié sur l'image 15.0.7 : au démarrage, Forgejo journalise
+
+```
+initPackages() [I] Initialising Packages storage with type: local
+NewLocalStorage() [I] Creating new Local Storage at /packages
+```
+
+et **refuse de démarrer** s'il ne peut pas écrire là :
+
+```
+mustInit() [F] forgejo.org/modules/storage.Init failed: mkdir /packages: permission denied
+```
+
+C'est une bonne nouvelle : il tombe au lieu de dégrader. Mais il y a un cas où
+il ne tombe **pas**, et c'est le seul mode de panne silencieux de ce montage —
+**si le disque du registre n'est pas monté**, `/srv/packages` existe quand même
+comme simple répertoire de `/srv`, Forgejo démarre sans rien dire, et les
+artefacts vont s'entasser sur le volume des dépôts jusqu'à le remplir.
+
+D'où le contrôle `paquets` de `fj-check.py`, qui vérifie que c'est bien un
+**point de montage** et non un répertoire :
+
+```
+  [KO ] paquets      /srv/packages N'EST PAS UN POINT DE MONTAGE — les artefacts
+                     vont sur le disque des dépôts (mount /srv/packages)
+```
 
 ### L'adresse `192.168.1.56`
 
@@ -194,14 +223,24 @@ au moment de la bascule, le CT 200 n'ayant eu qu'un locataire.
 > existe, et refuse de continuer sinon.
 
 ```bash
-# Dans la VM, en root. VÉRIFIER D'ABORD que c'est bien le second disque,
-# celui de 80 Go, et qu'il est vide.
+# Dans la VM, en root. VÉRIFIER D'ABORD lequel est lequel : ils n'ont pas la
+# même taille, et c'est le seul moyen sûr de ne pas les intervertir.
 lsblk
-# attendu : sdb (ou vdb) 80G, sans partition ni point de montage
+# attendu : sdb (ou vdb) 80G   → /srv     : dépôts, base, sauvegardes
+#           sdc (ou vdc) 200G  → registre : artefacts, NON sauvegardé
+# les deux sans partition ni point de montage
 
-mkfs.ext4 -L srv /dev/sdb
-blkid -L srv     # doit répondre /dev/sdb
+mkfs.ext4 -L srv      /dev/sdb
+mkfs.ext4 -L packages /dev/sdc
+
+blkid -L srv         # doit répondre /dev/sdb
+blkid -L packages    # doit répondre /dev/sdc
 ```
+
+**Intervertir les deux étiquettes est le pire scénario de cette section** : les
+dépôts partiraient sur le disque `backup=0`, donc hors de tout vzdump, et le
+registre occuperait le volume sauvegardé. Rien ne le signalerait avant le jour
+où l'on chercherait une sauvegarde. D'où la vérification par la taille.
 
 **L'étiquette, pas le nom de périphérique.** L'ordre d'énumération des disques
 n'est pas garanti d'un démarrage à l'autre ; un `/etc/fstab` qui nomme `/dev/sdb`
@@ -412,7 +451,9 @@ le reste attend qu'on le décide.
 1. `docker compose stop forgejo` — **la base continue de tourner**
 2. `pg_dump -Fc --no-owner --no-acl` via le conteneur `db` → `db-<horodatage>.dump`
 3. `tar czf` de `/srv/forgejo/data` → `data-<horodatage>.tar.gz`, en excluant
-   `data/gitea/log` et `data/gitea/indexers` (Forgejo les reconstruit)
+   `data/gitea/log` et `data/gitea/indexers` (Forgejo les reconstruit). **Le
+   registre d'artefacts n'y est pas** : il vit hors de `/data`, sur son disque,
+   et n'est pas sauvegardé — voir [Le cas des artefacts](#le-cas-des-artefacts)
 4. **redémarrage de Forgejo, dans un `finally`, quoi qu'il arrive**
 5. `rclone copy` de la paire vers GCS
 6. purge locale au-delà de 7 jours

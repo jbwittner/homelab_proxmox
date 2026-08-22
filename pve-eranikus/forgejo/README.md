@@ -22,12 +22,19 @@ Ce fichier ne porte que **ce qu'on tape**. Le reste est dans `doc/` :
 | IP | `192.168.1.56/24`, passerelle `192.168.1.254` |
 | Nœud | `pve-eranikus` (192.168.1.11), Debian 13 (`genericcloud`) |
 | Ressources | 2 vCPU, 4 Go, disque système 20 Go (`local-lvm`) |
-| Données | **second disque 80 Go sur le pool ZFS `data`**, monté sur `/srv` par `LABEL=srv` — [dimensionnement](doc/RUNBOOK.md#dimensionner-srv) |
+| Données | **disque 80 Go** sur le pool ZFS `data`, monté sur `/srv` par `LABEL=srv` — [dimensionnement](doc/RUNBOOK.md#dimensionner-srv) |
+| Artefacts | **disque 200 Go dédié**, `LABEL=packages` → `/srv/packages`, `backup=0`. **Non sauvegardé, c'est une décision** — [pourquoi](doc/RUNBOOK.md#le-cas-des-artefacts) |
 | Forgejo | **15.0.7**, branche **15.0 LTS**, fin de support **15 juillet 2027** |
 | Base | PostgreSQL 18, **dans la même pile**, volume `/srv/forgejo/db` |
 | Ingress | Traefik (CT 201, `pve-ysera`) → `https://forgejo.wittner.tech/`, SSH en 2222 |
 | Sauvegarde | `fjbk backup`, toutes les nuits à 3 h, paire base + dépôts vers GCS |
 | Le dépôt, dans la VM | `/opt/homelab` |
+
+> **Le registre d'artefacts n'est pas sauvegardé, et c'est délibéré.** Images
+> OCI, paquets Java, npm, Go : ils se reconstruisent depuis le code, et le code
+> est ce qu'on sauvegarde. Après une reprise, le registre repart vide et les
+> images se republient. Trois mécanismes tiennent cette décision plutôt qu'une
+> intention — [Le cas des artefacts](doc/RUNBOOK.md#le-cas-des-artefacts).
 
 > **Tout est dans une seule machine, et c'est le point.** L'ancien montage
 > séparait la base (locataire d'un cluster mutualisé) des dépôts (un CT à
@@ -52,7 +59,7 @@ cd /opt/homelab/forgejo
 
 | Ce qu'on veut | Ce qu'on tape |
 |---|---|
-| L'état de la pile | `./scripts/fj-check.py` — cinq contrôles, 0 ou 1 |
+| L'état de la pile | `./scripts/fj-check.py` — six contrôles, 0 ou 1 |
 | Idem, pour une machine | `./scripts/fj-check.py --json` |
 | Les journaux | `docker compose logs -f forgejo` |
 | Redémarrer | `docker compose restart forgejo` |
@@ -80,6 +87,8 @@ créent à la main, avec la commande ci-dessus.
 | L'unité `fjbk.service` est en échec | le code de retour dit lequel — [runbook § 7](doc/RUNBOOK.md#7-la-sauvegarde) |
 | `fjbk` sort en 3 | `fj-check.py` est rouge : [doc/PRA.md](doc/PRA.md) |
 | Le disque est plein | `df -h /srv` puis `fjbk list` — la purge locale garde 7 jours, et [le dimensionnement](doc/RUNBOOK.md#dimensionner-srv) explique pourquoi c'est le terme dominant |
+| `/srv` se remplit sans raison | le disque du registre n'est pas monté : les artefacts s'entassent sur le volume des dépôts — [PRA § 1, cas E](doc/PRA.md#cas-e--fj-checkpy-dit-que-le-registre-nest-pas-monté) |
+| Après une reprise, le registre est vide | **c'est attendu** : les artefacts ne sont pas sauvegardés, ils se republient — [pourquoi](doc/RUNBOOK.md#le-cas-des-artefacts) |
 
 ## Où va chaque fichier
 
@@ -120,9 +129,6 @@ dépôt, on ne fait pas `git pull` : on joue
       RTO du PRA est vide, et c'est volontaire.
 - [ ] Supprimer la clé de déploiement GitHub une fois la bascule faite
       ([runbook § 8](doc/RUNBOOK.md#8-la-boucle-assumée)).
-- [ ] **Trancher la question du registre d'artefacts** —
-      [runbook, Le cas des artefacts](doc/RUNBOOK.md#le-cas-des-artefacts). Il
-      est actif par défaut, et `fjbk` n'est pas taillé pour : il tare tout
-      `data/` en un objet chaque nuit. Y pousser des images sans changer la
-      forme de la sauvegarde donne des nuits de plus en plus longues, puis un
-      `/srv` plein.
+- [ ] Dimensionner le disque du registre pour de bon. 200 Go est un point de
+      départ : il s'agrandit en ligne (`qm disk resize 300 scsi2 +100G` puis
+      `resize2fs /dev/sdc`), et rien n'en dépend puisqu'il n'est pas sauvegardé.
