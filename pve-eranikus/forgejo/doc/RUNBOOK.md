@@ -734,6 +734,12 @@ starting serial terminal on interface serial0
 **Ce message est normal** : c'est Proxmox qui attache son terminal au port
 série. Ce n'est pas une erreur, et il n'est jamais suivi d'un « prêt ».
 
+> **Constaté le 23 août 2026, à la création de la VM 300** : la console restait
+> muette après cette ligne, et la VM allait parfaitement bien — `qm status`
+> disait `running`, `ping 192.168.1.56` répondait en 0,3 ms, cloud-init avait
+> appliqué l'IP et les clés. **Il fallait appuyer sur Entrée.** Une demi-heure
+> de diagnostic pour un affichage qui n'avait pas été redemandé.
+
 Si rien ne vient ensuite, dans cet ordre :
 
 1. **Appuyer sur Entrée.** Une console série ne rejoue pas ce qui a été écrit
