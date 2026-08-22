@@ -767,18 +767,35 @@ git pull
 > pas. Le contrôle honnête est de comparer l'empreinte obtenue à celle que
 > Forgejo affiche, avant de la garder.
 
-### Le `.env`, par scp depuis le poste
+### Le `.env`, par scp depuis le poste — jamais par `git pull`
+
+> **⟵ Changement de machine.** Tout ce qui suit se fait **sur le poste**, pas
+> dans la VM. `sops` n'y est pas installé et **n'a pas à l'être** : la clé age
+> qui déchiffre ces secrets reste sur le poste, et l'installer dans la VM
+> reviendrait à ranger la clé sous le paillasson de la porte qu'elle ferme.
+> Un `sops: command not found` tapé dans la VM est donc le bon comportement —
+> [§ 9](#sops-command-not-found-dans-la-vm-cest-voulu--23-août-2026).
+
+**Si le fichier chiffré existe déjà** — réinstallation, reprise, second nœud :
 
 ```bash
-# Sur le POSTE de travail, jamais dans la VM
+# SUR LE POSTE DE TRAVAIL, jamais dans la VM
 sops -d forgejo.env.sops > /tmp/.env
 scp /tmp/.env admin@192.168.1.56:/opt/homelab/pve-eranikus/forgejo/.env
 shred -u /tmp/.env
 ```
 
-**Il n'arrive jamais par `git pull`.** La clé age qui le déchiffre reste sur le
-poste : la déposer dans la VM reviendrait à ranger la clé sous le paillasson de
-la porte qu'elle ferme. `env.example` porte les clés attendues, sans valeur.
+**Les mêmes quatre secrets qu'avant, jamais des nouveaux.** Un `SECRET_KEY`
+différent rend illisibles les jetons de miroir déjà en base, et cela ne se
+répare pas ([§ 9](#le-jeton-de-miroir-est-chiffré-par-secret_key--21-août-2026)).
+
+**Si rien n'existe encore** — toute première installation : il faut d'abord
+fabriquer les secrets, ci-dessous, puis composer le `.env` d'après
+`env.example`, le déposer par `scp`, et **enfin** le chiffrer par sops sur le
+poste pour qu'il existe la fois d'après. Tant que ce chiffrement n'est pas fait,
+il n'y a **aucune** copie de secours des secrets.
+
+`env.example` porte les clés attendues, sans valeur.
 
 ### Générer les quatre secrets, la première fois
 
@@ -787,6 +804,13 @@ for cle in SECRET_KEY INTERNAL_TOKEN JWT_SECRET JWT_SECRET; do
   docker run --rm codeberg.org/forgejo/forgejo:15.0.7 forgejo generate secret "$cle"
 done
 ```
+
+**Où lancer ça ?** N'importe quelle machine avec Docker — c'est un générateur,
+il ne lit rien et n'écrit rien. Sur le poste si Docker y est, puisque c'est là
+que le `.env` sera composé et chiffré ; **dans la VM sinon**, Docker venant d'y
+être installé par `init.sh`. Dans ce second cas, les valeurs traversent le
+terminal : les reporter dans le fichier sops du poste **tout de suite**, et ne
+pas compter sur l'historique du shell pour les retrouver.
 
 Les deux derniers alimentent `FORGEJO_OAUTH2_JWT_SECRET` et
 `FORGEJO_LFS_JWT_SECRET` : **deux valeurs distinctes**, ils ne partagent pas
@@ -1210,6 +1234,31 @@ ensemble disent la seule chose vraie : **il n'y a pas d'ordre**.
 
 Il n'y a donc pas de correspondance à retenir. Il y a
 `ls -l /dev/disk/by-id/ | grep drive-scsi` à relire, à chaque fois.
+
+### `sops: command not found` dans la VM, c'est voulu — 23 août 2026
+
+```
+admin@forgejo:/opt/homelab$ sops
+-bash: sops: command not found
+```
+
+**Ce n'est pas une pièce manquante, c'est la conception.** `sops` ne déchiffre
+rien sans sa clé age, et cette clé reste sur le poste de travail. L'installer
+dans la VM n'aurait d'intérêt que si la clé suivait — c'est-à-dire si l'on
+rangeait la clé sur la machine qu'elle protège.
+
+Le mauvais réflexe est donc `apt install sops`, et il ne produit rien de bon :
+un binaire de plus, aucune capacité de plus, et l'invitation permanente à y
+apporter la clé « juste pour cette fois ».
+
+**Ce qui traverse, c'est le `.env` déchiffré, par `scp`, depuis le poste** —
+[§ 4](#le-env-par-scp-depuis-le-poste--jamais-par-git-pull). Jamais le fichier
+chiffré, jamais la clé, jamais `git pull`.
+
+> À distinguer du piège précédent : là, `command not found` accusait à tort un
+> paquet absent alors que le binaire était présent hors du `PATH`. Ici le
+> binaire est **réellement** absent, et il doit le rester. Deux fois le même
+> message, deux causes opposées, deux réactions opposées.
 
 ### `mkfs.ext4: command not found`, et le paquet est installé — 23 août 2026
 
