@@ -12,7 +12,7 @@ ces renvois dans le même geste.
 ## Sommaire
 
 1. [Créer la VM](#1-créer-la-vm)
-2. [Formater et étiqueter `/srv`](#2-formater-et-étiqueter-srv)
+2. [Formater et étiqueter les trois disques de données](#2-formater-et-étiqueter-les-trois-disques-de-données)
 3. [Lancer `init.sh`](#3-lancer-initsh)
 4. [Déployer la pile](#4-déployer-la-pile)
 5. [Mettre à jour Forgejo](#5-mettre-à-jour-forgejo)
@@ -56,8 +56,9 @@ personne ne relit le contenu.
 ```bash
 qm create 300 \
   --name forgejo \
+  --description "Forgejo — source de vérité ArgoCD. Voir forgejo/README.md" \
   --cores 2 --sockets 1 --cpu host \
-  --memory 4096 \
+  --memory 4096 --balloon 0 \
   --net0 virtio,bridge=vmbr0 \
   --scsihw virtio-scsi-single \
   --ostype l26 \
@@ -66,71 +67,111 @@ qm create 300 \
   --onboot 1 \
   --startup order=1
 
-# Disque système : importer l'image cloud, puis l'étendre à 20 Go.
-# `qm disk import` AFFICHE le volid qu'il a créé, sur sa dernière ligne :
-#   successfully imported disk 'local-lvm:vm-300-disk-0'
-# Ce n'est pas toujours -disk-0 — si le stockage porte déjà des volumes de
-# cette VM, ce sera -disk-1. REPRENDRE CE QU'IL AFFICHE, ne pas le supposer :
-# un scsi0 qui pointe à côté donne une VM qui démarre sur rien, et une console
-# qui ne dira jamais rien (voir § 9).
-qm disk import 300 /var/lib/vz/template/iso/debian-13-genericcloud-amd64.qcow2 local-lvm
-qm set 300 --scsi0 local-lvm:vm-300-disk-0
+# --balloon 0 : mémoire fixe. Le ballon rend de la RAM à l'hyperviseur sous
+# pression, et PostgreSQL réagit mal à un cache qui fond sous lui.
+# --cpu host : conséquence assumée, la migration à chaud vers un nœud au
+# processeur différent devient impossible. On restaure depuis vzdump.
+
+# ── scsi0 — SYSTÈME, 20 Go, sauvegardé ───────────────────────────────────────
+# Debian + Docker + /var/lib/docker (images, couches, journaux des conteneurs).
+# Réinstallable de zéro : il ne porte AUCUNE donnée irremplaçable.
+# Surveiller : chaque mise à jour d'image laisse l'ancienne couche derrière.
+# `docker image prune` est dans le runbook § 5.
+qm set 300 --scsi0 local-lvm:0,import-from=/var/lib/vz/template/iso/debian-13-genericcloud-amd64.qcow2,discard=on,ssd=1
 qm disk resize 300 scsi0 20G
 
-# SECOND DISQUE : /srv, 80 Go sur le pool ZFS « data ». Il porte les dépôts,
-# la base ET les sauvegardes locales. SÉPARÉ du disque système pour que
-# réinstaller le système ne touche pas aux données, et pour que saturer la
-# racine n'arrête pas PostgreSQL.
-# 80 Go n'est pas une valeur évidente : voir « Dimensionner /srv » ci-dessous.
-qm set 300 --scsi1 data:80
+# ── scsi1 — /srv/forgejo, 40 Go, sauvegardé ──────────────────────────────────
+# Les dépôts Git, le LFS, les pièces jointes ET la base PostgreSQL.
+# UN SEUL disque pour les deux, délibérément : toute l'architecture repose sur
+# « base et dépôts restaurés au même instant ». Les séparer rendrait la paire
+# incohérente et casserait le --one-file-system de `fjbk backup`.
+# Séparé du système pour que réinstaller Debian ne touche pas aux données, et
+# pour que saturer la racine n'arrête pas PostgreSQL.
+qm set 300 --scsi1 data:40,discard=on,ssd=1
 
-# TROISIÈME DISQUE : le registre d'artefacts, 200 Go, avec backup=0.
-# `backup=0` EST LE CŒUR DE LA DÉCISION : vzdump saute ce disque. Les artefacts
-# ne sont pas sauvegardés — ni ici, ni par `fjbk`, ni vers GCS — parce qu'ils se
-# reconstruisent depuis le code, et que le code, lui, est sauvegardé. Sans ce
-# drapeau, chaque vzdump traînerait 200 Go de binaires reconstructibles et le
-# PRA scénario 2 deviendrait inutilisable.
-qm set 300 --scsi2 data:200,backup=0
+# ── scsi2 — /srv/artifacts, 100 Go, SAUVEGARDÉ ───────────────────────────────
+# Le registre de paquets Forgejo (images des applications).
+# SAUVEGARDÉ, et c'est une décision : ArgoCD tire ses images d'ici, donc le
+# registre est sur le chemin critique du démarrage du cluster. « Ça se
+# reconstruit depuis le code » suppose une CI disponible — or la CI est DANS
+# cette VM. Sans ce disque au restore, la reprise passe de vingt minutes à une
+# demi-journée de pipelines rejoués.
+# Forgejo ne purge pas les paquets seul : une politique de rétention est à
+# écrire quand la CI existera. `fj-check.py` surveille le remplissage.
+# Agrandissable à chaud : qm disk resize 300 scsi2 +50G puis resize2fs.
+qm set 300 --scsi2 data:100,discard=on,ssd=1
 
-# cloud-init
+# ── scsi3 — /srv/backup, 50 Go, backup=0 ─────────────────────────────────────
+# Les 7 dernières paires produites par `fjbk backup` (dump PG + archive data),
+# avant leur envoi vers GCS.
+# backup=0 EST LE CŒUR DE LA DÉCISION, et il est ici et nulle part ailleurs :
+# ces fichiers SONT déjà une sauvegarde, et la copie qui compte est chez GCS.
+# Les embarquer dans chaque vzdump reviendrait à sauvegarder des sauvegardes —
+# du volume pur, qui alourdit le seul artefact dont dépend le scénario « VM
+# cassée » du PRA.
+# Disque distinct pour que sept jours de rétention ne puissent JAMAIS remplir
+# le disque des dépôts et arrêter PostgreSQL. C'est le mode de panne le plus
+# banal d'un service qui sauvegarde à côté de ses données.
+qm set 300 --scsi3 data:50,backup=0,discard=on,ssd=1
+
+# ── cloud-init ───────────────────────────────────────────────────────────────
 qm set 300 --ide2 local-lvm:cloudinit
 qm set 300 --boot order=scsi0
 qm set 300 --ciuser admin
-# Les clés du nœud, pas un fichier dédié : voir « Les clés SSH » ci-dessous.
 qm set 300 --sshkeys /root/.ssh/authorized_keys
 qm set 300 --ipconfig0 ip=192.168.1.56/24,gw=192.168.1.254
 qm set 300 --nameserver 192.168.1.254
+
+# --boot order=scsi0 : explicite. Avec quatre disques, s'en remettre à l'ordre
+# par défaut se paie un jour au redémarrage.
+# --ciupgrade 0 : cloud-init ne met rien à jour au premier démarrage. C'est
+# init.sh qui le fait, une fois, de façon tracée.
 qm set 300 --ciupgrade 0
 
 qm start 300
 ```
+
+`--sshkeys` désigne le fichier du nœud, et c'est une décision de reprise : voir
+[Les clés SSH](#les-clés-ssh). **La suite est le
+[§ 2](#2-formater-et-étiqueter-les-trois-disques-de-données)** — formater et
+étiqueter les trois disques de données, à la main, une fois, en vérifiant deux
+fois la cible.
 
 ### Pourquoi ces valeurs
 
 | | |
 |---|---|
 | **2 vCPU, 4 Go** | Forgejo et PostgreSQL pour quelques utilisateurs. L'indexation d'un gros dépôt est le seul pic ; elle passe. |
-| **`--cpu host`** | Pas de migration à froid vers un autre modèle de processeur à prévoir : ce nœud est seul. |
-| **Disque système 20 Go** | Le système, les images Docker et les journaux. Les données n'y sont pas. |
-| **Trois disques, pas un** | Chacun a un cycle de vie différent : le système se réinstalle, `/srv` se sauvegarde, le registre se reconstruit. Et surtout : remplir l'un ne peut pas arrêter les autres — un registre saturé n'empêche pas PostgreSQL d'écrire son WAL. |
+| **`--balloon 0`** | Mémoire **fixe**. Le ballon rend de la RAM à l'hyperviseur dès qu'il en manque ailleurs, et PostgreSQL réagit mal à un cache qui fond sous lui. |
+| **`--cpu host`** | Conséquence assumée : plus de migration à chaud vers un nœud au processeur différent. La reprise passe par le vzdump, pas par la migration. |
+| **`--description`** | La seule phrase que lit quelqu'un qui ouvre l'interface de Proxmox sans connaître ce dépôt. Elle dit où est écrit le reste. |
+| **`discard=on,ssd=1`** | `discard` fait redescendre les blocs libérés jusqu'au pool — sans lui, un fichier supprimé dans la VM continue d'occuper sa place en dessous. `ssd=1` évite que l'invité ordonne ses écritures comme sur un plateau. |
+| **Quatre disques, pas un** | **Quatre cycles de vie.** Le système se réinstalle ; `/srv/forgejo` se sauvegarde en paire ; `/srv/artifacts` se reprend au vzdump ; `/srv/backup` sort de tout vzdump. Et surtout : remplir l'un ne peut pas arrêter les autres. |
 | **`--onboot 1`, `--startup order=1`** | La source de vérité remonte la première après une coupure. Il n'y a plus d'ordre à respecter entre deux conteneurs : la base est dans la VM. |
 | **`--agent enabled=1`** | `qm shutdown` obtient un arrêt propre plutôt qu'une coupure d'alimentation. Nécessaire aussi pour qu'un `qm snapshot` sache geler le système de fichiers. |
 | **`--ciupgrade 0`** | cloud-init ne met pas à jour au premier démarrage : `init.sh` le fait, et il est le seul à décider quand. |
 
-### Dimensionner `/srv`
+### Dimensionner les trois volumes
 
-Trois choses partagent ce volume, et **ce n'est pas la plus grosse qui
-contraint** :
+Ils ne se dimensionnent **pas indépendamment**, et ce n'est pas le plus gros qui
+contraint :
 
-| | |
-|---|---|
-| `/srv/forgejo/data` | dépôts, LFS, pièces jointes — appelons-le **R**. Le registre d'artefacts n'y est PAS, il a son disque. |
-| `/srv/forgejo/db` | PostgreSQL : tickets, comptes, métadonnées. Quelques centaines de Mo, et il ne bouge quasiment pas. |
-| `/srv/forgejo/backups` | **7 paires**, soit environ **7 × R comprimé** |
+| Volume | Taille | Ce qu'il porte |
+|---|---|---|
+| `/srv/forgejo` | **40 Go** | dépôts, LFS, pièces jointes — appelons-le **R** — plus la base PostgreSQL, qui pèse quelques centaines de Mo et ne bouge quasiment pas. Le registre n'y est pas. |
+| `/srv/artifacts` | **100 Go** | le registre. **Rien ne le purge** : il ne fait que croître tant qu'une politique de rétention n'existe pas. |
+| `/srv/backup` | **50 Go** | **7 paires, soit ≈ 7 × R comprimé** — et les objets git sont déjà comprimés, donc `tar czf` ne gagne pas grand-chose dessus. |
 
-La rétention locale de sept jours est le terme dominant : à 5 Go de dépôts, les
-sauvegardes locales pèsent déjà une vingtaine de Go. **80 Go tiennent donc de
-l'ordre de 10 Go de dépôts, pas 80.**
+**C'est le disque des sauvegardes qui plafonne les dépôts, pas le leur.** À sept
+jours de rétention, 50 Go tiennent de l'ordre de **7 Go de dépôts, pas 40**. Les
+40 Go de `/srv/forgejo` ne sont donc pas remplissables sans toucher d'abord à la
+rétention ou au disque des sauvegardes — c'est le genre de calcul qu'on préfère
+faire ici qu'un matin à 3 h 10.
+
+Ce qui a changé depuis le montage à deux disques : **saturer les sauvegardes
+n'arrête plus PostgreSQL.** Elles sont sur leur propre volume, et le pire cas
+est désormais `fjbk backup` qui refuse de démarrer sous **4 Gio libres**
+(`FJBK_MIN_LIBRE_MO`) — une sauvegarde qui manque bruyamment, et rien de plus.
 
 Trois leviers, dans l'ordre où on les tire :
 
@@ -138,54 +179,62 @@ Trois leviers, dans l'ordre où on les tire :
    levier, et c'est pour ça que se tromper à la création coûte peu :
 
    ```bash
-   qm disk resize 300 scsi1 +40G     # sur le NŒUD
+   qm disk resize 300 scsi3 +40G     # sur le NŒUD — ici, les sauvegardes
 
-   # Dans la VM. `findmnt` résout le périphérique RÉEL derrière /srv : aucune
-   # lettre n'est supposée, et il n'y a rien à vérifier deux fois.
-   sudo resize2fs "$(findmnt -no SOURCE /srv)"
-   df -h /srv
+   # Dans la VM. `findmnt` résout le périphérique RÉEL derrière le point de
+   # montage : aucune lettre n'est supposée, et il n'y a rien à vérifier deux
+   # fois. Le même geste vaut pour scsi1 (/srv/forgejo) et scsi2
+   # (/srv/artifacts) — seuls le slot et le chemin changent.
+   sudo resize2fs "$(findmnt -no SOURCE /srv/backup)"
+   df -h /srv/forgejo /srv/artifacts /srv/backup
    ```
 
    Pas de table de partitions à décaler : le système de fichiers occupe le
-   disque entier ([§ 2](#2-formater-et-étiqueter-srv)). Le disque du registre
-   s'agrandit exactement pareil, en visant `scsi2` puis
-   `resize2fs "$(findmnt -no SOURCE /srv/packages)"`.
+   disque entier ([§ 2](#2-formater-et-étiqueter-les-trois-disques-de-données)).
 
 2. **Baisser la rétention locale** — `FJBK_RETENTION=3` dans
    `/etc/default/fjbk`. L'historique long vit dans GCS ; le local n'est là que
    pour restaurer vite, sans rapatrier.
 
-3. **Sortir `backups/` sur un quatrième disque**, pour que saturer les
-   sauvegardes ne puisse jamais empêcher PostgreSQL d'écrire.
-
-`fjbk backup` refuse de démarrer sous **4 Gio libres** (`FJBK_MIN_LIBRE_MO`) :
-mieux vaut une sauvegarde qui manque bruyamment qu'un `/srv` plein, qui
-arrêterait la base faute de pouvoir écrire son WAL.
+3. **Écrire la politique de rétention du registre**, le jour où la CI existe.
+   C'est le seul des trois volumes que personne ne purge.
 
 ### Le cas des artefacts
 
 Forgejo sert ici de registre de paquets — **conteneurs OCI, Java, npm, Go** — et
-ce registre est **délibérément hors de la sauvegarde**. C'est une décision, pas
-un oubli, et elle est tenue par trois mécanismes plutôt que par une intention.
+ce registre **est sauvegardé**. C'est une décision, elle a été prise dans
+l'autre sens auparavant, et il faut donc dire ce qui l'a retournée.
 
-**Ce qui est sauvegardé : le code. Ce qui ne l'est pas : ce qui se reconstruit
-depuis le code.** Un artefact perdu se republie ; un dépôt perdu ne se retrouve
-nulle part. Sauvegarder les deux au même niveau reviendrait à payer le RTO du
-second sur le volume du premier — et sur un registre d'images, ce volume écrase
-tout le reste d'un facteur dix ou cent.
+**« Ça se reconstruit depuis le code » suppose une CI disponible. Or la CI est
+dans cette VM.** ArgoCD tire ses images du registre : celui-ci est sur le chemin
+critique du démarrage du cluster. Sans ce disque au restore, la reprise ne coûte
+pas quelques `docker push` — elle passe de **vingt minutes à une demi-journée de
+pipelines rejoués**, à supposer que les pipelines puissent tourner, ce qui
+suppose Forgejo debout. Un registre reconstructible en théorie et indisponible
+en pratique n'est pas reconstructible.
 
-Trois mécanismes, et c'est ce qui empêche la décision de se déliter :
+**Mais il n'est pas sauvegardé n'importe comment**, et c'est là que tient
+l'équilibre :
 
 | | |
 |---|---|
-| `FORGEJO__storage_0X2E_packages__PATH: /packages` | le registre vit **hors de `/data`**. Par défaut il serait sous `APP_DATA_PATH/packages`, donc happé par le `tar` nocturne de `fjbk` sans que personne ne le décide. |
-| Un **disque dédié** monté sur `/srv/packages` | remplir le registre ne peut pas remplir `/srv`, donc ne peut pas arrêter PostgreSQL. |
-| `backup=0` sur ce disque | **vzdump le saute.** Sans ce drapeau, chaque sauvegarde de VM traînerait des centaines de Go de binaires reconstructibles, et le [PRA scénario 2](PRA.md#2--vm-cassée) deviendrait inutilisable. |
+| `FORGEJO__storage_0X2E_packages__PATH: /packages` | le registre vit **hors de `/data`**, donc **hors de la paire nocturne**. Par défaut il serait sous `APP_DATA_PATH/packages`, et des dizaines de Go d'images immuables partiraient vers GCS chaque nuit, recomprimées à chaque fois. |
+| Un **disque dédié** monté sur `/srv/artifacts` | remplir le registre ne peut pas remplir le volume des dépôts, donc ne peut pas arrêter PostgreSQL. |
+| **Pas de `backup=0`** sur ce disque | **le vzdump le prend.** C'est lui, et lui seul, qui porte le registre. |
 
-**Ce que ça coûte le jour d'un sinistre** : après une reprise, **le registre est
-vide**. Les images doivent être republiées — par la CI, ou à la main depuis les
-postes. C'est écrit dans [le PRA](PRA.md#ce-quon-perd-et-ce-quon-ne-perd-pas),
-et c'est le prix accepté.
+**La limite, écrite franchement : c'est le vzdump qui protège le registre, donc
+il ne le protège que là où le vzdump protège.** Un vzdump qui reste sur le nœud
+disparaît avec le nœud. Le [PRA scénario 2](PRA.md#2--vm-cassée) — VM cassée,
+nœud sain — retrouve donc le registre intact ; le [scénario
+3](PRA.md#3--nœud-perdu--sinistre) repart avec un registre **vide**, exactement
+comme avant, tant que les vzdump ne sont pas répliqués hors du nœud. C'est un
+[reste à faire](../README.md#reste-à-faire), et il n'est pas cosmétique : c'est
+la moitié manquante de la décision ci-dessus.
+
+**Personne ne purge ce volume.** Forgejo ne supprime pas seul les anciennes
+versions de paquets. Une politique de rétention est à écrire le jour où la CI
+publie pour de bon ; d'ici là, `fj-check.py` surveille le remplissage et le
+disque s'agrandit à chaud.
 
 #### Le mode de panne à connaître
 
@@ -204,16 +253,16 @@ mustInit() [F] forgejo.org/modules/storage.Init failed: mkdir /packages: permiss
 
 C'est une bonne nouvelle : il tombe au lieu de dégrader. Mais il y a un cas où
 il ne tombe **pas**, et c'est le seul mode de panne silencieux de ce montage —
-**si le disque du registre n'est pas monté**, `/srv/packages` existe quand même
-comme simple répertoire de `/srv`, Forgejo démarre sans rien dire, et les
-artefacts vont s'entasser sur le volume des dépôts jusqu'à le remplir.
+**si un volume n'est pas monté**, son répertoire existe quand même, cette fois
+sur le **disque système de 20 Go**, et tout s'y écrit sans que rien ne proteste :
+les artefacts, ou les dépôts, ou les paires de sauvegarde, jusqu'à remplir la
+racine.
 
-D'où le contrôle `paquets` de `fj-check.py`, qui vérifie que c'est bien un
-**point de montage** et non un répertoire :
+D'où le contrôle `montages` de `fj-check.py`, qui vérifie que les trois en sont
+bien :
 
 ```
-  [KO ] paquets      /srv/packages N'EST PAS UN POINT DE MONTAGE — les artefacts
-                     vont sur le disque des dépôts (mount /srv/packages)
+  [KO ] montages     /srv/artifacts (registre) N'EST PAS MONTÉ — les monter avant toute écriture
 ```
 
 ### L'accès de secours
@@ -278,17 +327,31 @@ au moment de la bascule, le CT 200 n'ayant eu qu'un locataire.
 
 ---
 
-## 2. Formater et étiqueter `/srv`
+## 2. Formater et étiqueter les trois disques de données
 
 > **DESTRUCTIF. À taper à la main, une seule fois, sur une VM neuve.**
 > C'est le seul geste de tout ce montage qui puisse détruire les dépôts — ou,
 > pire et plus vite, le système. `init.sh` ne le fait pas et ne le fera jamais :
-> il vérifie que les étiquettes existent, et refuse de continuer sinon.
+> il vérifie que les **trois** étiquettes existent, et refuse de continuer si
+> l'une manque.
+
+Trois disques à formater, trois étiquettes, trois points de montage **frères** :
+
+| Slot | Taille | Étiquette | Monté sur |
+|---|---|---|---|
+| `scsi1` | 40 Go | `srv` | `/srv/forgejo` |
+| `scsi2` | 100 Go | `artifacts` | `/srv/artifacts` |
+| `scsi3` | 50 Go | `backup` | `/srv/backup` |
+
+`/srv` lui-même **reste sur le disque système**, et aucun des trois volumes
+n'est sous un autre. C'est ce qui fait que remplir l'un ne peut pas empêcher les
+autres d'écrire — et c'est aussi ce qui rend « non monté » un état possible et
+silencieux, d'où le contrôle `montages` de `fj-check.py`.
 
 ### N'écrivez jamais `/dev/sdX` de mémoire
 
 **L'ordre d'énumération SCSI ne suit pas les numéros de slot Proxmox.** Constaté
-sur la VM 300 le 23 août 2026 :
+sur la VM 300 le 23 août 2026, sur le montage à trois disques d'alors :
 
 ```
 sda    80G   ← scsi1, le disque de DONNÉES
@@ -298,22 +361,24 @@ sdc   200G   ← scsi2, le registre
 
 `scsi0` avait pris `sdb`, pas `sda`. Un `mkfs.ext4 -L srv /dev/sdb` écrit de
 mémoire, ou copié d'une procédure qui suppose l'ordre, **détruit le système**.
+Les tailles et le nombre de disques ont changé depuis ; la leçon non, et il y a
+désormais **une lettre de plus à se tromper**.
 
 Les lettres ne sont donc pas une adresse. Les liens `by-id` de Proxmox, si :
 chaque disque porte un numéro de série qui reprend son slot.
 
 ```bash
 ls -l /dev/disk/by-id/ | grep 'drive-scsi'
-# scsi-0QEMU_QEMU_HARDDISK_drive-scsi0 -> ../../sdb   ← système, ON N'Y TOUCHE PAS
-# scsi-0QEMU_QEMU_HARDDISK_drive-scsi1 -> ../../sda   ← /srv
-# scsi-0QEMU_QEMU_HARDDISK_drive-scsi2 -> ../../sdc   ← registre
+# quatre liens : drive-scsi0 … drive-scsi3, chacun vers la lettre que le noyau
+# lui a donnée CETTE FOIS-CI. C'est cette sortie qui fait foi, pas ce document :
+# aucune correspondance lettre → slot n'est écrite ici, et c'est délibéré.
 ```
 
 ### Formater
 
 Deux contrôles avant, et ils ne sont pas facultatifs : **la taille** et
 **l'absence de partition**. Un disque neuf n'a ni l'une ni l'autre ; le disque
-système a `sdb1`, `sdb14`, `sdb15` et des points de montage.
+système porte des partitions et des points de montage.
 
 ```bash
 lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINTS
@@ -322,18 +387,35 @@ lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINTS
 Puis, en nommant les cibles par leur slot et non par leur lettre :
 
 ```bash
-SRV=/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi1     # 80 Go
-PKG=/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi2     # 200 Go
+SRV=/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi1     # 40 Go
+ART=/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi2     # 100 Go
+BKP=/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi3     # 50 Go
 
-# DERNIER CONTRÔLE avant d'écrire : ni l'un ni l'autre ne doit rien porter.
-lsblk "$SRV" "$PKG"
+# DERNIER CONTRÔLE avant d'écrire : les tailles doivent être celles ci-dessus,
+# et aucun des trois ne doit porter la moindre partition.
+lsblk "$SRV" "$ART" "$BKP"
 
-mkfs.ext4 -L srv      "$SRV"
-mkfs.ext4 -L packages "$PKG"
+mkfs.ext4 -L srv       "$SRV"
+mkfs.ext4 -L artifacts "$ART"
+mkfs.ext4 -L backup    "$BKP"
 ```
 
 Si `by-id` n'expose pas ces liens sur votre machine, retomber sur les lettres —
 mais **relues dans `lsblk` à l'instant**, jamais reprises d'un document.
+
+### Monter, par étiquette et jamais par lettre
+
+`init.sh` écrit ces trois lignes dans `/etc/fstab` ; elles sont ici pour être
+relues, et pour le jour où il faut les remettre à la main :
+
+```
+LABEL=srv       /srv/forgejo   ext4 defaults 0 2
+LABEL=artifacts /srv/artifacts ext4 defaults 0 2
+LABEL=backup    /srv/backup    ext4 defaults 0 2
+```
+
+**L'étiquette, pas le nom de périphérique** — c'est la même leçon qu'au-dessus :
+entre deux démarrages, la lettre peut changer, l'étiquette non.
 
 ### Vérifier
 
@@ -342,19 +424,24 @@ mais **relues dans `lsblk` à l'instant**, jamais reprises d'un document.
 # en retard sur un mkfs tout juste fait. C'est la forme qu'init.sh utilise, pour
 # ne pas refuser de démarrer sur un volume parfaitement formaté.
 blkid -c /dev/null -L srv
-blkid -c /dev/null -L packages
+blkid -c /dev/null -L artifacts
+blkid -c /dev/null -L backup
 lsblk -o NAME,SIZE,FSTYPE,LABEL
-# attendu : 80G ext4 srv | 200G ext4 packages
+# attendu : 40G ext4 srv | 100G ext4 artifacts | 50G ext4 backup
 ```
 
-**Intervertir les deux étiquettes est le second pire scénario de cette section**
-— après avoir visé le système. Les dépôts partiraient sur le disque `backup=0`,
-donc hors de tout vzdump, et le registre occuperait le volume sauvegardé. Rien
-ne le signalerait avant le jour où l'on chercherait une sauvegarde.
+**Intervertir deux étiquettes est le second pire scénario de cette section** —
+après avoir visé le système. Aucun des deux échanges ne se signale tout seul :
 
-**L'étiquette, pas le nom de périphérique** — et c'est la même leçon qu'au-dessus.
-`init.sh` écrit `LABEL=srv` dans `/etc/fstab`, jamais `/dev/sda` : entre deux
-démarrages, la lettre peut changer, l'étiquette non.
+- `srv` ↔ `backup` : les dépôts partiraient sur le disque `backup=0`, donc
+  **hors de tout vzdump**, et les sauvegardes sur le disque sauvegardé. Rien ne
+  le dirait avant le jour où l'on chercherait une sauvegarde.
+- `srv` ↔ `artifacts` : les deux sont bien repris par le vzdump, mais 40 et
+  100 Go ne sont pas interchangeables, et la paire nocturne archiverait le
+  registre nuit après nuit — précisément ce que tout le montage évite.
+
+C'est pour cela que la vérification porte sur **la taille en face de
+l'étiquette**, et pas seulement sur l'existence des trois.
 
 Pas de partition : le système de fichiers occupe le disque entier. Un disque
 virtuel s'agrandit par `qm disk resize` puis `resize2fs`, sans table de
@@ -385,8 +472,9 @@ sudo /opt/homelab/pve-eranikus/forgejo/scripts/init.sh
 # → refusera, témoin posé. C'est le comportement voulu.
 ```
 
-Il pose : mise à jour du système, montage de `/srv` et de `/srv/packages` par
-étiquette, `git` (absent de l'image, et nécessaire au clone du § 4), le dépôt
+Il pose : mise à jour du système, montage des **trois** volumes de données par
+étiquette — `/srv/forgejo`, `/srv/artifacts`, `/srv/backup` —, `git` (absent de
+l'image, et nécessaire au clone du § 4), le dépôt
 Docker CE officiel (la clé dans `/etc/apt/keyrings`) puis `docker-ce
 docker-ce-cli containerd.io docker-compose-plugin`, `rclone`, la rotation des
 journaux Docker,
@@ -400,6 +488,13 @@ toute fin**, et refuse de repartir si le fichier existe :
 
 ```
 14:22:07 [ERROR] déjà provisionné le 2026-08-22T14:20:11+02:00 — voir doc/RUNBOOK.md section 3
+```
+
+Et s'il manque une étiquette, il refuse **avant** d'installer quoi que ce soit —
+les trois sont vérifiées, pas seulement la première :
+
+```
+14:19:02 [ERROR] aucun volume étiqueté « backup » — le formater d'abord, voir doc/RUNBOOK.md section 2
 ```
 
 Écrit à la fin, et non au début : un script interrompu au milieu (réseau coupé,
@@ -524,9 +619,21 @@ cd forgejo && docker compose pull && docker compose up -d
 docker compose logs -f forgejo
 ./scripts/fj-check.py
 
-# 5. Sur le NŒUD, une fois sûr — un snapshot oublié grossit en silence
+# 5. Dans la VM — l'ancienne image reste sur le disque système
+docker image prune -f
+docker image ls | grep forgejo
+
+# 6. Sur le NŒUD, une fois sûr — un snapshot oublié grossit en silence
 qm delsnapshot 300 avant-forgejo-15-0-8
 ```
+
+**`docker image prune` n'est pas une coquetterie de rangement.** Le disque
+système fait 20 Go et chaque mise à jour y laisse la couche précédente ; c'est
+la seule chose qui grossit toute seule sur ce volume. `-f` évite la question
+interactive, et sans `-a` la commande ne touche qu'aux images sans conteneur —
+l'image épinglée en service n'est jamais candidate. Le faire **après** avoir
+vérifié que la nouvelle version tourne : tant que le snapshot est là, revenir en
+arrière ne dépend pas de l'image locale, mais autant ne pas la jeter avant.
 
 Si ça se passe mal : `qm rollback 300 avant-forgejo-15-0-8` depuis le nœud.
 C'est **le seul moyen de revenir en arrière sur une migration de schéma** —
@@ -576,13 +683,18 @@ le reste attend qu'on le décide.
 
 1. `docker compose stop forgejo` — **la base continue de tourner**
 2. `pg_dump -Fc --no-owner --no-acl` via le conteneur `db` → `db-<horodatage>.dump`
-3. `tar czf` de `/srv/forgejo/data` → `data-<horodatage>.tar.gz`, en excluant
-   `data/gitea/log` et `data/gitea/indexers` (Forgejo les reconstruit). **Le
-   registre d'artefacts n'y est pas** : il vit hors de `/data`, sur son disque,
-   et n'est pas sauvegardé — voir [Le cas des artefacts](#le-cas-des-artefacts)
+3. `tar czf --one-file-system` de `/srv/forgejo/data` →
+   `data-<horodatage>.tar.gz`, en excluant `data/gitea/log` et
+   `data/gitea/indexers` (Forgejo les reconstruit). `--one-file-system` fait que
+   l'archive **ne quitte jamais le volume des dépôts** : « base et dépôts au
+   même instant » devient vrai par construction, et non par convention.
+   **Le registre d'artefacts n'y est pas** : il vit hors de `/data`, sur son
+   disque, et il est sauvegardé **par le vzdump du nœud**, pas par la paire —
+   voir [Le cas des artefacts](#le-cas-des-artefacts)
 4. **redémarrage de Forgejo, dans un `finally`, quoi qu'il arrive**
 5. `rclone copy` de la paire vers GCS
-6. purge locale au-delà de 7 jours
+6. purge locale au-delà de 7 jours, dans `/srv/backup` et **là seulement** —
+   le distant relève du cycle de vie du bucket
 7. appel de `fj-check.py`, dont le verdict devient le code de sortie
 
 ### Pourquoi Forgejo est arrêté pendant l'archivage
@@ -811,7 +923,14 @@ dit « vérifiez » puis fournit la réponse toute faite sera copiée, pas véri
 
 Le § 2 ne nomme donc plus aucun périphérique par sa lettre : il passe par
 `/dev/disk/by-id/…drive-scsiN`, où le numéro de série reprend le slot Proxmox et
-ne dépend pas de l'ordre d'énumération du noyau.
+ne dépend pas de l'ordre d'énumération du noyau. Il ne donne plus non plus la
+correspondance lettre → slot, même à titre indicatif : c'est la sortie de
+`ls -l /dev/disk/by-id/` qui fait foi, et elle seule.
+
+Le constat ci-dessus est celui du **montage à trois disques d'alors** — 80 Go de
+données, 200 Go de registre. La machine en porte quatre depuis, aux tailles
+différentes ([§ 1](#1-créer-la-vm)) : la leçon vaut d'autant plus, il y a une
+lettre de plus à se tromper.
 
 ### La console série qui ne dit rien — 23 août 2026
 
@@ -842,7 +961,7 @@ Si rien ne vient ensuite, dans cet ordre :
    ```bash
    qm status 300
    qm config 300 | grep -E 'scsi0|boot|serial|vga'
-   # attendu : scsi0: local-lvm:vm-300-disk-0,size=20G
+   # attendu : une ligne scsi0: qui pointe un volume de 20 Go sur local-lvm
    #           boot: order=scsi0
    #           serial0: socket
    #           vga: serial0
@@ -850,8 +969,15 @@ Si rien ne vient ensuite, dans cet ordre :
 
    Un `scsi0` absent ou pointant sur un volume vide donne exactement ce
    symptôme : la VM tourne, le firmware ne trouve rien à démarrer, et la
-   console reste muette parce que le noyau n'a jamais été chargé. Voir la
-   remarque sur le volid de `qm disk import` en [§ 1](#1-créer-la-vm).
+   console reste muette parce que le noyau n'a jamais été chargé.
+
+   > La forme `--scsi0 local-lvm:0,import-from=…` du [§ 1](#1-créer-la-vm)
+   > supprime toute une classe de cette panne : c'est Proxmox qui alloue le
+   > volume et l'attache dans le même geste. L'ancienne forme en deux temps —
+   > `qm disk import` puis `qm set --scsi0 <volid>` — obligeait à **recopier le
+   > volid affiché**, qui n'est `-disk-0` que si le stockage ne porte pas déjà
+   > un volume de cette VM. Un volid supposé donnait une VM qui démarre sur
+   > rien, et une console qui ne dit jamais pourquoi.
 
 3. **Vérifier que cloud-init est là.** C'est le piège qui ressemble le plus à
    une console morte alors que tout démarre :

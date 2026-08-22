@@ -8,8 +8,8 @@ hors-site sont dans doc/RUNBOOK.md section 7 ; ce fichier en tient quatre choses
 ni ne supprime. LA RÉTENTION DISTANTE EST UNE RÈGLE DU BUCKET — `purge()` ne
 touche que le local. Tout s'écrit en `.part` puis est renommé : sans ce suffixe un
 fichier est complet par construction. Le redémarrage est dans un `finally`.
-LE REGISTRE D'ARTEFACTS N'EST PAS DE SON RESSORT : hors de `data/`, sur son
-disque, non sauvegardé — doc/RUNBOOK.md, « Le cas des artefacts ».
+LE REGISTRE D'ARTEFACTS N'EST PAS DE SON RESSORT, ET SAUVEGARDÉ QUAND MÊME :
+hors de `data/`, repris par le vzdump — RUNBOOK, « Le cas des artefacts ».
 
 Codes (contrat systemd) : 0 va bien | 1 environnement inutilisable | 2 échec |
 3 intervention humaine | 130 interrompu. Constantes surchargées via FJBK_*.
@@ -32,7 +32,8 @@ def _env(nom, defaut):
 
 COMPOSE = Path(_env("COMPOSE", str(ICI.parent / "compose.yaml")))
 SRV = Path(_env("SRV", "/srv/forgejo"))
-BACKUPS = Path(_env("BACKUPS", "/srv/forgejo/backups"))
+# Son disque à lui (scsi3, backup=0) : une purge en retard n'arrête pas la base.
+BACKUPS = Path(_env("BACKUPS", "/srv/backup"))
 RETENTION = int(_env("RETENTION", "7"))
 DB_USER = _env("DB_USER", "forgejo")
 DB_NAME = _env("DB_NAME", "forgejo")
@@ -61,10 +62,8 @@ def run(argv, *, stdout=None, stdin=None, capture=False):
                           stdin=stdin, stderr=subprocess.PIPE if capture else None,
                           text=capture, check=False)
 
-def dc(*args):
-    return ["docker", "compose", "-f", str(COMPOSE), *args]
-def rclone(*args):
-    return [RCLONE, "--config", str(RCONF), *args]
+def dc(*args): return ["docker", "compose", "-f", str(COMPOSE), *args]
+def rclone(*args): return [RCLONE, "--config", str(RCONF), *args]
 def exige(argv, quoi, *, stdout=None, stdin=None):
     if run(argv, stdout=stdout, stdin=stdin).returncode != 0:
         raise Echec(quoi)
@@ -93,8 +92,7 @@ def distants():
         raise Echec(f"listage distant impossible : {r.stderr.strip()}")
     return paires(e["Name"] for e in json.loads(r.stdout or "[]"))
 
-def taille(octets):
-    return f"{octets / 1048576:.0f} Mio"
+def taille(octets): return f"{octets / 1048576:.0f} Mio"
 def chemins(stamp):
     return BACKUPS / f"db-{stamp}.dump", BACKUPS / f"data-{stamp}.tar.gz"
 
@@ -127,8 +125,8 @@ def cmd_backup(args):
     stamp = time.strftime("%Y%m%d-%H%M%S")
     dump, tgz = chemins(stamp)
     # Un plancher fixe, et non une estimation : parcourir tous les objets git
-    # coûterait plus cher que la sauvegarde. Saturer /srv arrêterait PostgreSQL
-    # net, faute de pouvoir écrire son WAL.
+    # coûterait plus cher que la sauvegarde. Sur ce disque séparé, le saturer
+    # n'arrête plus PostgreSQL — il produit une paire tronquée, ce qui est pire.
     libre = shutil.disk_usage(BACKUPS).free
     if libre < MIN_LIBRE:
         raise Echec(f"{taille(libre)} libres sur {BACKUPS}, plancher à "
@@ -141,7 +139,9 @@ def cmd_backup(args):
             exige(dc("exec", "-T", "db", "pg_dump", "-Fc", "--no-owner", "--no-acl",
                      "-U", DB_USER, DB_NAME), "pg_dump en échec", stdout=f)
         step("archive des dépôts")
-        exige(["tar", "-czf", f"{tgz}.part", "-C", str(SRV)]
+        # `--one-file-system` : l'archive ne quitte jamais le volume des dépôts,
+        # donc « base et dépôts au même instant » est vrai par construction.
+        exige(["tar", "-czf", f"{tgz}.part", "--one-file-system", "-C", str(SRV)]
               + [f"--exclude={m}" for m in EXCLUS] + ["data"],
               "archivage des dépôts en échec")
         # Le point de non-retour : après, la paire est complète.

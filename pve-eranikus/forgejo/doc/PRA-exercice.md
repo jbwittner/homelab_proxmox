@@ -37,6 +37,9 @@ Ce qui, joué distraitement, casserait la production :
 - Que les **secrets** sont récupérables. Ils viennent de sops, et si sops
   fonctionne pendant l'exercice, c'est parce que le poste va bien.
 - Que **GCS** est joignable depuis ailleurs que le LAN.
+- Que le **registre d'artefacts** est récupérable. Il vit dans le vzdump, que ce
+  scénario suppose perdu avec le nœud : l'exercice repart d'un registre vide et
+  ne prouve rien sur sa reprise.
 - Que le RTO mesuré vaut pour un vrai sinistre : ici, on ne cherche pas le
   matériel, on ne prévient personne, et on sait déjà quoi faire.
 
@@ -66,7 +69,7 @@ première commande est tapée. Le temps de lire le PRA fait partie du RTO.
 | **T0 — décision** | `______` | — |
 | Image Debian récupérée et vérifiée (§ 3.1) | `______` | `______` |
 | VM créée et démarrée (§ 3.2) | `______` | `______` |
-| `/srv` formaté et étiqueté (§ 3.3) | `______` | `______` |
+| Les trois volumes formatés et étiquetés (§ 3.3) | `______` | `______` |
 | `init.sh` terminé (§ 3.4) | `______` | `______` |
 | Secrets et clé rclone reposés (§ 3.5) | `______` | `______` |
 | Pile vide démarrée, `db` healthy (§ 3.6) | `______` | `______` |
@@ -89,15 +92,20 @@ exercice qu'il faut compléter.
 - [ ] § 3.1 — image récupérée, `sha512sum` **vérifié** (ne pas sauter : c'est
       aussi ce qu'on éprouve)
 - [ ] § 3.2 — VM créée avec le VMID et l'IP **jetables** relevés plus haut
-- [ ] § 3.3 — `/srv` formaté, `blkid -L srv` répond
+- [ ] § 3.3 — les **trois** volumes formatés : `blkid -L srv`,
+      `blkid -L artifacts` et `blkid -L backup` répondent chacun, et la taille
+      en face de l'étiquette est la bonne (40, 100, 50 Go)
 - [ ] § 3.4 — dépôt cloné **depuis GitHub**, `init.sh` passé
 - [ ] § 3.5 — `.env` et clé rclone déposés depuis le poste
 - [ ] § 3.6 — `docker compose up -d`, `db` healthy
 - [ ] § 3.7 — `fjbk verify <horodatage>` **avant** `fjbk restore`
 - [ ] § 3.7 — `fjbk restore <horodatage>`, horodatage retapé à la confirmation
-- [ ] § 3.10 — `fj-check.py` : les cinq contrôles
+- [ ] § 3.10 — `fj-check.py` : les **six** contrôles, dont `montages`
 - [ ] § 3.10 — clone HTTPS **et** SSH, depuis une machine du LAN
 - [ ] Ouvrir l'interface : un dépôt, un ticket, un compte — les trois sont là ?
+- [ ] **Le registre est vide, et c'est attendu dans ce scénario** : il est
+      sauvegardé par le vzdump, resté sur le nœud perdu. Vérifier qu'on sait
+      republier une image avant de considérer la reprise finie.
 
 ### Contrôles de fond, une fois remonté
 
@@ -106,15 +114,25 @@ exercice qu'il faut compléter.
 docker compose exec -T db psql -U forgejo -tAc 'SHOW data_directory'
 # attendu : /var/lib/postgresql/data
 
+# Les trois volumes sont des POINTS DE MONTAGE, et pas de simples répertoires
+# posés sur le disque système. C'est le seul mode de panne silencieux du
+# montage : tout fonctionne, et tout s'écrit au mauvais endroit.
+findmnt -no SOURCE,SIZE /srv/forgejo /srv/artifacts /srv/backup
+# trois lignes attendues ; une ligne manquante = un volume non monté
+
 # Les dépôts appartiennent à l'UID du conteneur
 stat -c '%u:%g %n' /srv/forgejo/data
 # attendu : 1000:1000
+
+# Les paires rapatriées sont bien allées sur le disque des sauvegardes
+ls -lh /srv/backup/
 
 # Forgejo est bien à la version épinglée
 docker compose exec -T forgejo forgejo --version
 ```
 
 - [ ] `data_directory` = `/var/lib/postgresql/data`
+- [ ] `findmnt` répond **trois** lignes
 - [ ] `/srv/forgejo/data` en `1000:1000`
 - [ ] version = celle de `compose.yaml`
 - [ ] nombre de dépôts vus dans l'interface : `______` (attendu : `______`)

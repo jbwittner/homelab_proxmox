@@ -7,11 +7,11 @@
 # de repasser. Ce qui se met à jour ensuite le fait par `sys-update.sh` et par
 # `docker compose pull`.
 #
-# IL NE FORMATE JAMAIS RIEN. Les deux `mkfs.ext4` — étiquettes « srv » et
-# « packages » — sont des commandes du runbook, tapées à la main, une fois
-# chacune : voir doc/RUNBOOK.md section 2. C'est le seul geste de tout ce
-# montage qui puisse détruire les dépôts, et il n'a rien à faire dans un script
-# qu'on lance sans relire.
+# IL NE FORMATE JAMAIS RIEN. Les trois `mkfs.ext4` — étiquettes « srv »,
+# « artifacts » et « backup » — sont des commandes du runbook, tapées à la
+# main, une fois chacune : voir doc/RUNBOOK.md section 2. C'est le seul geste
+# de tout ce montage qui puisse détruire les dépôts, et il n'a rien à faire
+# dans un script qu'on lance sans relire.
 #
 # À jouer en root, dans une VM Debian 13 fraîchement créée (runbook § 1).
 #
@@ -33,7 +33,9 @@ if [[ -e $TEMOIN ]]; then
 fi
 
 # Les volumes de données AVANT tout le reste : inutile d'installer Docker sur
-# une VM dont /srv n'existera pas.
+# une VM dont les trois disques ne sont pas formatés. Les étiquettes sont
+# vérifiées TOUTES LES TROIS, et l'absence de l'une suffit à refuser — une VM
+# provisionnée avec deux volumes sur trois démarre et écrit au mauvais endroit.
 #
 # `-c /dev/null` : sonder les disques SANS passer par /run/blkid/blkid.tab. Le
 # cache est en retard sur un mkfs tout juste fait, et sans ce drapeau le script
@@ -41,10 +43,10 @@ fi
 # accuse le disque alors que le fautif est le cache.
 etiquette() { blkid -c /dev/null -L "$1" >/dev/null 2>&1; }
 
-etiquette srv \
-  || die "aucun volume étiqueté « srv » — le formater d'abord, voir doc/RUNBOOK.md section 2"
-etiquette packages \
-  || die "aucun volume étiqueté « packages » — le formater d'abord, voir doc/RUNBOOK.md section 2"
+for nom in srv artifacts backup; do
+  etiquette "$nom" \
+    || die "aucun volume étiqueté « $nom » — le formater d'abord, voir doc/RUNBOOK.md section 2"
+done
 
 log "mise à jour du système"
 export DEBIAN_FRONTEND=noninteractive
@@ -56,23 +58,31 @@ apt-get -y -qq dist-upgrade
 apt-get -y -qq install ca-certificates curl git gnupg rclone qemu-guest-agent \
                        unattended-upgrades
 
-log "montage des volumes par étiquette"
-# Par LABEL et non par /dev/sdX : l'ordre d'énumération des disques n'est pas
-# garanti, et un /srv monté sur le disque système remplirait la racine.
-mkdir -p /srv
-grep -q 'LABEL=srv' /etc/fstab || echo 'LABEL=srv /srv ext4 defaults,noatime 0 2' >> /etc/fstab
-mountpoint -q /srv || mount /srv
-mkdir -p /srv/forgejo/data /srv/forgejo/db /srv/forgejo/backups /srv/packages
+log "montage des trois volumes de données par étiquette"
+# Par LABEL et non par /dev/sdX : l'ordre d'énumération des disques ne suit pas
+# les numéros de slot Proxmox (§ 9), et la lettre peut changer d'un démarrage à
+# l'autre. L'étiquette, non.
+#
+# TROIS POINTS DE MONTAGE FRÈRES, et /srv lui-même reste sur le disque système.
+# Chacun a son cycle de vie : /srv/forgejo se sauvegarde en paire, /srv/artifacts
+# est repris par le vzdump, /srv/backup est explicitement hors de tout vzdump.
+# Aucun n'est sous un autre : remplir l'un ne peut donc pas empêcher les autres
+# d'écrire — c'est toute la raison d'être du découpage.
+mkdir -p /srv/forgejo /srv/artifacts /srv/backup
+for etq in srv:/srv/forgejo artifacts:/srv/artifacts backup:/srv/backup; do
+  nom=${etq%%:*}
+  point=${etq#*:}
+  grep -q "LABEL=$nom " /etc/fstab \
+    || echo "LABEL=$nom $point ext4 defaults 0 2" >> /etc/fstab
+  mountpoint -q "$point" || mount "$point"
+done
 
-# Le registre d'artefacts, sur SON disque : il n'est ni sauvegardé par `fjbk`
-# ni repris par le vzdump (backup=0). Monté APRÈS /srv, sinon le point de
-# montage disparaîtrait sous celui de /srv.
-grep -q 'LABEL=packages' /etc/fstab \
-  || echo 'LABEL=packages /srv/packages ext4 defaults,noatime 0 2' >> /etc/fstab
-mountpoint -q /srv/packages || mount /srv/packages
-# 1000:1000 : Forgejo CRÉE ce répertoire au démarrage et refuse de démarrer
-# s'il ne peut pas y écrire — vérifié sur l'image 15.0.7.
-chown 1000:1000 /srv/packages
+# APRÈS les montages, jamais avant : créés sur un point de montage vide, ces
+# répertoires disparaîtraient sous le volume au premier `mount`.
+mkdir -p /srv/forgejo/data /srv/forgejo/db
+# 1000:1000 : Forgejo CRÉE le répertoire des artefacts au démarrage et refuse
+# de démarrer s'il ne peut pas y écrire — vérifié sur l'image 15.0.7.
+chown 1000:1000 /srv/artifacts
 
 log "dépôt Docker CE officiel"
 # Le dépôt de Docker, pas les paquets Debian : `docker-compose-plugin` (la

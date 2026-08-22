@@ -21,20 +21,24 @@ Ce fichier ne porte que **ce qu'on tape**. Le reste est dans `doc/` :
 | VMID | **300**, hostname `forgejo` |
 | IP | `192.168.1.56/24`, passerelle `192.168.1.254` |
 | Nœud | `pve-eranikus` (192.168.1.11), Debian 13 (`genericcloud`) |
-| Ressources | 2 vCPU, 4 Go, disque système 20 Go (`local-lvm`) |
-| Données | **disque 80 Go** sur le pool ZFS `data`, monté sur `/srv` par `LABEL=srv` — [dimensionnement](doc/RUNBOOK.md#dimensionner-srv) |
-| Artefacts | **disque 200 Go dédié**, `LABEL=packages` → `/srv/packages`, `backup=0`. **Non sauvegardé, c'est une décision** — [pourquoi](doc/RUNBOOK.md#le-cas-des-artefacts) |
+| Ressources | 2 vCPU, 4 Go **fixes** (`balloon 0`), disque système 20 Go (`local-lvm`) |
+| Données | **40 Go**, `LABEL=srv` → `/srv/forgejo` — dépôts, LFS, pièces jointes **et** la base, sur le même volume. Sauvegardé. [dimensionnement](doc/RUNBOOK.md#dimensionner-les-trois-volumes) |
+| Artefacts | **100 Go**, `LABEL=artifacts` → `/srv/artifacts` — le registre. **Sauvegardé, et c'est une décision** — [pourquoi](doc/RUNBOOK.md#le-cas-des-artefacts) |
+| Sauvegardes | **50 Go**, `LABEL=backup` → `/srv/backup`, `backup=0` — les 7 dernières paires, avant leur envoi vers GCS |
 | Forgejo | **15.0.7**, branche **15.0 LTS**, fin de support **15 juillet 2027** |
 | Base | PostgreSQL 18, **dans la même pile**, volume `/srv/forgejo/db` |
 | Ingress | Traefik (CT 201, `pve-ysera`) → `https://forgejo.wittner.tech/`, SSH en 2222 |
 | Sauvegarde | `fjbk backup`, toutes les nuits à 3 h, paire base + dépôts vers GCS |
 | Le dépôt, dans la VM | `/opt/homelab` |
 
-> **Le registre d'artefacts n'est pas sauvegardé, et c'est délibéré.** Images
-> OCI, paquets Java, npm, Go : ils se reconstruisent depuis le code, et le code
-> est ce qu'on sauvegarde. Après une reprise, le registre repart vide et les
-> images se republient. Trois mécanismes tiennent cette décision plutôt qu'une
-> intention — [Le cas des artefacts](doc/RUNBOOK.md#le-cas-des-artefacts).
+> **Quatre disques, quatre cycles de vie**, et aucun monté sous un autre :
+> remplir l'un ne peut pas arrêter les autres. Le registre, lui, **est
+> sauvegardé — et c'est l'inverse de la décision précédente** : « ça se
+> reconstruit depuis le code » suppose une CI disponible, or la CI a vocation à
+> vivre ici et ArgoCD tire ses images du registre. Hors de la paire nocturne,
+> mais dans le vzdump — donc il survit au [scénario 2](doc/PRA.md#2--vm-cassée)
+> et pas au [3](doc/PRA.md#3--nœud-perdu--sinistre) :
+> [Le cas des artefacts](doc/RUNBOOK.md#le-cas-des-artefacts).
 
 > **Tout est dans une seule machine, et c'est le point.** L'ancien montage
 > séparait la base (locataire d'un cluster mutualisé) des dépôts (un CT à
@@ -86,9 +90,9 @@ créent à la main, avec la commande ci-dessus.
 | La base démarre vide après une reconstruction | `PGDATA` — [runbook § 9](doc/RUNBOOK.md#9-pièges-rencontrés) |
 | L'unité `fjbk.service` est en échec | le code de retour dit lequel — [runbook § 7](doc/RUNBOOK.md#7-la-sauvegarde) |
 | `fjbk` sort en 3 | `fj-check.py` est rouge : [doc/PRA.md](doc/PRA.md) |
-| Le disque est plein | `df -h /srv` puis `fjbk list` — la purge locale garde 7 jours, et [le dimensionnement](doc/RUNBOOK.md#dimensionner-srv) explique pourquoi c'est le terme dominant |
-| `/srv` se remplit sans raison | le disque du registre n'est pas monté : les artefacts s'entassent sur le volume des dépôts — [PRA § 1, cas E](doc/PRA.md#cas-e--fj-checkpy-dit-que-le-registre-nest-pas-monté) |
-| Après une reprise, le registre est vide | **c'est attendu** : les artefacts ne sont pas sauvegardés, ils se republient — [pourquoi](doc/RUNBOOK.md#le-cas-des-artefacts) |
+| Un disque est plein | `df -h / /srv/forgejo /srv/artifacts /srv/backup` — lequel change la réponse : [PRA § 1, cas D](doc/PRA.md#cas-d--le-disque-est-plein) |
+| La racine se remplit sans raison | un volume n'est pas monté : son contenu s'écrit sur le disque système de 20 Go — [PRA § 1, cas E](doc/PRA.md#cas-e--fj-checkpy-dit-quun-volume-nest-pas-monté) |
+| Après une reprise sur un **autre nœud**, le registre est vide | **c'est attendu** : il est sauvegardé par le vzdump, resté sur le nœud perdu — [pourquoi](doc/RUNBOOK.md#le-cas-des-artefacts) |
 
 ## Où va chaque fichier
 
@@ -106,15 +110,11 @@ créent à la main, avec la commande ci-dessus.
 
 ## La boucle assumée
 
-Ce dépôt est cloné dans la VM **depuis Forgejo lui-même**. C'est une
-circularité, elle est assumée, et elle est écrite noir sur blanc dans
-[runbook § 8](doc/RUNBOOK.md#8-la-boucle-assumée) — une boucle assumée qui n'est
-écrite nulle part redevient une boucle subie.
-
-Ses deux sorties : **le clone local sur le poste** et **le push mirror vers
-GitHub**, actif en permanence. Le jour où Forgejo est mort et qu'on a besoin du
-dépôt, on ne fait pas `git pull` : on joue
-[PRA § 4](doc/PRA.md#4--forgejo-est-mort-et-jai-besoin-du-dépôt).
+Ce dépôt est cloné dans la VM **depuis Forgejo lui-même** — circularité assumée,
+et donc écrite : [runbook § 8](doc/RUNBOOK.md#8-la-boucle-assumée). Ses deux
+sorties sont le **clone local sur le poste** et le **push mirror vers GitHub**.
+Le jour où Forgejo est mort et qu'on a besoin du dépôt, on ne fait pas
+`git pull` : on joue [PRA § 4](doc/PRA.md#4--forgejo-est-mort-et-jai-besoin-du-dépôt).
 
 ## Reste à faire
 
@@ -129,7 +129,13 @@ dépôt, on ne fait pas `git pull` : on joue
       RTO du PRA est vide, et c'est volontaire.
 - [ ] Supprimer la clé de déploiement GitHub une fois la bascule faite
       ([runbook § 8](doc/RUNBOOK.md#8-la-boucle-assumée)).
-- [ ] Dimensionner le disque du registre pour de bon. 200 Go est un point de
-      départ : il s'agrandit en ligne — `qm disk resize 300 scsi2 +100G` sur le
-      nœud, puis `resize2fs "$(findmnt -no SOURCE /srv/packages)"` dans la VM —
-      et rien n'en dépend puisqu'il n'est pas sauvegardé.
+- [ ] **Répliquer les vzdump hors du nœud** — moitié manquante de la décision
+      de sauvegarder le registre : le vzdump en est le seul support, et il
+      disparaît avec le nœud ([pourquoi](doc/RUNBOOK.md#le-cas-des-artefacts)).
+- [ ] **La politique de rétention du registre**, le jour où la CI publie :
+      `/srv/artifacts` est le seul volume que rien ne fait décroître.
+- [ ] Dimensionner les volumes pour de bon. 40 / 100 / 50 Go sont des points de
+      départ, et chacun s'agrandit en ligne — `qm disk resize 300 scsi2 +100G`
+      puis `resize2fs "$(findmnt -no SOURCE /srv/artifacts)"`. C'est **le disque
+      des sauvegardes** qui plafonne les dépôts, pas le leur
+      ([le calcul](doc/RUNBOOK.md#dimensionner-les-trois-volumes)).

@@ -60,10 +60,13 @@ services:
       FORGEJO__server__APP_DATA_PATH: /data/gitea
       # LE REGISTRE DE PAQUETS VIT HORS DE /data, ET C'EST LE POINT. Par défaut
       # il serait sous APP_DATA_PATH/packages, donc dans l'archive nocturne de
-      # `fjbk` — des dizaines de Go d'images recomprimées et réexpédiées chaque
-      # nuit pour un contenu immuable. Ici il est sur SON disque, qui n'est ni
-      # sauvegardé ni repris dans le vzdump : les artefacts se reconstruisent
-      # depuis le code, le code est ce qu'on sauvegarde.
+      # `fjbk` — des dizaines de Go d'images recomprimées et réexpédiées vers
+      # GCS chaque nuit pour un contenu immuable. Ici il est sur SON disque
+      # (scsi2, /srv/artifacts) : hors de la paire, mais BIEN REPRIS PAR LE
+      # VZDUMP. ArgoCD tire ses images d'ici — le registre est sur le chemin
+      # critique du démarrage du cluster, et « ça se reconstruit depuis le
+      # code » suppose une CI, qui a vocation à tourner dans cette VM.
+      # Voir doc/RUNBOOK.md, « Le cas des artefacts ».
       # Vérifié sur l'image 15.0.7 — au démarrage, Forgejo journalise
       # « Creating new Local Storage at /packages » et ÉCHOUE À DÉMARRER s'il
       # ne peut pas y écrire. Il ne dégrade pas en silence.
@@ -150,16 +153,22 @@ services:
       # Forgejo encode un point dans un nom de section.
       FORGEJO__cron_0X2E_update_checker__ENABLED: "false"
 
-      # Pas de CI ici. Cette VM ne fait qu'une chose : servir les dépôts quand
-      # le cluster est absent.
+      # Pas de CI POUR L'INSTANT : aucun runner n'est déclaré, et activer les
+      # actions sans runner n'ouvre qu'une file de jobs qui n'avancent pas. Ce
+      # n'est plus « cette VM ne fait qu'une chose » : la CI a vocation à
+      # atterrir ici, et c'est précisément ce qui rend le registre d'artefacts
+      # assez critique pour être sauvegardé — doc/RUNBOOK.md, « Le cas des
+      # artefacts ». L'activer sera une décision, avec sa politique de rétention.
       FORGEJO__actions__ENABLED: "false"
     volumes:
       - /srv/forgejo/data:/data
-      # Disque dédié, monté par LABEL=packages. S'il n'est pas monté, le
-      # répertoire existe quand même sur /srv et Forgejo démarre en écrivant les
-      # artefacts sur le mauvais volume — d'où le contrôle de `fj-check.py`, qui
-      # vérifie que c'est bien un point de montage.
-      - /srv/packages:/packages
+      # Disque dédié, monté par LABEL=artifacts. S'il n'est pas monté, le
+      # répertoire existe quand même sur le disque SYSTÈME et Forgejo démarre en
+      # écrivant les artefacts sur la racine de 20 Go — d'où le contrôle
+      # « montages » de `fj-check.py`, qui vérifie que c'en est bien un.
+      # Le chemin CONTENEUR reste /packages : c'est le mot de Forgejo, et c'est
+      # celui qu'il journalise (« Creating new Local Storage at /packages »).
+      - /srv/artifacts:/packages
       - /etc/localtime:/etc/localtime:ro
     ports:
       - "3000:3000"

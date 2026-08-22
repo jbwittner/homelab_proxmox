@@ -21,9 +21,14 @@ import urllib.request
 from pathlib import Path
 
 COMPOSE = Path(__file__).resolve().parent.parent / "compose.yaml"
-BACKUPS = Path("/srv/forgejo/backups")
-SRV = Path("/srv")
-PAQUETS = Path("/srv/packages")
+# LES TROIS VOLUMES DE DONNÉES, chacun sur son disque, aucun sous un autre.
+# /srv lui-même reste sur le disque système : c'est pour ça que « non monté »
+# est un état possible et silencieux, et non une erreur au démarrage.
+FORGEJO = Path("/srv/forgejo")      # dépôts, LFS, pièces jointes ET base
+ARTEFACTS = Path("/srv/artifacts")  # le registre de paquets
+BACKUPS = Path("/srv/backup")       # les 7 dernières paires, avant GCS
+VOLUMES = ((FORGEJO, "dépôts et base"), (ARTEFACTS, "registre"),
+           (BACKUPS, "sauvegardes"))
 URL = "http://127.0.0.1:3000/api/healthz"
 AGE_MAX_H = 48
 LIBRE_MIN_MO = 4096
@@ -85,26 +90,40 @@ def sauvegarde():
 
 
 def espace():
-    libre = shutil.disk_usage(SRV).free // 1048576
-    return libre >= LIBRE_MIN_MO, f"{libre} Mio libres sur {SRV} (plancher {LIBRE_MIN_MO})"
+    """Les trois volumes, pas seulement celui des dépôts. Celui des sauvegardes
+    se remplit le plus vite — sept paires — et celui du registre le plus
+    sournoisement : rien ne purge les paquets tant que la CI n'a pas de
+    politique de rétention."""
+    detail, sous_plancher = [], []
+    for chemin, quoi in VOLUMES:
+        if not chemin.is_dir():
+            sous_plancher.append(f"{chemin} n'existe pas")
+            continue
+        libre = shutil.disk_usage(chemin).free // 1048576
+        detail.append(f"{chemin.name} {libre}")
+        if libre < LIBRE_MIN_MO:
+            sous_plancher.append(f"{chemin} ({quoi}) : {libre} Mio")
+    resume = ", ".join(detail) + f" Mio libres (plancher {LIBRE_MIN_MO})"
+    return (not sous_plancher, resume if not sous_plancher
+            else "SOUS LE PLANCHER — " + " ; ".join(sous_plancher))
 
 
-def paquets():
-    """Le registre est sur son propre disque, et il n'est PAS sauvegardé.
+def montages():
+    """Les trois volumes doivent être des POINTS DE MONTAGE, pas des répertoires.
 
-    Si ce disque n'est pas monté, le répertoire existe quand même sur /srv et
-    Forgejo démarre sans rien dire, en écrivant les artefacts sur le volume des
-    dépôts — qui se remplit, lui, et arrête PostgreSQL. C'est le seul mode de
-    panne silencieux de ce montage, d'où ce contrôle.
+    C'est le seul mode de panne silencieux de ce montage. Un volume non monté
+    laisse son répertoire exister sur le disque SYSTÈME de 20 Go : rien ne
+    proteste, et les dépôts, les artefacts ou les paires s'écrivent sur la
+    racine jusqu'à la remplir — donc jusqu'à arrêter PostgreSQL.
     """
-    if not PAQUETS.is_dir():
-        return False, f"{PAQUETS} n'existe pas"
-    r = run(["mountpoint", "-q", str(PAQUETS)])
-    if r.returncode != 0:
-        return False, (f"{PAQUETS} N'EST PAS UN POINT DE MONTAGE — les artefacts "
-                       "vont sur le disque des dépôts (mount /srv/packages)")
-    libre = shutil.disk_usage(PAQUETS).free // 1048576
-    return True, f"monté, {libre} Mio libres (non sauvegardé, c'est voulu)"
+    fautifs = []
+    for chemin, quoi in VOLUMES:
+        if not chemin.is_dir():
+            fautifs.append(f"{chemin} n'existe pas")
+        elif run(["mountpoint", "-q", str(chemin)]).returncode != 0:
+            fautifs.append(f"{chemin} ({quoi}) N'EST PAS MONTÉ")
+    return (not fautifs, "les trois volumes sont montés" if not fautifs
+            else " ; ".join(fautifs) + " — les monter avant toute écriture")
 
 
 CONTROLES = (
@@ -113,7 +132,7 @@ CONTROLES = (
     ("base", base),
     ("sauvegarde", sauvegarde),
     ("espace", espace),
-    ("paquets", paquets),
+    ("montages", montages),
 )
 
 
