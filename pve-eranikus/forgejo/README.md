@@ -130,5 +130,6 @@ dépôt, on ne fait pas `git pull` : on joue
 - [ ] Supprimer la clé de déploiement GitHub une fois la bascule faite
       ([runbook § 8](doc/RUNBOOK.md#8-la-boucle-assumée)).
 - [ ] Dimensionner le disque du registre pour de bon. 200 Go est un point de
-      départ : il s'agrandit en ligne (`qm disk resize 300 scsi2 +100G` puis
-      `resize2fs /dev/sdc`), et rien n'en dépend puisqu'il n'est pas sauvegardé.
+      départ : il s'agrandit en ligne — `qm disk resize 300 scsi2 +100G` sur le
+      nœud, puis `resize2fs "$(findmnt -no SOURCE /srv/packages)"` dans la VM —
+      et rien n'en dépend puisqu'il n'est pas sauvegardé.

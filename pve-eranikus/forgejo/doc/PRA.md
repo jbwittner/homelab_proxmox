@@ -142,8 +142,9 @@ pas monté, chaque image poussée s'entasse sur le volume des dépôts et le rem
 — jusqu'à ce que PostgreSQL ne puisse plus écrire son WAL.
 
 ```bash
-lsblk
-blkid -L packages          # doit répondre /dev/sdc
+lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINTS
+# -c /dev/null : sans lui, le cache de blkid peut être en retard.
+blkid -c /dev/null -L packages     # doit répondre le disque de 200 Go
 sudo mount /srv/packages
 ./scripts/fj-check.py
 ```
@@ -305,21 +306,46 @@ qm set 300 --ciupgrade 0
 qm start 300
 ```
 
-### 3.3 — Formater `/srv`
+### 3.3 — Formater les deux volumes de données
 
-> **DESTRUCTIF.** Vérifier `lsblk` avant : le disque visé est le second, celui
-> de 80 Go, et il doit être vide.
+> **DESTRUCTIF, et c'est le geste le plus dangereux de toute la reprise.**
+
+**N'écrivez jamais `/dev/sdX` de mémoire.** L'ordre d'énumération SCSI ne suit
+pas les numéros de slot Proxmox : sur la VM 300, `scsi0` — le disque système —
+avait pris `sdb`, et le disque de données `sda`. Un `mkfs` sur la lettre
+supposée détruit le système au lieu de préparer les données.
 
 ```bash
 ssh admin@192.168.1.56
-lsblk
-# attendu : sdb 80G → /srv | sdc 200G → registre
-# NE PAS INTERVERTIR : les dépôts iraient sur le disque backup=0, donc hors de
-# tout vzdump, et personne ne le verrait avant d'en avoir besoin.
-sudo mkfs.ext4 -L srv      /dev/sdb
-sudo mkfs.ext4 -L packages /dev/sdc
-sudo blkid -L srv          # doit répondre /dev/sdb
-sudo blkid -L packages     # doit répondre /dev/sdc
+lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINTS
+# Le disque système se reconnaît à ses partitions et à ses points de montage
+# (/ et /boot/efi). Les deux autres sont nus : 80 Go et 200 Go.
+```
+
+Viser les slots, pas les lettres :
+
+```bash
+ls -l /dev/disk/by-id/ | grep 'drive-scsi'
+
+SRV=/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi1     # 80 Go  → /srv
+PKG=/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi2     # 200 Go → registre
+
+# DERNIER CONTRÔLE : ni l'un ni l'autre ne doit porter de partition.
+lsblk "$SRV" "$PKG"
+
+sudo mkfs.ext4 -L srv      "$SRV"
+sudo mkfs.ext4 -L packages "$PKG"
+```
+
+**Ne pas intervertir les étiquettes** : les dépôts sur le disque `backup=0`
+seraient hors de tout vzdump, et personne ne le verrait avant d'en avoir besoin.
+
+```bash
+# -c /dev/null : sans lui, le cache de blkid peut être en retard sur le mkfs
+# et donner un refus qui accuse le disque à tort.
+sudo blkid -c /dev/null -L srv          # doit répondre le disque de 80 Go
+sudo blkid -c /dev/null -L packages     # doit répondre le disque de 200 Go
+sudo lsblk -o NAME,SIZE,FSTYPE,LABEL    # la vue d'ensemble
 ```
 
 ### 3.4 — Poser le dépôt et provisionner

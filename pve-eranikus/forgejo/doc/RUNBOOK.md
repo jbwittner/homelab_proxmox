@@ -139,13 +139,17 @@ Trois leviers, dans l'ordre où on les tire :
 
    ```bash
    qm disk resize 300 scsi1 +40G     # sur le NŒUD
-   sudo resize2fs /dev/sdb           # dans la VM, /srv reste monté
+
+   # Dans la VM. `findmnt` résout le périphérique RÉEL derrière /srv : aucune
+   # lettre n'est supposée, et il n'y a rien à vérifier deux fois.
+   sudo resize2fs "$(findmnt -no SOURCE /srv)"
    df -h /srv
    ```
 
    Pas de table de partitions à décaler : le système de fichiers occupe le
    disque entier ([§ 2](#2-formater-et-étiqueter-srv)). Le disque du registre
-   s'agrandit exactement pareil, en visant `scsi2` et `/dev/sdc`.
+   s'agrandit exactement pareil, en visant `scsi2` puis
+   `resize2fs "$(findmnt -no SOURCE /srv/packages)"`.
 
 2. **Baisser la rétention locale** — `FJBK_RETENTION=3` dans
    `/etc/default/fjbk`. L'historique long vit dans GCS ; le local n'est là que
@@ -277,40 +281,84 @@ au moment de la bascule, le CT 200 n'ayant eu qu'un locataire.
 ## 2. Formater et étiqueter `/srv`
 
 > **DESTRUCTIF. À taper à la main, une seule fois, sur une VM neuve.**
-> C'est le seul geste de tout ce montage qui puisse détruire les dépôts.
-> `init.sh` ne le fait pas et ne le fera jamais : il vérifie que l'étiquette
-> existe, et refuse de continuer sinon.
+> C'est le seul geste de tout ce montage qui puisse détruire les dépôts — ou,
+> pire et plus vite, le système. `init.sh` ne le fait pas et ne le fera jamais :
+> il vérifie que les étiquettes existent, et refuse de continuer sinon.
 
-```bash
-# Dans la VM, en root. VÉRIFIER D'ABORD lequel est lequel : ils n'ont pas la
-# même taille, et c'est le seul moyen sûr de ne pas les intervertir.
-lsblk
-# attendu : sdb (ou vdb) 80G   → /srv     : dépôts, base, sauvegardes
-#           sdc (ou vdc) 200G  → registre : artefacts, NON sauvegardé
-# les deux sans partition ni point de montage
+### N'écrivez jamais `/dev/sdX` de mémoire
 
-mkfs.ext4 -L srv      /dev/sdb
-mkfs.ext4 -L packages /dev/sdc
+**L'ordre d'énumération SCSI ne suit pas les numéros de slot Proxmox.** Constaté
+sur la VM 300 le 23 août 2026 :
 
-blkid -L srv         # doit répondre /dev/sdb
-blkid -L packages    # doit répondre /dev/sdc
+```
+sda    80G   ← scsi1, le disque de DONNÉES
+sdb    20G   ← scsi0, LE DISQUE SYSTÈME : / et /boot/efi
+sdc   200G   ← scsi2, le registre
 ```
 
-**Intervertir les deux étiquettes est le pire scénario de cette section** : les
-dépôts partiraient sur le disque `backup=0`, donc hors de tout vzdump, et le
-registre occuperait le volume sauvegardé. Rien ne le signalerait avant le jour
-où l'on chercherait une sauvegarde. D'où la vérification par la taille.
+`scsi0` avait pris `sdb`, pas `sda`. Un `mkfs.ext4 -L srv /dev/sdb` écrit de
+mémoire, ou copié d'une procédure qui suppose l'ordre, **détruit le système**.
 
-**L'étiquette, pas le nom de périphérique.** L'ordre d'énumération des disques
-n'est pas garanti d'un démarrage à l'autre ; un `/etc/fstab` qui nomme `/dev/sdb`
-peut monter le disque système sur `/srv` et remplir la racine. `init.sh` écrit
-donc `LABEL=srv` dans `fstab`, et rien d'autre.
+Les lettres ne sont donc pas une adresse. Les liens `by-id` de Proxmox, si :
+chaque disque porte un numéro de série qui reprend son slot.
+
+```bash
+ls -l /dev/disk/by-id/ | grep 'drive-scsi'
+# scsi-0QEMU_QEMU_HARDDISK_drive-scsi0 -> ../../sdb   ← système, ON N'Y TOUCHE PAS
+# scsi-0QEMU_QEMU_HARDDISK_drive-scsi1 -> ../../sda   ← /srv
+# scsi-0QEMU_QEMU_HARDDISK_drive-scsi2 -> ../../sdc   ← registre
+```
+
+### Formater
+
+Deux contrôles avant, et ils ne sont pas facultatifs : **la taille** et
+**l'absence de partition**. Un disque neuf n'a ni l'une ni l'autre ; le disque
+système a `sdb1`, `sdb14`, `sdb15` et des points de montage.
+
+```bash
+lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINTS
+```
+
+Puis, en nommant les cibles par leur slot et non par leur lettre :
+
+```bash
+SRV=/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi1     # 80 Go
+PKG=/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi2     # 200 Go
+
+# DERNIER CONTRÔLE avant d'écrire : ni l'un ni l'autre ne doit rien porter.
+lsblk "$SRV" "$PKG"
+
+mkfs.ext4 -L srv      "$SRV"
+mkfs.ext4 -L packages "$PKG"
+```
+
+Si `by-id` n'expose pas ces liens sur votre machine, retomber sur les lettres —
+mais **relues dans `lsblk` à l'instant**, jamais reprises d'un document.
+
+### Vérifier
+
+```bash
+# -c /dev/null : sonder les disques SANS le cache /run/blkid/blkid.tab, qui est
+# en retard sur un mkfs tout juste fait. C'est la forme qu'init.sh utilise, pour
+# ne pas refuser de démarrer sur un volume parfaitement formaté.
+blkid -c /dev/null -L srv
+blkid -c /dev/null -L packages
+lsblk -o NAME,SIZE,FSTYPE,LABEL
+# attendu : 80G ext4 srv | 200G ext4 packages
+```
+
+**Intervertir les deux étiquettes est le second pire scénario de cette section**
+— après avoir visé le système. Les dépôts partiraient sur le disque `backup=0`,
+donc hors de tout vzdump, et le registre occuperait le volume sauvegardé. Rien
+ne le signalerait avant le jour où l'on chercherait une sauvegarde.
+
+**L'étiquette, pas le nom de périphérique** — et c'est la même leçon qu'au-dessus.
+`init.sh` écrit `LABEL=srv` dans `/etc/fstab`, jamais `/dev/sda` : entre deux
+démarrages, la lettre peut changer, l'étiquette non.
 
 Pas de partition : le système de fichiers occupe le disque entier. Un disque
 virtuel s'agrandit par `qm disk resize` puis `resize2fs`, sans table de
 partitions à décaler.
-
----
 
 ## 3. Lancer `init.sh`
 
@@ -741,6 +789,29 @@ existante ne souffre pas du problème :
 docker compose exec -T db psql -U forgejo -tAc 'SHOW data_directory'
 # attendu : /var/lib/postgresql/data
 ```
+
+### `sda` n'est pas `scsi0` — 23 août 2026
+
+**Le quasi-accident de cette installation.** À la création de la VM 300, `lsblk`
+donnait :
+
+```
+sda    80G                        ← scsi1, disque de données
+sdb    20G  ├─sdb1 /  └─sdb15 /boot/efi   ← scsi0, LE SYSTÈME
+sdc   200G                        ← scsi2, registre
+```
+
+La première version de ce runbook écrivait `mkfs.ext4 -L srv /dev/sdb` en dur,
+en supposant que `scsi0`→`sda`. **Cette commande aurait détruit le système.**
+
+Ce qui l'a évité : le `lsblk` demandé avant, et la consigne de vérifier par la
+taille. Ce qui l'avait rendu possible : avoir écrit, deux lignes plus bas, une
+commande copiable-collable qui contredisait cette consigne. Une procédure qui
+dit « vérifiez » puis fournit la réponse toute faite sera copiée, pas vérifiée.
+
+Le § 2 ne nomme donc plus aucun périphérique par sa lettre : il passe par
+`/dev/disk/by-id/…drive-scsiN`, où le numéro de série reprend le slot Proxmox et
+ne dépend pas de l'ordre d'énumération du noyau.
 
 ### La console série qui ne dit rien — 23 août 2026
 

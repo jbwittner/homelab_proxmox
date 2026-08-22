@@ -34,9 +34,16 @@ fi
 
 # Les volumes de données AVANT tout le reste : inutile d'installer Docker sur
 # une VM dont /srv n'existera pas.
-blkid -L srv >/dev/null 2>&1 \
+#
+# `-c /dev/null` : sonder les disques SANS passer par /run/blkid/blkid.tab. Le
+# cache est en retard sur un mkfs tout juste fait, et sans ce drapeau le script
+# refuserait de démarrer sur un volume parfaitement formaté — un refus qui
+# accuse le disque alors que le fautif est le cache.
+etiquette() { blkid -c /dev/null -L "$1" >/dev/null 2>&1; }
+
+etiquette srv \
   || die "aucun volume étiqueté « srv » — le formater d'abord, voir doc/RUNBOOK.md section 2"
-blkid -L packages >/dev/null 2>&1 \
+etiquette packages \
   || die "aucun volume étiqueté « packages » — le formater d'abord, voir doc/RUNBOOK.md section 2"
 
 log "mise à jour du système"
