@@ -445,6 +445,36 @@ Les variables sont développées par **votre** shell avant que `sudo` ne
 s'exécute : les définir en `admin` puis préfixer par `sudo` fonctionne, il n'y a
 rien à réexporter.
 
+#### Relire ce que `mkfs` vient de dire
+
+Sa sortie porte deux confirmations qu'on laisse défiler à tort.
+
+**Le nombre de blocs redonne la taille**, et c'est la façon la plus directe de
+constater qu'on n'a pas formaté deux fois le même disque :
+
+```
+Creating filesystem with 10485760 4k blocks and 2621440 inodes     ← srv
+Creating filesystem with 26214400 4k blocks and 6553600 inodes     ← artifacts
+Creating filesystem with 13107200 4k blocks and 3276800 inodes     ← backup
+```
+
+| Étiquette | Blocs annoncés | × 4 ko | Attendu |
+|---|---|---|---|
+| `srv` | 10 485 760 | **40 Gio** | 40 |
+| `artifacts` | 26 214 400 | **100 Gio** | 100 |
+| `backup` | 13 107 200 | **50 Gio** | 50 |
+
+Trois nombres différents pour trois disques différents. **Deux nombres
+identiques voudraient dire qu'une variable pointait deux fois le même disque** —
+et le second `mkfs` aurait effacé le premier sans le moindre avertissement,
+puisque du point de vue de `mkfs` il n'y a rien d'anormal à formater un volume
+qui vient de l'être.
+
+**`Discarding device blocks: done`** est la seconde : le `discard=on` posé à la
+création de la VM ([§ 1](#1-créer-la-vm)) a bien pris, et les blocs libérés
+redescendent jusqu'au pool. Sur un disque qui ne le supporterait pas, cette
+ligne n'apparaîtrait pas.
+
 Si `by-id` n'expose pas ces liens sur votre machine, retomber sur les lettres —
 mais **relues dans `lsblk` à l'instant**, jamais reprises d'un document.
 
@@ -463,6 +493,12 @@ LABEL=backup    /srv/backup    ext4 defaults 0 2
 entre deux démarrages, la lettre peut changer, l'étiquette non.
 
 ### Vérifier
+
+> **`lsblk` tout nu affiche exactement la même chose qu'avant le `mkfs`** — même
+> lettres, mêmes tailles, rien de plus. Ce n'est pas que le formatage a échoué :
+> c'est que les colonnes `FSTYPE` et `LABEL` ne sont pas affichées par défaut.
+> Il faut les demander, sinon on cherche une confirmation là où elle ne peut pas
+> être.
 
 ```bash
 # -c /dev/null : sonder les disques SANS le cache /run/blkid/blkid.tab, qui est
