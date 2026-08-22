@@ -509,8 +509,40 @@ sudo blkid -c /dev/null -L artifacts
 sudo blkid -c /dev/null -L backup
 # lsblk est dans /usr/bin, lui : pas de sudo nécessaire.
 lsblk -o NAME,SIZE,FSTYPE,LABEL
-# attendu : 40G ext4 srv | 100G ext4 artifacts | 50G ext4 backup
 ```
+
+Chaque `blkid` ne répond qu'un chemin, et c'est tout ce qu'on lui demande : le
+disque qui porte l'étiquette. C'est **court au point d'avoir l'air d'un échec**,
+ce n'en est pas un.
+
+```
+admin@forgejo:/opt$ sudo blkid -c /dev/null -L srv
+/dev/sdb
+admin@forgejo:/opt$ sudo blkid -c /dev/null -L artifacts
+/dev/sdc
+admin@forgejo:/opt$ sudo blkid -c /dev/null -L backup
+/dev/sdd
+admin@forgejo:/opt$ lsblk -o NAME,SIZE,FSTYPE,LABEL
+NAME     SIZE FSTYPE  LABEL
+sda       20G
+├─sda1  19.9G ext4
+├─sda14    3M
+└─sda15  124M vfat
+sdb       40G ext4    srv
+sdc      100G ext4    artifacts
+sdd       50G ext4    backup
+sr0        4M iso9660 cidata
+```
+
+C'est la même machine qu'au [§ Formater](#formater), après. Ce qu'il faut y
+lire, dans l'ordre :
+
+| | |
+|---|---|
+| **40 G ↔ `srv`, 100 G ↔ `artifacts`, 50 G ↔ `backup`** | **la taille EN FACE de l'étiquette**, et pas seulement le fait que les trois répondent. C'est le seul contrôle qui attrape une interversion, et une interversion ne se signale jamais d'elle-même. |
+| les trois `blkid` donnent **trois chemins distincts** | `sdb`, `sdc`, `sdd`. Deux fois le même chemin voudrait dire deux étiquettes sur un seul disque — donc un `mkfs` qui a écrasé l'autre. |
+| `sda1` et `sda15` n'ont **aucune étiquette** | les partitions du système n'en portent pas. `blkid -L srv` ne peut donc structurellement pas les désigner, et `init.sh` ne peut pas monter la racine par erreur. |
+| `sr0`, `iso9660`, **`cidata`** | **le disque cloud-init**, vu de l'intérieur. `cidata` est le nom que cherche la source de données NoCloud : le voir ici prouve que `ide2` est bien attaché, sans aller interroger le nœud — voir [§ 9](#la-console-série-qui-ne-dit-rien--23-août-2026). |
 
 **Intervertir deux étiquettes est le second pire scénario de cette section** —
 après avoir visé le système. Aucun des deux échanges ne se signale tout seul :
@@ -1259,6 +1291,18 @@ Si rien ne vient ensuite, dans cet ordre :
 
    S'il répond, cloud-init a fait son travail et la console n'était qu'un faux
    problème — il fallait appuyer sur Entrée.
+
+   Et une fois **dans** la VM, la source de données se constate sans repasser
+   par le nœud : elle porte l'étiquette `cidata`.
+
+   ```bash
+   lsblk -o NAME,SIZE,FSTYPE,LABEL | grep cidata
+   # attendu : sr0   4M iso9660 cidata
+   ```
+
+   Ce contrôle-ci ne sert évidemment qu'après coup — il suppose qu'on ait pu
+   entrer, ce qui est précisément ce qui manque quand `ide2` est absent. Il vaut
+   pour confirmer, pas pour diagnostiquer.
 
 4. En dernier recours, la console depuis le nœud plutôt que par l'interface
    web : elle est plus bavarde et ne dépend pas du navigateur.
