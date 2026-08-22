@@ -85,6 +85,7 @@ créent à la main, avec la commande ci-dessus.
 | `502` depuis Traefik | la pile est-elle debout ? `docker compose ps` |
 | Une connexion réussie renvoie vers `http://192.168.1.56:3000/` | `passHostHeader` — [runbook § 9](doc/RUNBOOK.md#9-pièges-rencontrés) |
 | `ssh: connect to host … port 2222: Connection refused` | l'entryPoint `ssh` de Traefik est **statique** : redémarrer Traefik |
+| `Permission denied (publickey)` au `git pull` de la VM | la clé de déploiement n'est pas déclarée, ou le remote vise le port 22 — [runbook § 4](doc/RUNBOOK.md#le-clone-passe-par-le-port-2222-jamais-par-22) |
 | `required variable FORGEJO_… is missing a value` | le `.env` a disparu — [PRA § 1, cas C](doc/PRA.md#cas-c--forgejo-boucle-au-démarrage) |
 | Les miroirs push échouent sans message | `SECRET_KEY` n'est pas celui d'origine — [runbook § 9](doc/RUNBOOK.md#9-pièges-rencontrés) |
 | La base démarre vide après une reconstruction | `PGDATA` — [runbook § 9](doc/RUNBOOK.md#9-pièges-rencontrés) |
@@ -101,12 +102,13 @@ créent à la main, avec la commande ci-dessus.
 | `compose.yaml` | les deux services, toute la configuration en `FORGEJO__section__CLE`. **Pas d'`app.ini` versionné** : c'est le fichier que Forgejo réécrit dès qu'un secret lui manque. |
 | `env.example` | les clés attendues du `.env`, **aucune valeur** |
 | `.env` | **jamais versionné.** Chiffré par sops sur le poste, déposé par `scp` — jamais par `git pull`, la clé age reste sur le poste. |
-| `scripts/init.sh` | provisionnement d'une VM neuve, **une seule fois**. Ne formate jamais. |
+| `scripts/init.sh` | provisionnement d'une VM neuve, **une seule fois**. Ne formate jamais. Produit la clé de déploiement et affiche sa partie publique. |
 | `scripts/sys-update.sh` | `dist-upgrade`, signale le redémarrage sans le faire |
 | `scripts/fjbk` | sauvegarde et restauration. 300 lignes, un fichier, pas de moteur. |
 | `scripts/fj-check.py` | santé de la pile, `0`/`1`, `--json` |
 | `scripts/fjbk.service` / `.timer` | l'automatisme, 3 h du matin, `Persistent=true` |
 | `/etc/default/fjbk` | **hors dépôt** — le bucket et la rétention, propres à la machine |
+| `~admin/.ssh/id_ed25519` | **hors dépôt, née dans la VM et n'en sort pas** — la clé de déploiement, déclarée en **lecture seule** côté Forgejo |
 
 ## La boucle assumée
 

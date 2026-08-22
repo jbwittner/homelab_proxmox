@@ -479,7 +479,18 @@ Docker CE officiel (la clé dans `/etc/apt/keyrings`) puis `docker-ce
 docker-ce-cli containerd.io docker-compose-plugin`, `rclone`, la rotation des
 journaux Docker,
 `admin` dans le groupe `docker`, les mises à jour automatiques restreintes à la
-sécurité, le fuseau horaire, `qemu-guest-agent`.
+sécurité, **la paire de clés SSH de déploiement de la machine**, le fuseau
+horaire, `qemu-guest-agent`.
+
+Il termine en affichant la clé publique — c'est la passe de main vers le § 4, et
+la seule chose qu'un humain doit recopier ailleurs :
+
+```
+14:22:07 [INIT ] CLÉ PUBLIQUE À DÉPOSER DANS FORGEJO, en LECTURE SEULE :
+         ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA… deploy-vm300-forgejo
+```
+
+La clé **privée** ne quitte jamais la VM, et le dépôt n'en sait rien.
 
 ### Le témoin
 
@@ -517,16 +528,69 @@ un détail** : le dépôt par `git`, le `.env` par `scp`.
 
 ### Le dépôt, par clé de déploiement en lecture seule
 
+**La clé a déjà été générée par `init.sh`**, dans la VM, au nom de `admin` — et
+elle n'en sortira pas. Une clé recopiée d'une machine à l'autre ne se révoque
+plus machine par machine, or c'est tout ce qu'on demande à une clé de
+déploiement. Il reste à en déposer la **partie publique** dans Forgejo.
+
+```bash
+# Dans la VM — la relire, si la sortie d'init.sh est déjà passée
+cat ~/.ssh/id_ed25519.pub
+# ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA… deploy-vm300-forgejo
+```
+
+Puis, dans l'interface : le dépôt → **Paramètres** → **Clés de déploiement** →
+*Ajouter une clé*. Coller la ligne, et **ne pas cocher « Accès en écriture »**.
+Cette VM n'a aucune raison de pouvoir écrire dans le dépôt qu'elle sert : c'est
+la lecture seule qui protège ici, et rien d'autre.
+
+Si `init.sh` n'a pas tourné — une machine de dépannage, un essai — la même clé
+se produit à la main :
+
+```bash
+ssh-keygen -t ed25519 -N '' -C "deploy-vm300-forgejo" -f ~/.ssh/id_ed25519
+```
+
+`-N ''`, donc **sans phrase de passe**, et c'est délibéré : un `git pull` non
+interactif ne peut pas en saisir une, et une phrase de passe rangée à côté de
+la clé qu'elle protège ne protège rien.
+
+### Le clone passe par le port 2222, jamais par 22
+
 ```bash
 # Dans la VM
 sudo mkdir -p /opt/homelab
 sudo chown admin:admin /opt/homelab
-git clone git@forgejo.wittner.tech:homelab/homelab_proxmox.git /opt/homelab
+
+# La clé d'hôte AVANT le clone : sans elle, la première connexion s'arrête sur
+# une question à laquelle personne ne répondra dans un script.
+ssh-keyscan -p 2222 forgejo.wittner.tech >> ~/.ssh/known_hosts
+
+# Éprouver la clé AVANT de cloner : Forgejo salue et refuse le shell, ce qui
+# est exactement ce qu'on veut voir. Un « Permission denied (publickey) » ici
+# dit que la clé publique n'est pas déposée, ou pas sur le bon dépôt.
+ssh -T -p 2222 git@forgejo.wittner.tech
+
+git clone ssh://git@forgejo.wittner.tech:2222/homelab/homelab_proxmox.git /opt/homelab
 ```
 
-La clé de déploiement est **en lecture seule** : cette VM n'a aucune raison de
-pouvoir écrire dans le dépôt qu'elle sert. Pendant la transition, le clone se
-fait depuis le miroir GitHub — voir [§ 8](#8-la-boucle-assumée).
+> **`git clone git@forgejo.wittner.tech:homelab/…` ne marche pas**, et l'erreur
+> ne se lit pas dans son message. La forme courte `hôte:chemin` vise le **port
+> 22** — où répond le sshd d'administration de la VM, pas Forgejo. Le serveur
+> SSH de Forgejo est **interne au conteneur** (`START_SSH_SERVER`), publié en
+> 2222 par la VM et routé par Traefik : il faut la forme longue
+> `ssh://…:2222/…`. C'est la même adresse que celle des clones utilisateurs,
+> et c'est normal — il n'y a qu'un seul chemin SSH vers Forgejo.
+
+> `ssh-keyscan` fait confiance à ce qu'il trouve, une fois, sans rien vérifier.
+> Sur ce LAN c'est acceptable ; sur un lien qu'on ne maîtrise pas, ça ne l'est
+> pas. Le contrôle honnête est de comparer l'empreinte obtenue à celle que
+> Forgejo affiche, avant de la garder.
+
+Pendant la transition, le clone se fait depuis le miroir GitHub — voir
+[§ 8](#8-la-boucle-assumée). **C'est la même clé publique** qui s'y dépose : ce
+qui change est l'endroit où elle est déclarée, pas la clé, qui reste née dans
+cette machine et n'en bouge pas.
 
 ### Le `.env`, par scp depuis le poste
 
@@ -813,10 +877,15 @@ existent donc en même temps pendant la bascule.**
 clé de déploiement oubliée sur un miroir se retrouve trois ans plus tard, encore
 valide, sur un dépôt dont plus personne ne surveille les accès.
 
-- [ ] clé de déploiement GitHub créée, clone initial fait
+- [ ] clé publique de la VM (`~admin/.ssh/id_ed25519.pub`, produite par
+      `init.sh`) déclarée en **lecture seule** sur le dépôt GitHub, clone
+      initial fait
 - [ ] dépôt migré dans Forgejo, miroir push configuré et vérifié
-- [ ] clé de déploiement Forgejo créée, `git remote set-url` fait dans la VM
-- [ ] **clé de déploiement GitHub supprimée** — celle-ci, pas le miroir
+- [ ] **la même** clé publique déclarée en lecture seule sur le dépôt Forgejo,
+      puis `git remote set-url origin ssh://git@forgejo.wittner.tech:2222/homelab/homelab_proxmox.git`
+      dans la VM
+- [ ] **déclaration GitHub supprimée** — celle-ci, pas le miroir. Une clé de
+      déploiement oubliée se retrouve trois ans plus tard, encore valide.
 
 ---
 

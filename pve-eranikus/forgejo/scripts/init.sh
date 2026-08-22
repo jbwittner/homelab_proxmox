@@ -123,6 +123,24 @@ CONF
 printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n' \
   > /etc/apt/apt.conf.d/20auto-upgrades
 
+log "clé de déploiement SSH de cette machine"
+# GÉNÉRÉE ICI, et elle ne voyage pas. Une clé recopiée d'une machine à l'autre
+# ne se révoque plus machine par machine — or c'est tout ce qu'on demande à une
+# clé de déploiement.
+#
+# SANS PHRASE DE PASSE, délibérément : un `git pull` non interactif ne peut pas
+# en saisir une, et une phrase de passe rangée à côté de la clé ne protège rien.
+# Ce qui protège, c'est que la clé soit EN LECTURE SEULE côté Forgejo — la VM
+# n'a aucune raison de pouvoir écrire dans le dépôt qu'elle sert.
+#
+# `runuser` et non `sudo` : il est dans util-linux, donc là par construction, et
+# la clé doit appartenir à `admin`, qui est celui qui clonera.
+CLE=/home/admin/.ssh/id_ed25519
+runuser -u admin -- install -d -m 0700 /home/admin/.ssh
+if [[ ! -e $CLE ]]; then
+  runuser -u admin -- ssh-keygen -t ed25519 -N '' -C "deploy-vm300-forgejo" -f "$CLE"
+fi
+
 log "fuseau horaire et agent invité"
 timedatectl set-timezone "$TZ_VM"
 systemctl enable --now qemu-guest-agent
@@ -130,4 +148,6 @@ systemctl enable --now qemu-guest-agent
 mkdir -p "$(dirname "$TEMOIN")"
 date -Is > "$TEMOIN"
 log "terminé — témoin posé dans $TEMOIN"
+log "CLÉ PUBLIQUE À DÉPOSER DANS FORGEJO, en LECTURE SEULE :"
+sed 's/^/         /' "$CLE.pub"
 log "suite : déployer la pile, doc/RUNBOOK.md section 4"
