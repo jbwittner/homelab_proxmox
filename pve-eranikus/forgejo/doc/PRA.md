@@ -421,8 +421,16 @@ ce qu'on est en train de reconstruire.
 le script arrive donc par `scp`, avant le clone. Il est autonome.
 
 ```bash
-# Depuis le POSTE, à la racine du clone local
+# SUR LE POSTE, à la racine du clone local — c'est LUI qui a git, pas la VM
+cd ~/workspace/homelab_proxmox
 scp pve-eranikus/forgejo/scripts/init.sh admin@192.168.1.56:/tmp/
+```
+
+Pas de clone local sous la main ? Le miroir GitHub en donne un, et le poste a
+`git` :
+
+```bash
+git clone https://github.com/<org>/homelab_proxmox.git && cd homelab_proxmox
 ```
 
 ```bash

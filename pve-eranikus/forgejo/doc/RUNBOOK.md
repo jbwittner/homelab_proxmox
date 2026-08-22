@@ -13,7 +13,7 @@ ces renvois dans le même geste.
 
 1. [Créer la VM](#1-créer-la-vm)
 2. [Formater et étiqueter les trois disques de données](#2-formater-et-étiqueter-les-trois-disques-de-données)
-3. [Lancer `init.sh`](#3-lancer-initsh)
+3. [Déposer `init.sh` dans la VM, puis le lancer](#3-déposer-initsh-dans-la-vm-puis-le-lancer)
 4. [Déployer la pile](#4-déployer-la-pile)
 5. [Mettre à jour Forgejo](#5-mettre-à-jour-forgejo)
 6. [Mettre à jour le système](#6-mettre-à-jour-le-système)
@@ -361,8 +361,13 @@ sdc   200G   ← scsi2, le registre
 
 `scsi0` avait pris `sdb`, pas `sda`. Un `mkfs.ext4 -L srv /dev/sdb` écrit de
 mémoire, ou copié d'une procédure qui suppose l'ordre, **détruit le système**.
-Les tailles et le nombre de disques ont changé depuis ; la leçon non, et il y a
-désormais **une lettre de plus à se tromper**.
+
+**Et à la recréation en quatre disques, la même machine a rangé ses lettres dans
+l'ordre** : `scsi0` sur `sda`, `scsi1` sur `sdb`, et ainsi de suite. C'est le
+pire résultat possible pour qui cherche une règle — deux créations de la même VM,
+deux ordres différents. Une procédure écrite d'après la seconde marcherait, et
+finirait un jour par viser le système. Le détail est en
+[§ 9](#sda-nest-pas-scsi0--23-août-2026).
 
 Les lettres ne sont donc pas une adresse. Les liens `by-id` de Proxmox, si :
 chaque disque porte un numéro de série qui reprend son slot.
@@ -383,6 +388,36 @@ système porte des partitions et des points de montage.
 ```bash
 lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINTS
 ```
+
+Voici ce que donne la VM 300 à quatre disques, **avant** le `mkfs` — relevé sur
+la machine, `lsblk` nu :
+
+```
+admin@forgejo:/opt$ lsblk
+NAME    MAJ:MIN RM  SIZE RO TYPE MOUNTPOINTS
+sda       8:0    0   20G  0 disk
+├─sda1    8:1    0 19.9G  0 part /
+├─sda14   8:14   0    3M  0 part
+└─sda15   8:15   0  124M  0 part /boot/efi
+sdb       8:16   0   40G  0 disk
+sdc       8:32   0  100G  0 disk
+sdd       8:48   0   50G  0 disk
+sr0      11:0    1    4M  1 rom
+```
+
+Ce qui se lit là-dedans — et ce qui ne s'y lit pas :
+
+| | |
+|---|---|
+| `sda` porte `/` et `/boot/efi` | **c'est le système, on n'y touche pas.** Il se reconnaît à ses partitions et à ses points de montage, jamais à sa lettre. Les `sda14`/`sda15` de 3 et 124 Mo sont les partitions d'amorçage de l'image cloud. |
+| `sdb`, `sdc`, `sdd` sont **nus** | ni partition, ni système de fichiers : c'est exactement l'état attendu avant le `mkfs`. Si l'un d'eux portait quoi que ce soit, **s'arrêter** et comprendre pourquoi. |
+| 40, 100 et 50 Go | **trois tailles distinctes, et c'est ce qui sauve.** Chaque disque de données s'identifie à sa seule taille. Deux volumes de même taille auraient rendu `lsblk` muet sur la question, et `by-id` serait alors le seul recours. |
+| `sr0`, 4 Mo, `rom` | le lecteur cloud-init (`ide2`). **S'il manque, cloud-init n'a aucune source de données** — pas d'`admin`, pas de clé, pas d'IP : voir [§ 9](#la-console-série-qui-ne-dit-rien--23-août-2026). |
+| ce qui **ne** s'y lit **pas** | **quel slot Proxmox est derrière quelle lettre.** `lsblk` ne le dit pas, et cette sortie ne vaut que pour ce démarrage-là. |
+
+La forme `-o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINTS` ci-dessus ajoute les deux
+colonnes qui manquent ici — système de fichiers et étiquette. Elles sont vides
+avant le `mkfs` ; c'est **après** qu'on les relit.
 
 Puis, en nommant les cibles par leur slot et non par leur lettre :
 
@@ -447,22 +482,56 @@ Pas de partition : le système de fichiers occupe le disque entier. Un disque
 virtuel s'agrandit par `qm disk resize` puis `resize2fs`, sans table de
 partitions à décaler.
 
-## 3. Lancer `init.sh`
+**La suite est le [§ 3](#3-déposer-initsh-dans-la-vm-puis-le-lancer)** — et elle
+commence par **revenir sur le poste**.
 
-**Le script arrive par `scp`, pas par `git`** — et il n'y a pas d'autre choix :
+## 3. Déposer `init.sh` dans la VM, puis le lancer
+
+**Le fichier arrive par `scp`, pas par `git`** — et il n'y a pas d'autre choix :
 l'image `genericcloud` n'a pas `git`, et c'est justement `init.sh` qui
 l'installe. Cloner d'abord serait impossible. C'est aussi le seul moment où ce
 fichier voyage seul, et c'est tout l'intérêt d'un script d'un seul fichier sans
 dépendance : il se copie et il tourne.
 
-```bash
-# Depuis le POSTE, à la racine du clone local du dépôt
-scp pve-eranikus/forgejo/scripts/init.sh admin@192.168.1.56:/tmp/
+> Le [§ 2](#2-formater-et-étiqueter-les-trois-disques-de-données) se joue
+> **dans** la VM ; celui-ci commence **sur le poste**. C'est le seul
+> aller-retour de tout le montage, et il vaut mieux le voir venir que le
+> découvrir en cherchant un `git` qui n'est pas là.
 
+### Le déposer
+
+```bash
+# SUR LE POSTE, à la racine du clone local de ce dépôt
+cd ~/workspace/homelab_proxmox
+scp pve-eranikus/forgejo/scripts/init.sh admin@192.168.1.56:/tmp/
+```
+
+Si le poste n'a pas ce dépôt sous la main — poste neuf, dépannage — il l'obtient
+en une commande. **C'est le poste qui a `git`, pas la VM**, et c'est tout le
+propos :
+
+```bash
+git clone https://github.com/<org>/homelab_proxmox.git
+cd homelab_proxmox
+```
+
+Le `scp` s'authentifie avec la clé que cloud-init a posée au premier démarrage
+(`--sshkeys`, [§ 1](#1-créer-la-vm)) : il n'y a rien à configurer. **S'il demande
+un mot de passe, c'est que cloud-init n'a pas fait son travail** — la VM démarre
+alors très bien et n'a ni `admin`, ni clé, ni IP fixe :
+[§ 9](#la-console-série-qui-ne-dit-rien--23-août-2026).
+
+### Le lancer
+
+```bash
 # Dans la VM
 ssh admin@192.168.1.56
+ls -l /tmp/init.sh          # arrivé entier ? ~7 ko
 sudo bash /tmp/init.sh
 ```
+
+`sudo bash /tmp/init.sh`, et non `./init.sh` : `scp` ne transporte pas le bit
+d'exécution, et un `chmod +x` de plus est une étape de plus à oublier.
 
 Ensuite seulement le dépôt se clone ([§ 4](#4-déployer-la-pile)), et les
 exécutions suivantes utilisent la copie versionnée :
@@ -996,10 +1065,31 @@ ne dépend pas de l'ordre d'énumération du noyau. Il ne donne plus non plus la
 correspondance lettre → slot, même à titre indicatif : c'est la sortie de
 `ls -l /dev/disk/by-id/` qui fait foi, et elle seule.
 
+### Le même piège, retourné : la recréation en quatre disques
+
 Le constat ci-dessus est celui du **montage à trois disques d'alors** — 80 Go de
-données, 200 Go de registre. La machine en porte quatre depuis, aux tailles
-différentes ([§ 1](#1-créer-la-vm)) : la leçon vaut d'autant plus, il y a une
-lettre de plus à se tromper.
+données, 200 Go de registre. La machine a été recréée depuis, à quatre disques
+([§ 1](#1-créer-la-vm)), et `lsblk` y donne :
+
+```
+sda    20G  ├─sda1 /  └─sda15 /boot/efi   ← scsi0, LE SYSTÈME
+sdb    40G                                ← scsi1
+sdc   100G                                ← scsi2
+sdd    50G                                ← scsi3
+```
+
+**Cette fois les lettres suivent les slots.** La correspondance se déduit des
+tailles — 20, 40, 100, 50 Go sont celles de `scsi0` à `scsi3`, et elles sont
+toutes différentes — et non d'une règle : il n'y en a pas.
+
+Et c'est le pire résultat possible. **La même VM, deux créations, deux ordres.**
+Qui n'aurait vu que cette sortie-ci en tirerait « `scsi0` → `sda` », écrirait
+une procédure qui marche, et détruirait le système la fois d'après. Le premier
+constat sans le second laisserait croire à un ordre inversé stable ; les deux
+ensemble disent la seule chose vraie : **il n'y a pas d'ordre**.
+
+Il n'y a donc pas de correspondance à retenir. Il y a
+`ls -l /dev/disk/by-id/ | grep drive-scsi` à relire, à chaque fois.
 
 ### La console série qui ne dit rien — 23 août 2026
 
