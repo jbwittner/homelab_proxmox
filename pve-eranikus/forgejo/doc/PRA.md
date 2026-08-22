@@ -327,17 +327,27 @@ sudo blkid -L packages     # doit répondre /dev/sdc
 **Le clone se fait depuis GitHub, pas depuis Forgejo** — Forgejo est justement
 ce qu'on est en train de reconstruire.
 
+`git` n'est PAS sur l'image `genericcloud`, et c'est `init.sh` qui l'installe :
+le script arrive donc par `scp`, avant le clone. Il est autonome.
+
 ```bash
+# Depuis le POSTE, à la racine du clone local
+scp pve-eranikus/forgejo/scripts/init.sh admin@192.168.1.56:/tmp/
+```
+
+```bash
+# Dans la VM
+sudo bash /tmp/init.sh
+
+# git est là maintenant : cloner DEPUIS GITHUB, pas depuis Forgejo
 sudo mkdir -p /opt/homelab
 sudo chown admin:admin /opt/homelab
 git clone https://github.com/<org>/homelab_proxmox.git /opt/homelab
-
-sudo /opt/homelab/pve-eranikus/forgejo/scripts/init.sh
 ```
 
-`init.sh` installe Docker, monte `/srv` par étiquette, pose rclone. Il refuse de
-tourner si `blkid -L srv` ne répond rien — c'est-à-dire si l'étape 3.3 a été
-sautée.
+`init.sh` installe Docker, `git` et rclone, et monte les deux volumes par
+étiquette. Il refuse de tourner si `blkid -L srv` ou `blkid -L packages` ne
+répond rien — c'est-à-dire si l'étape 3.3 a été sautée.
 
 Se déconnecter et se reconnecter pour que l'appartenance au groupe `docker`
 prenne effet.

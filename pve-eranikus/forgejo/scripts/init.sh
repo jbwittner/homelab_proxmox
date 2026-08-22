@@ -43,7 +43,11 @@ log "mise à jour du système"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get -y -qq dist-upgrade
-apt-get -y -qq install ca-certificates curl gnupg rclone qemu-guest-agent unattended-upgrades
+# `git` en fait partie : l'image genericcloud ne l'a pas, et c'est lui qui
+# clonera le dépôt juste après (§ 4). Ce script est donc déposé par scp la
+# première fois — il est autonome, c'est tout l'intérêt d'un fichier unique.
+apt-get -y -qq install ca-certificates curl git gnupg rclone qemu-guest-agent \
+                       unattended-upgrades
 
 log "montage des volumes par étiquette"
 # Par LABEL et non par /dev/sdX : l'ordre d'énumération des disques n'est pas

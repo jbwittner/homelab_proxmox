@@ -314,15 +314,34 @@ partitions à décaler.
 
 ## 3. Lancer `init.sh`
 
+**Le script arrive par `scp`, pas par `git`** — et il n'y a pas d'autre choix :
+l'image `genericcloud` n'a pas `git`, et c'est justement `init.sh` qui
+l'installe. Cloner d'abord serait impossible. C'est aussi le seul moment où ce
+fichier voyage seul, et c'est tout l'intérêt d'un script d'un seul fichier sans
+dépendance : il se copie et il tourne.
+
 ```bash
-# Depuis le poste, une fois le dépôt cloné dans la VM (voir § 4)
+# Depuis le POSTE, à la racine du clone local du dépôt
+scp pve-eranikus/forgejo/scripts/init.sh admin@192.168.1.56:/tmp/
+
+# Dans la VM
 ssh admin@192.168.1.56
-sudo /opt/homelab/pve-eranikus/forgejo/scripts/init.sh
+sudo bash /tmp/init.sh
 ```
 
-Il pose : mise à jour du système, montage de `/srv` par étiquette, dépôt Docker
-CE officiel (la clé dans `/etc/apt/keyrings`) puis `docker-ce docker-ce-cli
-containerd.io docker-compose-plugin`, `rclone`, la rotation des journaux Docker,
+Ensuite seulement le dépôt se clone ([§ 4](#4-déployer-la-pile)), et les
+exécutions suivantes utilisent la copie versionnée :
+
+```bash
+sudo /opt/homelab/pve-eranikus/forgejo/scripts/init.sh
+# → refusera, témoin posé. C'est le comportement voulu.
+```
+
+Il pose : mise à jour du système, montage de `/srv` et de `/srv/packages` par
+étiquette, `git` (absent de l'image, et nécessaire au clone du § 4), le dépôt
+Docker CE officiel (la clé dans `/etc/apt/keyrings`) puis `docker-ce
+docker-ce-cli containerd.io docker-compose-plugin`, `rclone`, la rotation des
+journaux Docker,
 `admin` dans le groupe `docker`, les mises à jour automatiques restreintes à la
 sécurité, le fuseau horaire, `qemu-guest-agent`.
 
