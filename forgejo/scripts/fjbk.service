@@ -1,0 +1,35 @@
+# Sauvegarde de la pile Forgejo. Déclenchée par fjbk.timer, jamais par cron.
+#
+# TOUT CODE NON NUL MARQUE L'UNITÉ EN ÉCHEC, et c'est voulu : 1 (environnement
+# inutilisable), 2 (opération en échec) et 3 (la pile demande une intervention)
+# méritent tous les trois qu'on aille voir. Ne pas ajouter de SuccessExitStatus
+# pour « lisser » le 3 — c'est précisément celui qui dit que Forgejo n'est
+# peut-être pas remonté.
+#
+# La configuration propre à la machine — au minimum FJBK_BUCKET — va dans
+# /etc/default/fjbk, hors dépôt, sous la forme :
+#
+#     FJBK_BUCKET=le-bucket-dedie
+#     FJBK_PREFIX=forgejo
+#     FJBK_RETENTION=7
+#
+# Voir doc/RUNBOOK.md section 7.
+
+[Unit]
+Description=Sauvegarde Forgejo — paire base + dépôts, copie hors-site
+Documentation=file:/opt/homelab/forgejo/doc/RUNBOOK.md
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/fjbk
+ExecStart=/opt/homelab/forgejo/scripts/fjbk backup
+# La sauvegarde arrête Forgejo puis le redémarre : la tuer en cours de route
+# laisserait le service à terre, `finally` ou pas. Large, donc.
+TimeoutStartSec=2h
+# Les dumps et l'archive sont écrits en 600 par root ; rclone lit la clé du
+# compte de service dans /root/.config.
+User=root
+Nice=10
+IOSchedulingClass=idle

@@ -1,0 +1,19 @@
+# Déclencheur de fjbk.service. Un timer systemd, pas cron : le journal, l'état
+# et le rattrapage après extinction sont au même endroit que le service.
+
+[Unit]
+Description=Sauvegarde Forgejo quotidienne
+Documentation=file:/opt/homelab/forgejo/doc/RUNBOOK.md
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+# Forgejo est arrêté pendant l'archivage : une heure de démarrage exactement
+# ronde est aussi celle où tout le reste du parc s'agite. Et si un jour une
+# seconde VM sauvegarde vers le même bucket, elles ne partiront pas ensemble.
+RandomizedDelaySec=10m
+# La VM peut être éteinte à 3 h — un nœud redémarré, une coupure. Sans ça, la
+# sauvegarde de la nuit est simplement sautée et personne ne le remarque.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+"""fjbk — sauvegarde et restauration de la pile Forgejo. Un fichier, sans moteur.
+
+UNE PAIRE, PAS DEUX SAUVEGARDES : un dump de base et une archive des dépôts pris
+au même instant, Forgejo arrêté entre les deux. Le pourquoi et la doctrine
+hors-site sont dans doc/RUNBOOK.md section 7 ; ce fichier en tient trois choses.
+`copy` et jamais `sync`, en `--ignore-existing` : le compte de service n'écrase
+ni ne supprime, et LA RÉTENTION DISTANTE EST UNE RÈGLE DE CYCLE DE VIE DU BUCKET
+— `purge()` ne touche que le local. Tout s'écrit en `.part` puis est renommé :
+sans ce suffixe, un fichier est complet par construction. Le redémarrage de
+Forgejo est dans un `finally`.
+
+Codes de retour (contrat systemd) : 0 va bien | 1 environnement inutilisable |
+2 échec | 3 intervention humaine | 130 interrompu. Les constantes ci-dessous
+sont surchargées par les FJBK_* que `fjbk.service` lit dans /etc/default/fjbk.
+"""
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+EXIT_OK, EXIT_ENV, EXIT_FAILED, EXIT_HUMAIN, EXIT_SIGNAL = 0, 1, 2, 3, 130
+ICI = Path(__file__).resolve().parent
+
+def _env(nom, defaut):
+    return os.environ.get(f"FJBK_{nom}", "") or defaut
+
+COMPOSE = Path(_env("COMPOSE", str(ICI.parent / "compose.yaml")))
+SRV = Path(_env("SRV", "/srv/forgejo"))
+BACKUPS = Path(_env("BACKUPS", "/srv/forgejo/backups"))
+RETENTION = int(_env("RETENTION", "7"))
+DB_USER = _env("DB_USER", "forgejo")
+DB_NAME = _env("DB_NAME", "forgejo")
+OWNER = _env("OWNER", "1000:1000")
+RCLONE = _env("RCLONE", "/usr/bin/rclone")  # absolu : le PATH de systemd est minimal
+RCONF = Path(_env("RCLONE_CONFIG", "/root/.config/rclone/rclone.conf"))
+RKEY = Path(_env("RCLONE_KEY", "/root/.config/rclone/forgejo-backups.json"))
+BUCKET = _env("BUCKET", "")  # bucket DÉDIÉ, à renseigner — voir RUNBOOK § 7
+BASE = f"{_env('REMOTE', 'gcs')}:{BUCKET}/{_env('PREFIX', 'forgejo')}"
+CHECK = Path(_env("CHECK", str(ICI / "fj-check.py")))
+MIN_LIBRE = int(_env("MIN_LIBRE_MO", "4096")) * 1048576
+# Forgejo les reconstruit au démarrage : les archiver doublerait la sauvegarde.
+EXCLUS = ("data/gitea/log", "data/gitea/indexers")
+
+def step(m): print(f"{time.strftime('%H:%M:%S')} [STEP ] {m}", flush=True)
+def warn(m): print(f"{time.strftime('%H:%M:%S')} [WARN ] {m}", file=sys.stderr, flush=True)
+def erreur(m): print(f"{time.strftime('%H:%M:%S')} [ERROR] {m}", file=sys.stderr, flush=True)
+class Echec(RuntimeError):
+    def __init__(self, message, code=EXIT_FAILED):
+        super().__init__(message)
+        self.code = code
+
+def run(argv, *, stdout=None, stdin=None, capture=False):
+    """argv, jamais une chaîne shell : aucun shell, donc rien à échapper."""
+    return subprocess.run(argv, stdout=subprocess.PIPE if capture else stdout,
+                          stdin=stdin, stderr=subprocess.PIPE if capture else None,
+                          text=capture, check=False)
+
+def dc(*args):
+    return ["docker", "compose", "-f", str(COMPOSE), *args]
+def rclone(*args):
+    return [RCLONE, "--config", str(RCONF), *args]
+def exige(argv, quoi, *, stdout=None, stdin=None):
+    if run(argv, stdout=stdout, stdin=stdin).returncode != 0:
+        raise Echec(quoi)
+
+def sante():
+    # Le verdict de fj-check.py devient le nôtre : lui seul constate que Forgejo
+    # est bien remonté après l'arrêt.
+    return EXIT_HUMAIN if run([sys.executable, str(CHECK)]).returncode else EXIT_OK
+
+def paires(noms):
+    """Les horodatages vus, et ce qu'on a de chacun : `list` signale les
+    paires incomplètes, qui ne restaurent rien."""
+    vus = {}
+    for n in noms:
+        if n.startswith("db-") and n.endswith(".dump"):
+            vus.setdefault(n[3:-5], {})["db"] = n
+        elif n.startswith("data-") and n.endswith(".tar.gz"):
+            vus.setdefault(n[5:-7], {})["data"] = n
+    return vus
+
+def locaux():
+    return paires(p.name for p in BACKUPS.iterdir() if p.is_file()) if BACKUPS.is_dir() else {}
+def distants():
+    r = run(rclone("lsjson", BASE), capture=True)
+    if r.returncode != 0:
+        raise Echec(f"listage distant impossible : {r.stderr.strip()}")
+    return paires(e["Name"] for e in json.loads(r.stdout or "[]"))
+
+def taille(octets):
+    return f"{octets / 1048576:.0f} Mio"
+def chemins(stamp):
+    return BACKUPS / f"db-{stamp}.dump", BACKUPS / f"data-{stamp}.tar.gz"
+
+def preflight(*, horssite):
+    """Vérifié AVANT d'arrêter Forgejo : couper le service pour découvrir
+    ensuite qu'il n'y a pas de bucket serait la pire façon d'échouer."""
+    controles = [
+        (os.geteuid() == 0, "à lancer en root : les données sont en 1000:1000"),
+        (COMPOSE.is_file(), f"compose.yaml introuvable : {COMPOSE} — RUNBOOK § 4"),
+        (shutil.which("docker") is not None, "docker introuvable — RUNBOOK § 3"),
+    ]
+    if horssite:
+        # La dernière ligne attrape la clé tronquée, qui sinon ressort en 401.
+        cle = RKEY.read_text(encoding="utf-8", errors="replace") if RKEY.is_file() else ""
+        controles += [
+            (bool(BUCKET), "aucun bucket : FJBK_BUCKET dans /etc/default/fjbk — § 7"),
+            (os.access(RCLONE, os.X_OK), f"rclone introuvable : {RCLONE}"),
+            (os.access(RCONF, os.R_OK), f"configuration rclone illisible : {RCONF}"),
+            (bool(cle), f"clé du compte de service absente ou vide : {RKEY} — hors "
+                        "dépôt par construction, la reposer depuis sops"),
+            ('"private_key"' in cle, f"clé invalide : {RKEY}, pas de private_key"),
+        ]
+    for ok, message in controles:
+        if not ok:
+            raise Echec(message, EXIT_ENV)
+    BACKUPS.mkdir(parents=True, exist_ok=True)
+
+def cmd_backup(args):
+    preflight(horssite=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dump, tgz = chemins(stamp)
+    # Un plancher fixe, et non une estimation : parcourir tous les objets git
+    # coûterait plus cher que la sauvegarde. Saturer /srv arrêterait PostgreSQL
+    # net, faute de pouvoir écrire son WAL.
+    libre = shutil.disk_usage(BACKUPS).free
+    if libre < MIN_LIBRE:
+        raise Echec(f"{taille(libre)} libres sur {BACKUPS}, plancher à "
+                    f"{taille(MIN_LIBRE)} — purger d'anciennes paires", EXIT_ENV)
+    step(f"sauvegarde {stamp} — arrêt de Forgejo, la base reste debout")
+    exige(dc("stop", "forgejo"), "arrêt de Forgejo impossible")
+    try:
+        step("dump de la base")
+        with open(f"{dump}.part", "wb") as f:
+            exige(dc("exec", "-T", "db", "pg_dump", "-Fc", "--no-owner", "--no-acl",
+                     "-U", DB_USER, DB_NAME), "pg_dump en échec", stdout=f)
+        step("archive des dépôts")
+        exige(["tar", "-czf", f"{tgz}.part", "-C", str(SRV)]
+              + [f"--exclude={m}" for m in EXCLUS] + ["data"],
+              "archivage des dépôts en échec")
+        # Le point de non-retour : après, la paire est complète.
+        os.replace(f"{dump}.part", dump)
+        os.replace(f"{tgz}.part", tgz)
+        step(f"  base {taille(dump.stat().st_size)} | dépôts {taille(tgz.stat().st_size)}")
+    finally:
+        # Un job de sauvegarde ne laisse jamais le service à terre.
+        step("redémarrage de Forgejo")
+        if run(dc("start", "forgejo")).returncode != 0:
+            erreur("FORGEJO N'A PAS REDÉMARRÉ — voir doc/PRA.md, scénario 1")
+
+    step(f"copie hors-site vers {BASE}")
+    for f in (dump, tgz):
+        exige(rclone("copy", str(f), BASE, "--ignore-existing"),
+              f"transfert en échec : {f.name}")
+    step(f"purge locale au-delà de {RETENTION} jours")
+    purge(time.time())
+    step("contrôle de santé")
+    return sante()
+
+def purge(maintenant):
+    """Le local seulement : le distant relève du cycle de vie du bucket."""
+    presentes = locaux()
+    # Le plus récent ne part jamais, quel que soit son âge : une purge ne doit
+    # pas pouvoir vider le répertoire.
+    garde = max(presentes, default=None)
+    for stamp, paire in sorted(presentes.items()):
+        temoin = BACKUPS / next(iter(paire.values()))
+        if stamp != garde and (maintenant - temoin.stat().st_mtime) // 86400 > RETENTION:
+            for nom in paire.values():
+                (BACKUPS / nom).unlink()
+            step(f"  purgé : {stamp}")
+
+def cmd_list(args):
+    preflight(horssite=True)
+    ici, la_bas = locaux(), distants()
+    if not ici and not la_bas:
+        warn("aucune sauvegarde, ni locale ni distante")
+        return EXIT_FAILED
+    print(f"{'horodatage':<17}{'local':>11}{'âge':>8}   distant")
+    for stamp in sorted(set(ici) | set(la_bas), reverse=True):
+        l, d = ici.get(stamp, {}), la_bas.get(stamp, {})
+        fichiers = [BACKUPS / n for n in l.values()]
+        # L'âge se lit sur le mtime et non sur le nom : une paire rapatriée de
+        # GCS porte un nom ancien et un mtime récent.
+        gauche = f"{'—':>11}{'—':>8}" if not l else (
+            f"{taille(sum(f.stat().st_size for f in fichiers)):>11}"
+            f"{int((time.time() - min(f.stat().st_mtime for f in fichiers)) // 3600):>6} h")
+        etat = "complet" if len(d) == 2 else "INCOMPLET" if d else "—"
+        print(f"{stamp:<17}{gauche}   {etat}")
+        for ou, p in (("locale", l), ("distante", d)):
+            if p and len(p) != 2:
+                warn(f"  {stamp} : paire {ou} INCOMPLÈTE, il manque "
+                     f"{'la base' if 'db' not in p else 'les dépôts'}")
+    return EXIT_OK
+
+def cmd_verify(args):
+    """Une sauvegarde jamais éprouvée est une hypothèse. Ne restaure rien."""
+    preflight(horssite=False)
+    dump, tgz = chemins(args.horodatage)
+    for f in (dump, tgz):
+        if not f.is_file():
+            raise Echec(f"absent localement : {f.name} — `fjbk restore` le rapatrie")
+    with open(dump, "rb") as f:
+        lu = run(dc("exec", "-T", "db", "pg_restore", "--list"), stdin=f, capture=True)
+    if lu.returncode != 0:
+        raise Echec("dump illisible par pg_restore --list — la base doit tourner "
+                    f"(docker compose up -d db) : {lu.stderr.strip()}")
+    step(f"{dump.name} : {len(lu.stdout.splitlines())} entrée(s) d'archive")
+    lu = run(["tar", "-tzf", str(tgz)], capture=True)
+    if lu.returncode != 0:
+        raise Echec(f"archive illisible : {lu.stderr.strip()}")
+    step(f"{tgz.name} : {len(lu.stdout.splitlines())} fichier(s)")
+    step("la paire est lisible — elle n'a pas été restaurée pour autant")
+    return EXIT_OK
+
+def cmd_restore(args):
+    preflight(horssite=True)
+    stamp = args.horodatage
+    dump, tgz = chemins(stamp)
+    for f in (dump, tgz):
+        if not f.is_file():
+            step(f"rapatriement de {f.name} depuis {BASE}")
+            exige(rclone("copy", f"{BASE}/{f.name}", str(BACKUPS)),
+                  f"rapatriement en échec : {f.name}")
+    if not args.yes:
+        print(f"\n  Vont être ÉCRASÉS, sans retour, par la paire {stamp} :\n"
+              f"    la base « {DB_NAME} » du conteneur db\n"
+              f"    {SRV / 'data'} — tous les dépôts\n")
+        # Retaper l'horodatage, et non « oui » : une confirmation donnée de
+        # mémoire musculaire ne confirme rien.
+        if input("  Retaper l'horodatage pour confirmer : ").strip() != stamp:
+            erreur("annulé")
+            return EXIT_FAILED
+    step("arrêt de Forgejo, la base seule reste debout pour recevoir le dump")
+    exige(dc("stop", "forgejo"), "arrêt de Forgejo impossible")
+    exige(dc("up", "-d", "db"), "démarrage de la base impossible")
+    for _ in range(30):
+        if run(dc("exec", "-T", "db", "pg_isready", "-U", DB_USER, "-d", DB_NAME),
+               capture=True).returncode == 0:
+            break
+        time.sleep(2)
+    else:
+        raise Echec("la base n'est jamais devenue prête — voir doc/PRA.md scénario 1")
+    step("recréation de la base")
+    for sql in (f'DROP DATABASE IF EXISTS "{DB_NAME}"', f'CREATE DATABASE "{DB_NAME}"'):
+        exige(dc("exec", "-T", "db", "psql", "-U", DB_USER, "-d", "postgres", "-c", sql),
+              f"échec : {sql}")
+    step("restauration du dump")
+    with open(dump, "rb") as f:
+        exige(dc("exec", "-T", "db", "pg_restore", "--no-owner", "-U", DB_USER,
+                 "-d", DB_NAME), "pg_restore en échec", stdin=f)
+    step("restauration des dépôts")
+    shutil.rmtree(SRV / "data", ignore_errors=True)
+    exige(["tar", "-xzf", str(tgz), "-C", str(SRV)], "extraction en échec")
+    # Une archive rapatriée porte les UID de la machine qui l'a écrite ; sans
+    # ça, Forgejo démarre et ne peut pas écrire dans ses propres dépôts.
+    exige(["chown", "-R", OWNER, str(SRV / "data")], "changement de propriétaire échoué")
+    step("redémarrage de la pile")
+    exige(dc("up", "-d"), "la pile n'a pas redémarré")
+    step("contrôle de santé")
+    return sante()
+
+def main():
+    p = argparse.ArgumentParser(prog="fjbk", description=__doc__.splitlines()[0])
+    sp = p.add_subparsers(dest="commande", required=True)
+    sp.add_parser("backup", help="la paire, le hors-site, la purge, la santé"
+                  ).set_defaults(f=cmd_backup)
+    sp.add_parser("list", help="les paires locales et distantes").set_defaults(f=cmd_list)
+    for nom, aide, fonction in (("restore", "ÉCRASE la base et les dépôts", cmd_restore),
+                                ("verify", "lire la paire sans rien restaurer", cmd_verify)):
+        s = sp.add_parser(nom, help=aide)
+        s.add_argument("horodatage")
+        s.set_defaults(f=fonction)
+        if nom == "restore":
+            s.add_argument("--yes", action="store_true", help="sans confirmation")
+    # argparse sort en 2 sur une erreur d'usage — or 2 veut dire « opération en
+    # échec » dans le contrat, et une faute de frappe se lirait comme une
+    # sauvegarde ratée. Rabattu sur 1, comme le faisait l'ancien offsite.py de
+    # tout code imprévu. --help, lui, sort en 0 et passe intact.
+    try:
+        args = p.parse_args()
+    except SystemExit as sortie:
+        raise SystemExit(EXIT_ENV if sortie.code == 2 else sortie.code)
+    try:
+        return args.f(args)
+    except Echec as exc:
+        erreur(str(exc))
+        return exc.code
+    except KeyboardInterrupt:
+        erreur("interrompu")
+        return EXIT_SIGNAL
+
+if __name__ == "__main__":
+    sys.exit(main())

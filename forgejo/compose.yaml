@@ -1,0 +1,179 @@
+# Forgejo — source de vérité GitOps d'ArgoCD, base colocalisée.
+#
+# CE QUE CE FICHIER GARANTIT, ET QUI EST TOUT L'INTÉRÊT DU MONTAGE : Forgejo et
+# sa base vivent dans la MÊME VM, sur le MÊME volume. Une sauvegarde est une
+# paire cohérente prise au même instant, une restauration est un geste unique.
+# L'ancien montage — CT à binaire épinglé + locataire d'un cluster mutualisé —
+# demandait une reprise en deux temps, sur deux machines, dans le bon ordre.
+#
+# AUCUN app.ini VERSIONNÉ. Toute la configuration passe par des variables
+# FORGEJO__section__CLE. Un app.ini dans le dépôt est un fichier que Forgejo
+# réécrit dès qu'il lui manque un secret qu'il sait générer — et le montage en
+# lecture seule qui empêche cette réécriture fait alors échouer le démarrage
+# sans que la cause soit lisible. Les quatre secrets sont donc PRÉ-GÉNÉRÉS et
+# injectés ; c'est ce qui rend une configuration déclarative tenable.
+#
+# Les valeurs sensibles viennent de `.env`, JAMAIS versionné (chiffré sops sur
+# le poste, déposé par scp — voir doc/RUNBOOK.md section 4). `env.example` en
+# porte les clés, sans valeur. Le `:?` de chaque référence fait échouer
+# `docker compose up` sur une clé absente plutôt que de démarrer un Forgejo
+# avec un secret vide, qu'il régénérerait en silence.
+
+services:
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:15.0.7
+    container_name: forgejo
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Le conteneur tourne sous cet UID/GID, et c'est celui que `fjbk restore`
+      # repose sur /srv/forgejo/data après extraction : une archive rapatriée
+      # depuis GCS arrive avec les UID de la machine qui l'a écrite.
+      USER_UID: "1000"
+      USER_GID: "1000"
+
+      FORGEJO__DEFAULT__APP_NAME: Forgejo
+      FORGEJO__DEFAULT__RUN_MODE: prod
+
+      # ─── Serveur ───────────────────────────────────────────────────────────
+      FORGEJO__server__PROTOCOL: http
+      FORGEJO__server__HTTP_ADDR: 0.0.0.0
+      FORGEJO__server__HTTP_PORT: "3000"
+      FORGEJO__server__DOMAIN: forgejo.wittner.tech
+      FORGEJO__server__ROOT_URL: https://forgejo.wittner.tech/
+      # Un seul nom d'hôte pour les deux protocoles : les URL de clone que
+      # Forgejo affiche sont justes sans entrée DNS supplémentaire, et ne
+      # portent pas d'IP — donc elles survivent à un changement d'adresse.
+      FORGEJO__server__SSH_DOMAIN: forgejo.wittner.tech
+      # Le port ANNONCÉ dans les URL de clone : celui que Traefik publie.
+      FORGEJO__server__SSH_PORT: "2222"
+      # Serveur SSH INTERNE (Go), et non un sshd. Les clés publiques des
+      # utilisateurs restent gérées par Forgejo seul et ne touchent jamais un
+      # authorized_keys partagé avec l'administration de la VM.
+      FORGEJO__server__START_SSH_SERVER: "true"
+      FORGEJO__server__SSH_LISTEN_HOST: 0.0.0.0
+      # Le port ÉCOUTÉ dans le conteneur, que la VM publie en 2222. Ne pas le
+      # confondre avec SSH_PORT ci-dessus : l'un route, l'autre s'affiche.
+      FORGEJO__server__SSH_LISTEN_PORT: "22"
+      FORGEJO__server__APP_DATA_PATH: /data/gitea
+      FORGEJO__server__LFS_START_SERVER: "true"
+      FORGEJO__server__LFS_JWT_SECRET: ${FORGEJO_LFS_JWT_SECRET:?}
+      # Aucune ressource distante (avatars Gravatar, contrôle de version en
+      # ligne). Une source de vérité ne doit rien attendre d'internet pour
+      # s'afficher.
+      FORGEJO__server__OFFLINE_MODE: "true"
+
+      # ─── Base ──────────────────────────────────────────────────────────────
+      FORGEJO__database__DB_TYPE: postgres
+      # Le nom du service compose, pas une IP : la base est dans la même pile.
+      FORGEJO__database__HOST: db:5432
+      FORGEJO__database__NAME: forgejo
+      FORGEJO__database__USER: forgejo
+      FORGEJO__database__PASSWD: ${POSTGRES_PASSWORD:?}
+      # « disable » et non « require », et c'est un DURCISSEMENT par rapport au
+      # montage précédent, pas un relâchement : le trafic ne quitte plus le
+      # réseau interne de la pile. Avant, il traversait le LAN vers le CT 200 —
+      # d'où un chiffrement contre un certificat auto-signé que personne ne
+      # validait. Ici il n'y a plus de LAN à traverser.
+      FORGEJO__database__SSL_MODE: disable
+      FORGEJO__database__SCHEMA: public
+      FORGEJO__database__LOG_SQL: "false"
+
+      # ─── Dépôts ────────────────────────────────────────────────────────────
+      FORGEJO__repository__ROOT: /data/git/repositories
+      FORGEJO__repository__DEFAULT_BRANCH: main
+      # Une source de vérité ne sert pas de dépôt public : rien n'est créé en
+      # « public » par défaut, et un dépôt créé par push l'est en privé.
+      FORGEJO__repository__DEFAULT_PRIVATE: private
+      FORGEJO__repository__DEFAULT_PUSH_CREATE_PRIVATE: "true"
+
+      # ─── Sécurité ──────────────────────────────────────────────────────────
+      # L'assistant d'installation web est DÉSARMÉ dès le premier démarrage :
+      # il est le chemin par lequel une instance neuve se fait configurer par
+      # le premier venu.
+      FORGEJO__security__INSTALL_LOCK: "true"
+      FORGEJO__security__SECRET_KEY: ${FORGEJO_SECRET_KEY:?}
+      FORGEJO__security__INTERNAL_TOKEN: ${FORGEJO_INTERNAL_TOKEN:?}
+      # L'IP de Traefik, et elle seule. Jamais « * » : avec un joker, n'importe
+      # quel client peut se déclarer n'importe quelle adresse par un en-tête
+      # X-Forwarded-For, et les journaux comme les limitations par IP perdent
+      # tout sens. Cette instance étant EXPOSÉE, ce n'est plus théorique.
+      FORGEJO__security__REVERSE_PROXY_TRUSTED_PROXIES: 192.168.1.50
+
+      FORGEJO__oauth2__JWT_SECRET: ${FORGEJO_OAUTH2_JWT_SECRET:?}
+
+      # ─── Service ───────────────────────────────────────────────────────────
+      # Personne ne s'inscrit. Les comptes sont créés à la main. Sur une
+      # instance joignable depuis internet, c'est la première ligne de défense.
+      FORGEJO__service__DISABLE_REGISTRATION: "true"
+      # Rien n'est lisible sans compte — y compris la liste des dépôts et des
+      # utilisateurs, qui autrement renseigne un inconnu sur ce qu'il y a à
+      # attaquer.
+      FORGEJO__service__REQUIRE_SIGNIN_VIEW: "true"
+      FORGEJO__service__REGISTER_EMAIL_CONFIRM: "false"
+      FORGEJO__service__ENABLE_NOTIFY_MAIL: "false"
+      FORGEJO__service__DEFAULT_KEEP_EMAIL_PRIVATE: "true"
+      FORGEJO__service__DEFAULT_ALLOW_CREATE_ORGANIZATION: "true"
+      FORGEJO__service__ENABLE_TIMETRACKING: "false"
+
+      # Une migration est une requête sortante déclenchée par un utilisateur :
+      # sans ce verrou, elle peut viser 127.0.0.1 ou le réseau d'administration
+      # et faire de Forgejo un relais vers ce que lui seul peut joindre.
+      FORGEJO__migrations__ALLOW_LOCALNETWORKS: "false"
+
+      FORGEJO__openid__ENABLE_OPENID_SIGNIN: "false"
+      FORGEJO__openid__ENABLE_OPENID_SIGNUP: "false"
+
+      FORGEJO__session__PROVIDER: file
+      FORGEJO__session__COOKIE_SECURE: "true"
+
+      # La console part dans les journaux Docker : un seul endroit où regarder,
+      # et la rotation est celle de /etc/docker/daemon.json.
+      FORGEJO__log__MODE: console
+      FORGEJO__log__LEVEL: info
+
+      # Aucun appel sortant vers forgejo.org pour savoir s'il existe une
+      # version plus récente : la version est ÉPINGLÉE et sa mise à jour est
+      # une décision, pas une notification. Le « _0X2E_ » est la façon dont
+      # Forgejo encode un point dans un nom de section.
+      FORGEJO__cron_0X2E_update_checker__ENABLED: "false"
+
+      # Pas de CI ici. Cette VM ne fait qu'une chose : servir les dépôts quand
+      # le cluster est absent.
+      FORGEJO__actions__ENABLED: "false"
+    volumes:
+      - /srv/forgejo/data:/data
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "3000:3000"
+      # 2222 côté VM → 22 côté conteneur. Le 22 de la VM reste à
+      # l'administration humaine.
+      - "2222:22"
+
+  db:
+    image: postgres:18
+    container_name: forgejo-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: forgejo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: forgejo
+      # EXPLICITE, ET IL FAUT QU'IL LE SOIT. L'image postgres:18 a déplacé son
+      # PGDATA par défaut sous /var/lib/postgresql/<version>/docker. Sans cette
+      # ligne, le volume monté ci-dessous ne recevrait rien et la base vivrait
+      # dans une couche jetable — une source de vérité perdue au premier
+      # `docker compose down -v`, sans le moindre message.
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - /srv/forgejo/db:/var/lib/postgresql/data
+      - /etc/localtime:/etc/localtime:ro
+    healthcheck:
+      # `depends_on: service_healthy` s'appuie dessus : Forgejo ne démarre pas
+      # sur une base qui accepte les connexions TCP sans être prête à répondre.
+      test: ["CMD-SHELL", "pg_isready -U forgejo -d forgejo"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s

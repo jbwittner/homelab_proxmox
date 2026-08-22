@@ -10,6 +10,14 @@
 *.pem
 *.key
 
+# Le .env de la pile Forgejo. Il porte le mot de passe de la base et les quatre
+# secrets pre-generes ; il vit chiffre par sops sur le poste de travail et
+# arrive dans la VM par scp, jamais par git. env.example, lui, est versionne :
+# il porte les cles et aucune valeur.
+.env
+*.env
+!env.example
+
 # Fichiers de configuration rclone : le remote lui-même n'a rien de secret,
 # mais le fichier peut porter des jetons selon le type de remote.
 rclone.conf
