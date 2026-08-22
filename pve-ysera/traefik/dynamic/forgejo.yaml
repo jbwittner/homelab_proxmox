@@ -1,7 +1,11 @@
 http:
   routers:
     forgejo:
-      rule: "Host(`forgejo.lan.wittner.tech`)"
+      # Nom PUBLIC : cette instance est exposée hors du LAN, contrairement au
+      # reste du parc qui vit sous *.lan.wittner.tech. Le certificat est couvert
+      # par le store par défaut de ../dynamic/tls.yaml, qui porte déjà
+      # « *.wittner.tech ».
+      rule: "Host(`forgejo.wittner.tech`)"
       entryPoints:
         - websecure
       service: forgejo
@@ -10,14 +14,14 @@ http:
   services:
     forgejo:
       loadBalancer:
-        # Le CT 400 sert en HTTP simple sur son IP : le LAN entre Traefik et
-        # le conteneur n'a pas de secret à protéger, et un certificat
+        # La VM 300 sert en HTTP simple sur son IP : le LAN entre Traefik et
+        # la machine n'a pas de secret à protéger, et un certificat
         # auto-signé de plus serait un certificat de plus à faire vivre.
         servers:
-          - url: "http://192.168.1.57:3000"
+          - url: "http://192.168.1.56:3000"
         # OBLIGATOIRE. Forgejo construit ses URL de redirection à partir de
         # l'en-tête Host ; sans lui, une connexion réussie renvoie vers
-        # « http://192.168.1.57:3000/ » et le navigateur sort du TLS.
+        # « http://192.168.1.56:3000/ » et le navigateur sort du TLS.
         passHostHeader: true
 
 # ─── SSH ─────────────────────────────────────────────────────────────────────
@@ -26,17 +30,18 @@ http:
 # dans ../traefik.yaml). Deux conséquences voulues :
 #
 #   - UN SEUL NOM D'HÔTE pour les deux protocoles. Les URL de clone que Forgejo
-#     affiche (ssh://git@forgejo.lan.wittner.tech:2222/…) sont alors justes
+#     affiche (ssh://git@forgejo.wittner.tech:2222/…) sont alors justes
 #     sans entrée DNS supplémentaire, et ne portent pas d'IP — donc elles
-#     survivent à un changement d'adresse du conteneur.
-#   - LE PORT 22 DU CONTENEUR RESTE À L'ADMINISTRATION. C'est le serveur SSH
-#     INTERNE de Forgejo (Go) qui écoute sur 2222 ; les clés publiques des
-#     utilisateurs restent gérées par Forgejo seul et ne touchent jamais
-#     l'authorized_keys du compte d'administration.
+#     survivent à un changement d'adresse de la machine.
+#   - LE PORT 22 DE LA VM RESTE À L'ADMINISTRATION. C'est le serveur SSH
+#     INTERNE de Forgejo (Go) qui écoute, dans le conteneur, sur le 22 que la
+#     VM publie en 2222 ; les clés publiques des utilisateurs restent gérées
+#     par Forgejo seul et ne touchent jamais l'authorized_keys du compte
+#     d'administration.
 #
 # Ce chemin dépend de Traefik, comme le HTTPS : il n'ajoute donc AUCUNE
 # dépendance nouvelle à la source de vérité. Si Traefik est absent, le clone
-# reste possible en visant directement le conteneur — voir doc/PRA.md.
+# reste possible en visant directement la VM — voir forgejo/doc/PRA.md.
 tcp:
   routers:
     forgejo-ssh:
@@ -51,4 +56,4 @@ tcp:
     forgejo-ssh:
       loadBalancer:
         servers:
-          - address: "192.168.1.57:2222"
+          - address: "192.168.1.56:2222"

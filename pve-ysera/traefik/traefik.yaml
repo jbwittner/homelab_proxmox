@@ -3,7 +3,7 @@ entryPoints:
     address: ":80"
   websecure:
     address: ":443"
-  # Clone Git en SSH vers Forgejo (CT 400). Un entryPoint dédié plutôt qu'un
+  # Clone Git en SSH vers Forgejo (VM 300). Un entryPoint dédié plutôt qu'un
   # routage sur le nom : SSH n'émet pas de SNI, il n'y a donc rien à router
   # sur le nom d'hôte — c'est le port qui sélectionne, et lui seul.
   # Voir dynamic/forgejo.yaml.
