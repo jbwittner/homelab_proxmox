@@ -66,7 +66,13 @@ qm create 300 \
   --onboot 1 \
   --startup order=1
 
-# Disque système : importer l'image cloud, puis l'étendre à 20 Go
+# Disque système : importer l'image cloud, puis l'étendre à 20 Go.
+# `qm disk import` AFFICHE le volid qu'il a créé, sur sa dernière ligne :
+#   successfully imported disk 'local-lvm:vm-300-disk-0'
+# Ce n'est pas toujours -disk-0 — si le stockage porte déjà des volumes de
+# cette VM, ce sera -disk-1. REPRENDRE CE QU'IL AFFICHE, ne pas le supposer :
+# un scsi0 qui pointe à côté donne une VM qui démarre sur rien, et une console
+# qui ne dira jamais rien (voir § 9).
 qm disk import 300 /var/lib/vz/template/iso/debian-13-genericcloud-amd64.qcow2 local-lvm
 qm set 300 --scsi0 local-lvm:vm-300-disk-0
 qm disk resize 300 scsi0 20G
@@ -205,6 +211,29 @@ D'où le contrôle `paquets` de `fj-check.py`, qui vérifie que c'est bien un
   [KO ] paquets      /srv/packages N'EST PAS UN POINT DE MONTAGE — les artefacts
                      vont sur le disque des dépôts (mount /srv/packages)
 ```
+
+### L'accès de secours
+
+**L'image cloud ne définit aucun mot de passe.** Avec `--sshkeys` seul, on a un
+accès SSH — et une invite de login série sur laquelle on ne peut rien taper. Le
+jour où SSH ne monte pas (réseau mal configuré, `/etc/fstab` fautif qui bloque
+le démarrage), **il n'y a aucun moyen d'entrer**.
+
+Poser un mot de passe pour le compte `admin` est donc un geste de reprise, pas
+un relâchement :
+
+```bash
+qm set 300 --cipassword "$(openssl rand -base64 18)"
+# Proxmox le stocke haché dans la configuration de la VM. Le RANGER DANS SOPS
+# immédiatement : il ne se relit pas depuis `qm config`.
+```
+
+À faire **avant le premier démarrage** : cloud-init n'applique le mot de passe
+qu'à la première initialisation. Sur une VM déjà démarrée, il faut régénérer le
+disque cloud-init et redémarrer — ce qui, sur une source de vérité, se décide.
+
+L'accès reste par clé au quotidien : `PasswordAuthentication` de sshd n'est pas
+touché, ce mot de passe ne sert **que** sur la console série.
 
 ### Les clés SSH
 
@@ -693,6 +722,75 @@ existante ne souffre pas du problème :
 docker compose exec -T db psql -U forgejo -tAc 'SHOW data_directory'
 # attendu : /var/lib/postgresql/data
 ```
+
+### La console série qui ne dit rien — 23 août 2026
+
+Ouvrir la console d'une VM créée avec `--vga serial0` affiche :
+
+```
+starting serial terminal on interface serial0
+```
+
+**Ce message est normal** : c'est Proxmox qui attache son terminal au port
+série. Ce n'est pas une erreur, et il n'est jamais suivi d'un « prêt ».
+
+Si rien ne vient ensuite, dans cet ordre :
+
+1. **Appuyer sur Entrée.** Une console série ne rejoue pas ce qui a été écrit
+   avant qu'on s'y connecte : si la VM a fini de démarrer, l'invite de login est
+   déjà passée et l'écran reste noir jusqu'à ce qu'on provoque un affichage.
+   C'est la cause la plus fréquente, et la moins inquiétante.
+
+2. Vérifier que la VM tourne et qu'elle a de quoi s'amorcer :
+
+   ```bash
+   qm status 300
+   qm config 300 | grep -E 'scsi0|boot|serial|vga'
+   # attendu : scsi0: local-lvm:vm-300-disk-0,size=20G
+   #           boot: order=scsi0
+   #           serial0: socket
+   #           vga: serial0
+   ```
+
+   Un `scsi0` absent ou pointant sur un volume vide donne exactement ce
+   symptôme : la VM tourne, le firmware ne trouve rien à démarrer, et la
+   console reste muette parce que le noyau n'a jamais été chargé. Voir la
+   remarque sur le volid de `qm disk import` en [§ 1](#1-créer-la-vm).
+
+3. **Vérifier que cloud-init est là.** C'est le piège qui ressemble le plus à
+   une console morte alors que tout démarre :
+
+   ```bash
+   qm config 300 | grep -E 'ide2|ipconfig0|ciuser|sshkeys'
+   # attendu : ide2: local-lvm:cloudinit,media=cdrom
+   #           ciuser: admin
+   #           ipconfig0: ip=192.168.1.56/24,gw=192.168.1.254
+   ```
+
+   Sans `ide2`, cloud-init n'a **aucune source de données** : pas d'utilisateur
+   `admin`, pas de clé SSH, pas d'IP statique. La VM démarre très bien et
+   s'arrête sur un `localhost login:` où personne ne peut entrer — root est
+   verrouillé dans les images cloud. Vu de la console, cela se confond avec un
+   démarrage raté.
+
+   Le `ping` tranche l'autre moitié de la question :
+
+   ```bash
+   ping -c2 192.168.1.56
+   ```
+
+   S'il répond, cloud-init a fait son travail et la console n'était qu'un faux
+   problème — il fallait appuyer sur Entrée.
+
+4. En dernier recours, la console depuis le nœud plutôt que par l'interface
+   web : elle est plus bavarde et ne dépend pas du navigateur.
+
+   ```bash
+   qm terminal 300      # puis Entrée ; on quitte par Ctrl-O
+   ```
+
+Et si la console finit par répondre : **elle ne sert à rien sans mot de passe.**
+Voir [L'accès de secours](#laccès-de-secours).
 
 ### `set -e` et `[[ … ]] && die` — 22 août 2026
 
