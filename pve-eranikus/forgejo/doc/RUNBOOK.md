@@ -71,11 +71,12 @@ qm disk import 300 /var/lib/vz/template/iso/debian-13-genericcloud-amd64.qcow2 l
 qm set 300 --scsi0 local-lvm:vm-300-disk-0
 qm disk resize 300 scsi0 20G
 
-# SECOND DISQUE : /srv, 40 Go sur le pool ZFS « data ».
-# C'est lui qui porte les dépôts et la base. Il est SÉPARÉ du disque système
-# pour que réinstaller le système ne touche pas aux données, et pour que
-# saturer la racine n'arrête pas PostgreSQL.
-qm set 300 --scsi1 data:40
+# SECOND DISQUE : /srv, 80 Go sur le pool ZFS « data ». Il porte les dépôts,
+# la base ET les sauvegardes locales. SÉPARÉ du disque système pour que
+# réinstaller le système ne touche pas aux données, et pour que saturer la
+# racine n'arrête pas PostgreSQL.
+# 80 Go n'est pas une valeur évidente : voir « Dimensionner /srv » ci-dessous.
+qm set 300 --scsi1 data:80
 
 # cloud-init
 qm set 300 --ide2 local-lvm:cloudinit
@@ -100,6 +101,81 @@ qm start 300
 | **`--agent enabled=1`** | `qm shutdown` obtient un arrêt propre plutôt qu'une coupure d'alimentation. Nécessaire aussi pour qu'un `qm snapshot` sache geler le système de fichiers. |
 | **`--ciupgrade 0`** | cloud-init ne met pas à jour au premier démarrage : `init.sh` le fait, et il est le seul à décider quand. |
 
+### Dimensionner `/srv`
+
+Trois choses partagent ce volume, et **ce n'est pas la plus grosse qui
+contraint** :
+
+| | |
+|---|---|
+| `/srv/forgejo/data` | dépôts, LFS, pièces jointes — appelons-le **R** |
+| `/srv/forgejo/db` | PostgreSQL : tickets, comptes, métadonnées. Quelques centaines de Mo, et il ne bouge quasiment pas. |
+| `/srv/forgejo/backups` | **7 paires**, soit environ **7 × R comprimé** |
+
+La rétention locale de sept jours est le terme dominant : à 5 Go de dépôts, les
+sauvegardes locales pèsent déjà une vingtaine de Go. **80 Go tiennent donc de
+l'ordre de 10 Go de contenu, pas 80.**
+
+> **Si Forgejo sert de registre d'artefacts, cette arithmétique ne tient plus
+> du tout** — voir [Le cas des artefacts](#le-cas-des-artefacts).
+
+Trois leviers, dans l'ordre où on les tire :
+
+1. **Agrandir le volume.** En ligne, sans rien arrêter — c'est le premier
+   levier, et c'est pour ça que se tromper à la création coûte peu :
+
+   ```bash
+   qm disk resize 300 scsi1 +40G     # sur le NŒUD
+   sudo resize2fs /dev/sdb           # dans la VM, /srv reste monté
+   df -h /srv
+   ```
+
+   Pas de table de partitions à décaler : le système de fichiers occupe le
+   disque entier ([§ 2](#2-formater-et-étiqueter-srv)). Si le stockage ZFS est
+   déclaré en *thin provision*, un volume plus grand ne consomme d'ailleurs que
+   ce qui est réellement écrit.
+
+2. **Baisser la rétention locale** — `FJBK_RETENTION=3` dans
+   `/etc/default/fjbk`. L'historique long vit dans GCS ; le local n'est là que
+   pour restaurer vite, sans rapatrier.
+
+3. **Sortir `backups/` sur un troisième disque**, pour que saturer les
+   sauvegardes ne puisse jamais empêcher PostgreSQL d'écrire.
+
+`fjbk backup` refuse de démarrer sous **4 Gio libres** (`FJBK_MIN_LIBRE_MO`) :
+mieux vaut une sauvegarde qui manque bruyamment qu'un `/srv` plein, qui
+arrêterait la base faute de pouvoir écrire son WAL.
+
+### Le cas des artefacts
+
+**Question ouverte, et elle ne se règle pas en agrandissant le disque.**
+
+Forgejo sait servir un registre de paquets — OCI, Helm, Maven, npm — sous
+`data/gitea/packages`, et **ce registre est actif par défaut** : rien dans
+`compose.yaml` ne le désarme. Si on s'en sert pour de bon, deux choses changent.
+
+**L'ordre de grandeur.** Des images de conteneurs se comptent en centaines de Mo
+pièce, en dizaines de versions. On passe de dizaines de Go à des centaines, et
+la rétention locale multiplie encore par sept.
+
+**La forme de la sauvegarde, et c'est le vrai sujet.** `fjbk backup` tare
+aujourd'hui tout `data/` en **un seul objet**, chaque nuit. Sur 100 Go de
+paquets, cela veut dire 100 Go à comprimer localement *et* à envoyer vers GCS
+toutes les nuits, pour un contenu qui n'a pas bougé d'un octet.
+
+Les blobs d'un registre sont **immuables et adressés par leur contenu** — c'est
+exactement le cas de figure pour lequel `rclone copy --ignore-existing` a été
+retenu. La forme qui tiendrait à l'échelle est donc d'**exclure
+`data/gitea/packages` du tar** et de le copier fichier par fichier, Forgejo
+étant arrêté : la première nuit coûte tout, les suivantes ne coûtent que les
+nouveaux blobs. La restauration devient un `tar -x` pour les dépôts et un
+`rclone copy` en sens inverse pour les paquets.
+
+Ce n'est **pas** ce que fait le code aujourd'hui. Tant que la question n'est pas
+tranchée, le dimensionnement ci-dessus vaut pour un Forgejo **sans registre**,
+et y pousser des images sans changer `fjbk` donnerait des nuits de plus en plus
+longues, puis un `/srv` plein.
+
 ### L'adresse `192.168.1.56`
 
 C'est **l'ancienne adresse du CT 200**, le cluster PostgreSQL mutualisé, retiré
@@ -119,9 +195,9 @@ au moment de la bascule, le CT 200 n'ayant eu qu'un locataire.
 
 ```bash
 # Dans la VM, en root. VÉRIFIER D'ABORD que c'est bien le second disque,
-# celui de 40 Go, et qu'il est vide.
+# celui de 80 Go, et qu'il est vide.
 lsblk
-# attendu : sdb (ou vdb) 40G, sans partition ni point de montage
+# attendu : sdb (ou vdb) 80G, sans partition ni point de montage
 
 mkfs.ext4 -L srv /dev/sdb
 blkid -L srv     # doit répondre /dev/sdb

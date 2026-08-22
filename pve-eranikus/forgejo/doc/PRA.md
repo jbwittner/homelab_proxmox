@@ -251,7 +251,7 @@ qm create 300 \
 qm disk import 300 /var/lib/vz/template/iso/debian-13-genericcloud-amd64.qcow2 local-lvm
 qm set 300 --scsi0 local-lvm:vm-300-disk-0
 qm disk resize 300 scsi0 20G
-qm set 300 --scsi1 data:40
+qm set 300 --scsi1 data:80
 
 qm set 300 --ide2 local-lvm:cloudinit
 qm set 300 --boot order=scsi0
@@ -267,7 +267,7 @@ qm start 300
 ### 3.3 — Formater `/srv`
 
 > **DESTRUCTIF.** Vérifier `lsblk` avant : le disque visé est le second, celui
-> de 40 Go, et il doit être vide.
+> de 80 Go, et il doit être vide.
 
 ```bash
 ssh admin@192.168.1.56

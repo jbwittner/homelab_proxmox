@@ -22,7 +22,7 @@ Ce fichier ne porte que **ce qu'on tape**. Le reste est dans `doc/` :
 | IP | `192.168.1.56/24`, passerelle `192.168.1.254` |
 | Nœud | `pve-eranikus` (192.168.1.11), Debian 13 (`genericcloud`) |
 | Ressources | 2 vCPU, 4 Go, disque système 20 Go (`local-lvm`) |
-| Données | **second disque 40 Go sur le pool ZFS `data`**, monté sur `/srv` par `LABEL=srv` |
+| Données | **second disque 80 Go sur le pool ZFS `data`**, monté sur `/srv` par `LABEL=srv` — [dimensionnement](doc/RUNBOOK.md#dimensionner-srv) |
 | Forgejo | **15.0.7**, branche **15.0 LTS**, fin de support **15 juillet 2027** |
 | Base | PostgreSQL 18, **dans la même pile**, volume `/srv/forgejo/db` |
 | Ingress | Traefik (CT 201, `pve-ysera`) → `https://forgejo.wittner.tech/`, SSH en 2222 |
@@ -79,7 +79,7 @@ créent à la main, avec la commande ci-dessus.
 | La base démarre vide après une reconstruction | `PGDATA` — [runbook § 9](doc/RUNBOOK.md#9-pièges-rencontrés) |
 | L'unité `fjbk.service` est en échec | le code de retour dit lequel — [runbook § 7](doc/RUNBOOK.md#7-la-sauvegarde) |
 | `fjbk` sort en 3 | `fj-check.py` est rouge : [doc/PRA.md](doc/PRA.md) |
-| Le disque est plein | `df -h /srv` puis `fjbk list` — la purge locale garde 7 jours |
+| Le disque est plein | `df -h /srv` puis `fjbk list` — la purge locale garde 7 jours, et [le dimensionnement](doc/RUNBOOK.md#dimensionner-srv) explique pourquoi c'est le terme dominant |
 
 ## Où va chaque fichier
 
@@ -120,3 +120,9 @@ dépôt, on ne fait pas `git pull` : on joue
       RTO du PRA est vide, et c'est volontaire.
 - [ ] Supprimer la clé de déploiement GitHub une fois la bascule faite
       ([runbook § 8](doc/RUNBOOK.md#8-la-boucle-assumée)).
+- [ ] **Trancher la question du registre d'artefacts** —
+      [runbook, Le cas des artefacts](doc/RUNBOOK.md#le-cas-des-artefacts). Il
+      est actif par défaut, et `fjbk` n'est pas taillé pour : il tare tout
+      `data/` en un objet chaque nuit. Y pousser des images sans changer la
+      forme de la sauvegarde donne des nuits de plus en plus longues, puis un
+      `/srv` plein.
