@@ -335,6 +335,12 @@ au moment de la bascule, le CT 200 n'ayant eu qu'un locataire.
 > il vérifie que les **trois** étiquettes existent, et refuse de continuer si
 > l'une manque.
 
+**On est `admin`, connecté en SSH — donc tout ce qui suit passe par `sudo`.**
+`mkfs.ext4` et `blkid` vivent dans `/usr/sbin`, que le `PATH` d'un utilisateur
+ordinaire ne contient pas : sans `sudo`, ils répondent `command not found`, ce
+qui accuse l'installation alors que le fautif est le chemin de recherche
+([§ 9](#mkfsext4-command-not-found-et-le-paquet-est-installé--23-août-2026)).
+
 Trois disques à formater, trois étiquettes, trois points de montage **frères** :
 
 | Slot | Taille | Étiquette | Monté sur |
@@ -430,10 +436,14 @@ BKP=/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi3     # 50 Go
 # et aucun des trois ne doit porter la moindre partition.
 lsblk "$SRV" "$ART" "$BKP"
 
-mkfs.ext4 -L srv       "$SRV"
-mkfs.ext4 -L artifacts "$ART"
-mkfs.ext4 -L backup    "$BKP"
+sudo mkfs.ext4 -L srv       "$SRV"
+sudo mkfs.ext4 -L artifacts "$ART"
+sudo mkfs.ext4 -L backup    "$BKP"
 ```
+
+Les variables sont développées par **votre** shell avant que `sudo` ne
+s'exécute : les définir en `admin` puis préfixer par `sudo` fonctionne, il n'y a
+rien à réexporter.
 
 Si `by-id` n'expose pas ces liens sur votre machine, retomber sur les lettres —
 mais **relues dans `lsblk` à l'instant**, jamais reprises d'un document.
@@ -458,9 +468,10 @@ entre deux démarrages, la lettre peut changer, l'étiquette non.
 # -c /dev/null : sonder les disques SANS le cache /run/blkid/blkid.tab, qui est
 # en retard sur un mkfs tout juste fait. C'est la forme qu'init.sh utilise, pour
 # ne pas refuser de démarrer sur un volume parfaitement formaté.
-blkid -c /dev/null -L srv
-blkid -c /dev/null -L artifacts
-blkid -c /dev/null -L backup
+sudo blkid -c /dev/null -L srv
+sudo blkid -c /dev/null -L artifacts
+sudo blkid -c /dev/null -L backup
+# lsblk est dans /usr/bin, lui : pas de sudo nécessaire.
 lsblk -o NAME,SIZE,FSTYPE,LABEL
 # attendu : 40G ext4 srv | 100G ext4 artifacts | 50G ext4 backup
 ```
@@ -1065,7 +1076,7 @@ ne dépend pas de l'ordre d'énumération du noyau. Il ne donne plus non plus la
 correspondance lettre → slot, même à titre indicatif : c'est la sortie de
 `ls -l /dev/disk/by-id/` qui fait foi, et elle seule.
 
-### Le même piège, retourné : la recréation en quatre disques
+### Le même piège, retourné : la recréation en quatre disques — 23 août 2026
 
 Le constat ci-dessus est celui du **montage à trois disques d'alors** — 80 Go de
 données, 200 Go de registre. La machine a été recréée depuis, à quatre disques
@@ -1090,6 +1101,56 @@ ensemble disent la seule chose vraie : **il n'y a pas d'ordre**.
 
 Il n'y a donc pas de correspondance à retenir. Il y a
 `ls -l /dev/disk/by-id/ | grep drive-scsi` à relire, à chaque fois.
+
+### `mkfs.ext4: command not found`, et le paquet est installé — 23 août 2026
+
+Constaté au § 2, en `admin`, sur la VM 300 :
+
+```
+admin@forgejo:/opt$ mkfs.ext4 -L srv       "$SRV"
+-bash: mkfs.ext4: command not found
+```
+
+**Le binaire est là.** `e2fsprogs` est un paquet essentiel de Debian — la racine
+de la machine est elle-même en ext4, elle n'aurait pas pu être formatée sans :
+
+```
+$ ls -l /usr/sbin/mkfs.ext4
+lrwxrwxrwx 1 root root 6 /usr/sbin/mkfs.ext4 -> mke2fs
+$ /usr/sbin/mkfs.ext4 -V
+mke2fs 1.47.2 (1-Jan-2025)
+```
+
+Ce qui manque, c'est le `PATH`. Sur Debian, `/usr/sbin` et `/sbin` n'y sont que
+pour l'uid 0 ; un utilisateur ordinaire ne les a pas. Le défaut se reproduit
+sans toucher à quoi que ce soit :
+
+```
+$ PATH=/usr/local/bin:/usr/bin:/bin bash -c "mkfs.ext4 --version"
+bash: line 1: mkfs.ext4: command not found
+$ echo $?
+127
+```
+
+**Le message accuse l'installation alors que le fautif est le chemin de
+recherche** — c'est la même famille de piège que les deux-points du `.pgpass` et
+que le code 2 d'`argparse` : une erreur qui décrit fidèlement autre chose que sa
+cause. La mauvaise réaction est `apt install e2fsprogs`, qui répondra que le
+paquet est déjà là et laissera la question entière.
+
+Et il n'y a **ni paquet à installer, ni `PATH` à exporter** : `sudo` a son
+propre chemin de recherche, qui contient `/usr/sbin`.
+
+```
+Defaults	secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+```
+
+Le § 2 préfixe donc par `sudo` tout ce qui vit dans `/usr/sbin` — `mkfs.ext4`,
+`blkid` — et laisse `lsblk` et `findmnt` tels quels, qui sont dans `/usr/bin`.
+
+> **La règle, sur cette VM** : tout se fait en `admin` par SSH. Un
+> `command not found` sur un outil de disque ou de système de fichiers veut dire
+> « il manque `sudo` », jamais « il manque le paquet ».
 
 ### La console série qui ne dit rien — 23 août 2026
 

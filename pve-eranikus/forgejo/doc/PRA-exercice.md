@@ -92,9 +92,10 @@ exercice qu'il faut compléter.
 - [ ] § 3.1 — image récupérée, `sha512sum` **vérifié** (ne pas sauter : c'est
       aussi ce qu'on éprouve)
 - [ ] § 3.2 — VM créée avec le VMID et l'IP **jetables** relevés plus haut
-- [ ] § 3.3 — les **trois** volumes formatés : `blkid -L srv`,
-      `blkid -L artifacts` et `blkid -L backup` répondent chacun, et la taille
-      en face de l'étiquette est la bonne (40, 100, 50 Go)
+- [ ] § 3.3 — les **trois** volumes formatés : `sudo blkid -L srv`,
+      `sudo blkid -L artifacts` et `sudo blkid -L backup` répondent chacun, et
+      la taille en face de l'étiquette est la bonne (40, 100, 50 Go). `sudo`
+      n'est pas décoratif : `blkid` est dans `/usr/sbin`.
 - [ ] § 3.4 — dépôt cloné **depuis GitHub**, `init.sh` passé
 - [ ] § 3.5 — `.env` et clé rclone déposés depuis le poste
 - [ ] § 3.6 — `docker compose up -d`, `db` healthy
