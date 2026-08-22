@@ -53,7 +53,7 @@ Ce qui, joué distraitement, casserait la production :
 
 ```bash
 # Relever la paire visée AVANT de commencer, depuis la vraie VM
-sudo /opt/homelab/forgejo/scripts/fjbk list
+sudo /opt/homelab/pve-eranikus/forgejo/scripts/fjbk list
 ```
 
 ## Le chronomètre

@@ -50,11 +50,11 @@ Ce fichier ne porte que **ce qu'on tape**. Le reste est dans `doc/` :
 
 ## Gestes courants
 
-Tout se fait depuis `/opt/homelab/forgejo` dans la VM.
+Tout se fait depuis `/opt/homelab/pve-eranikus/forgejo` dans la VM.
 
 ```bash
 ssh admin@192.168.1.56
-cd /opt/homelab/forgejo
+cd /opt/homelab/pve-eranikus/forgejo
 ```
 
 | Ce qu'on veut | Ce qu'on tape |

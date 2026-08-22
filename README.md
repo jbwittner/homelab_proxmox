@@ -17,15 +17,15 @@ resservir dès qu'une machine reprend l'IP.
 
 | Service | Où | Documentation |
 |---|---|---|
-| Forgejo — source de vérité d'ArgoCD | VM 300, `pve-eranikus` | [forgejo/](forgejo/README.md) |
+| Forgejo — source de vérité d'ArgoCD | VM 300, `pve-eranikus` | [pve-eranikus/forgejo/](pve-eranikus/forgejo/README.md) |
 | Traefik, Homepage | CT, `pve-ysera` | [pve-ysera/](pve-ysera/) |
 
-**Forgejo est à la racine, et pas sous un répertoire de nœud** : c'est une VM
-autonome, avec sa base dans sa propre pile. Le nœud qui l'héberge est un détail
-d'implantation, et la reprise après sinistre consiste précisément à en changer.
-
-Les LXC, eux, restent rangés par nœud : ils sont du système, ils tiennent au
-nœud, et ils ne migrent pas.
+**Un répertoire par nœud, un sous-répertoire par service** — VM comprises. Le
+nœud d'une VM est certes un détail d'implantation, et [le PRA
+« nœud perdu »](pve-eranikus/forgejo/doc/PRA.md#3--nœud-perdu--sinistre)
+consiste précisément à en changer : le jour où Forgejo démarre ailleurs, le
+répertoire se déplace et la fiche d'identité de son README se corrige. C'est un
+`git mv` et deux lignes, contre une exception permanente au rangement.
 
 ## Ce qui a été retiré, et pourquoi
 
@@ -82,7 +82,7 @@ bibliothèque standard :
 
 | | |
 |---|---|
-| [`forgejo/scripts/`](forgejo/scripts/) | `init.sh`, `sys-update.sh`, `fjbk`, `fj-check.py` |
+| [`pve-eranikus/forgejo/scripts/`](pve-eranikus/forgejo/scripts/) | `init.sh`, `sys-update.sh`, `fjbk`, `fj-check.py` |
 | [`script/`](script/) | utilitaires de nœud, indépendants d'un service |
 
 Il n'y a **pas de suite de tests** à lancer. Ce qui se vérifie sans
@@ -90,4 +90,4 @@ infrastructure — `bash -n`, `py_compile`, `docker compose config`, les liens d
 la documentation, les codes de retour — est listé dans
 [AGENTS.md](AGENTS.md#3-pas-de-tests-unitaires-sur-ces-scripts). Ce qui compte
 vraiment se mesure : [le PRA joué sur une VM
-jetable](forgejo/doc/PRA-exercice.md).
+jetable](pve-eranikus/forgejo/doc/PRA-exercice.md).

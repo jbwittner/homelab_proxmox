@@ -3,7 +3,7 @@
 
 [Unit]
 Description=Sauvegarde Forgejo quotidienne
-Documentation=file:/opt/homelab/forgejo/doc/RUNBOOK.md
+Documentation=file:/opt/homelab/pve-eranikus/forgejo/doc/RUNBOOK.md
 
 [Timer]
 OnCalendar=*-*-* 03:00:00

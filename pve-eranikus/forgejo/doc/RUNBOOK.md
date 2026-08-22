@@ -258,7 +258,7 @@ partitions à décaler.
 ```bash
 # Depuis le poste, une fois le dépôt cloné dans la VM (voir § 4)
 ssh admin@192.168.1.56
-sudo /opt/homelab/forgejo/scripts/init.sh
+sudo /opt/homelab/pve-eranikus/forgejo/scripts/init.sh
 ```
 
 Il pose : mise à jour du système, montage de `/srv` par étiquette, dépôt Docker
@@ -312,7 +312,7 @@ fait depuis le miroir GitHub — voir [§ 8](#8-la-boucle-assumée).
 ```bash
 # Sur le POSTE de travail, jamais dans la VM
 sops -d forgejo.env.sops > /tmp/.env
-scp /tmp/.env admin@192.168.1.56:/opt/homelab/forgejo/.env
+scp /tmp/.env admin@192.168.1.56:/opt/homelab/pve-eranikus/forgejo/.env
 shred -u /tmp/.env
 ```
 
@@ -347,7 +347,7 @@ quatre est ce qui rend une configuration entièrement déclarative tenable : san
 ### Démarrer
 
 ```bash
-cd /opt/homelab/forgejo
+cd /opt/homelab/pve-eranikus/forgejo
 docker compose pull
 docker compose up -d
 ./scripts/fj-check.py
@@ -415,7 +415,7 @@ snapshot.
 ## 6. Mettre à jour le système
 
 ```bash
-sudo /opt/homelab/forgejo/scripts/sys-update.sh
+sudo /opt/homelab/pve-eranikus/forgejo/scripts/sys-update.sh
 ```
 
 `dist-upgrade` et non `upgrade` : sur Debian stable, `upgrade` **retient
@@ -519,8 +519,8 @@ dit que Forgejo n'est peut-être pas remonté.
 ### Éprouver une sauvegarde
 
 ```bash
-sudo /opt/homelab/forgejo/scripts/fjbk list
-sudo /opt/homelab/forgejo/scripts/fjbk verify 20260822-030412
+sudo /opt/homelab/pve-eranikus/forgejo/scripts/fjbk list
+sudo /opt/homelab/pve-eranikus/forgejo/scripts/fjbk verify 20260822-030412
 ```
 
 `verify` lit le dump par `pg_restore --list` et l'archive par `tar -t`, **sans
@@ -614,7 +614,7 @@ Sans lui, une connexion **réussie** renvoie le navigateur vers
 `http://192.168.1.56:3000/` : Forgejo construit ses URL de redirection à partir
 de l'en-tête `Host`, et le navigateur sort du TLS sans que rien n'ait l'air
 cassé. Le commentaire est dans
-[`pve-ysera/traefik/dynamic/forgejo.yaml`](../../pve-ysera/traefik/dynamic/forgejo.yaml),
+[`pve-ysera/traefik/dynamic/forgejo.yaml`](../../../pve-ysera/traefik/dynamic/forgejo.yaml),
 il y reste.
 
 ### Les deux-points dans un mot de passe — 21 août 2026

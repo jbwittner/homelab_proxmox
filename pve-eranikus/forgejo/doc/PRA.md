@@ -50,7 +50,7 @@ La VM répond en SSH, `https://forgejo.wittner.tech/` non.
 
 ```bash
 ssh admin@192.168.1.56
-cd /opt/homelab/forgejo
+cd /opt/homelab/pve-eranikus/forgejo
 ./scripts/fj-check.py
 ```
 
@@ -110,7 +110,7 @@ depuis un `git pull` :
 ```bash
 # Sur le POSTE
 sops -d forgejo.env.sops > /tmp/.env
-scp /tmp/.env admin@192.168.1.56:/opt/homelab/forgejo/.env
+scp /tmp/.env admin@192.168.1.56:/opt/homelab/pve-eranikus/forgejo/.env
 shred -u /tmp/.env
 # Dans la VM
 docker compose up -d
@@ -120,7 +120,7 @@ docker compose up -d
 
 ```bash
 df -h /srv /
-sudo /opt/homelab/forgejo/scripts/fjbk list
+sudo /opt/homelab/pve-eranikus/forgejo/scripts/fjbk list
 ```
 
 Purger d'anciennes paires locales (le distant n'est jamais touché par ce code) :
@@ -165,9 +165,9 @@ sudo mount /srv/packages
 Passer à une restauration de paire, la pile étant saine :
 
 ```bash
-sudo /opt/homelab/forgejo/scripts/fjbk list
-sudo /opt/homelab/forgejo/scripts/fjbk verify <horodatage>
-sudo /opt/homelab/forgejo/scripts/fjbk restore <horodatage>
+sudo /opt/homelab/pve-eranikus/forgejo/scripts/fjbk list
+sudo /opt/homelab/pve-eranikus/forgejo/scripts/fjbk verify <horodatage>
+sudo /opt/homelab/pve-eranikus/forgejo/scripts/fjbk restore <horodatage>
 # demande de retaper l'horodatage pour confirmer
 ```
 
@@ -215,7 +215,7 @@ qm start 300
 
 ```bash
 ssh admin@192.168.1.56
-cd /opt/homelab/forgejo
+cd /opt/homelab/pve-eranikus/forgejo
 ./scripts/fj-check.py
 ```
 
@@ -224,8 +224,8 @@ dépôts sont cohérents entre eux, il n'y a pas de second temps. Si le vzdump e
 plus vieux que la dernière paire de sauvegarde, rattraper avec :
 
 ```bash
-sudo /opt/homelab/forgejo/scripts/fjbk list
-sudo /opt/homelab/forgejo/scripts/fjbk restore <horodatage-plus-récent>
+sudo /opt/homelab/pve-eranikus/forgejo/scripts/fjbk list
+sudo /opt/homelab/pve-eranikus/forgejo/scripts/fjbk restore <horodatage-plus-récent>
 ```
 
 ---
@@ -329,7 +329,7 @@ sudo mkdir -p /opt/homelab
 sudo chown admin:admin /opt/homelab
 git clone https://github.com/<org>/homelab_proxmox.git /opt/homelab
 
-sudo /opt/homelab/forgejo/scripts/init.sh
+sudo /opt/homelab/pve-eranikus/forgejo/scripts/init.sh
 ```
 
 `init.sh` installe Docker, monte `/srv` par étiquette, pose rclone. Il refuse de
@@ -344,7 +344,7 @@ prenne effet.
 ```bash
 # Sur le POSTE
 sops -d forgejo.env.sops > /tmp/.env
-scp /tmp/.env admin@192.168.1.56:/opt/homelab/forgejo/.env
+scp /tmp/.env admin@192.168.1.56:/opt/homelab/pve-eranikus/forgejo/.env
 shred -u /tmp/.env
 ```
 
@@ -381,7 +381,7 @@ EOF
 tourner avant la restauration.
 
 ```bash
-cd /opt/homelab/forgejo
+cd /opt/homelab/pve-eranikus/forgejo
 docker compose pull
 docker compose up -d
 docker compose ps          # attendre que db soit « healthy »
@@ -390,10 +390,10 @@ docker compose ps          # attendre que db soit « healthy »
 ### 3.7 — Rapatrier et restaurer
 
 ```bash
-sudo /opt/homelab/forgejo/scripts/fjbk list
+sudo /opt/homelab/pve-eranikus/forgejo/scripts/fjbk list
 # les paires distantes s'affichent avec « complet » ou « INCOMPLET »
 
-sudo /opt/homelab/forgejo/scripts/fjbk restore <horodatage>
+sudo /opt/homelab/pve-eranikus/forgejo/scripts/fjbk restore <horodatage>
 ```
 
 `restore` rapatrie ce qui manque localement, arrête Forgejo, recrée la base,
@@ -404,7 +404,7 @@ l'horodatage** avant d'écraser quoi que ce soit.
 Si le rapatriement est long et qu'on préfère éprouver la paire d'abord :
 
 ```bash
-sudo /opt/homelab/forgejo/scripts/fjbk verify <horodatage>
+sudo /opt/homelab/pve-eranikus/forgejo/scripts/fjbk verify <horodatage>
 ```
 
 ### 3.8 — Vérifier le routage
@@ -437,8 +437,8 @@ Traefik surveille son répertoire dynamique et recharge seul.
 Une reprise n'est pas finie tant que la machine restaurée ne se sauvegarde pas.
 
 ```bash
-sudo install -m 0644 /opt/homelab/forgejo/scripts/fjbk.service \
-                     /opt/homelab/forgejo/scripts/fjbk.timer /etc/systemd/system/
+sudo install -m 0644 /opt/homelab/pve-eranikus/forgejo/scripts/fjbk.service \
+                     /opt/homelab/pve-eranikus/forgejo/scripts/fjbk.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now fjbk.timer
 sudo systemctl list-timers fjbk.timer
@@ -447,7 +447,7 @@ sudo systemctl list-timers fjbk.timer
 ### 3.10 — Recette
 
 ```bash
-cd /opt/homelab/forgejo && ./scripts/fj-check.py
+cd /opt/homelab/pve-eranikus/forgejo && ./scripts/fj-check.py
 ```
 
 Les six contrôles doivent être au vert. **Le registre, lui, est vide** : c'est

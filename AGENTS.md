@@ -1,7 +1,8 @@
 # Conventions du dépôt
 
-Homelab Proxmox. Un répertoire par service quand c'est une VM, un répertoire par
-nœud puis par service quand c'est un conteneur système.
+Homelab Proxmox. **Un répertoire par nœud, un sous-répertoire par service** —
+VM comme conteneurs. Un service qui change de nœud change de répertoire : c'est
+un `git mv`, et cela vaut mieux qu'une exception permanente au rangement.
 
 ## Les règles de code
 
@@ -68,9 +69,10 @@ propre outillage coûte plus cher que d'en adopter un.
 
 ### 5. Un service applicatif va dans une VM Docker
 
-**Image officielle, un `compose.yaml` par service, une VM par service.** La
-version est **épinglée au correctif** — jamais `latest`, jamais un tag de
-branche qui flotte. Changer de version est une décision qui se commite.
+**Image officielle, un `compose.yaml` par service, une VM par service**, rangée
+sous son nœud comme le reste. La version est **épinglée au correctif** — jamais
+`latest`, jamais un tag de branche qui flotte. Changer de version est une
+décision qui se commite.
 
 Les **LXC restent pour le système** : reverse proxy, MQTT, DNS. **L'existant ne
 migre pas** — un conteneur qui marche n'est pas une raison de travailler.

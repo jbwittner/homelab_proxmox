@@ -17,14 +17,14 @@
 
 [Unit]
 Description=Sauvegarde Forgejo — paire base + dépôts, copie hors-site
-Documentation=file:/opt/homelab/forgejo/doc/RUNBOOK.md
+Documentation=file:/opt/homelab/pve-eranikus/forgejo/doc/RUNBOOK.md
 Requires=docker.service
 After=docker.service
 
 [Service]
 Type=oneshot
 EnvironmentFile=-/etc/default/fjbk
-ExecStart=/opt/homelab/forgejo/scripts/fjbk backup
+ExecStart=/opt/homelab/pve-eranikus/forgejo/scripts/fjbk backup
 # La sauvegarde arrête Forgejo puis le redémarre : la tuer en cours de route
 # laisserait le service à terre, `finally` ou pas. Large, donc.
 TimeoutStartSec=2h
