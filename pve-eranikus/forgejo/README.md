@@ -85,7 +85,7 @@ créent à la main, avec la commande ci-dessus.
 | `502` depuis Traefik | la pile est-elle debout ? `docker compose ps` |
 | Une connexion réussie renvoie vers `http://192.168.1.56:3000/` | `passHostHeader` — [runbook § 9](doc/RUNBOOK.md#9-pièges-rencontrés) |
 | `ssh: connect to host … port 2222: Connection refused` | l'entryPoint `ssh` de Traefik est **statique** : redémarrer Traefik |
-| `Permission denied (publickey)` au `git pull` de la VM | la clé de déploiement n'est pas déclarée, ou le remote vise le port 22 — [runbook § 4](doc/RUNBOOK.md#le-clone-passe-par-le-port-2222-jamais-par-22) |
+| `Permission denied (publickey)` au `git pull` de la VM | la clé de déploiement n'est pas déclarée, ou le remote vise le port 22 — [runbook § 4](doc/RUNBOOK.md#le-remote-forgejo-passe-par-le-port-2222-jamais-par-22) |
 | `required variable FORGEJO_… is missing a value` | le `.env` a disparu — [PRA § 1, cas C](doc/PRA.md#cas-c--forgejo-boucle-au-démarrage) |
 | Les miroirs push échouent sans message | `SECRET_KEY` n'est pas celui d'origine — [runbook § 9](doc/RUNBOOK.md#9-pièges-rencontrés) |
 | La base démarre vide après une reconstruction | `PGDATA` — [runbook § 9](doc/RUNBOOK.md#9-pièges-rencontrés) |
@@ -112,9 +112,11 @@ créent à la main, avec la commande ci-dessus.
 
 ## La boucle assumée
 
-Ce dépôt est cloné dans la VM **depuis Forgejo lui-même** — circularité assumée,
-et donc écrite : [runbook § 8](doc/RUNBOOK.md#8-la-boucle-assumée). Ses deux
-sorties sont le **clone local sur le poste** et le **push mirror vers GitHub**.
+Ce dépôt sera cloné dans la VM **depuis Forgejo lui-même** — circularité
+assumée, et donc écrite : [runbook § 8](doc/RUNBOOK.md#8-la-boucle-assumée). Le
+**tout premier clone**, lui, vient de GitHub : au moment où l'on déploie, Forgejo
+n'existe pas encore. Les deux sorties de la boucle sont le **clone local sur le
+poste** et le **push mirror vers GitHub**.
 Le jour où Forgejo est mort et qu'on a besoin du dépôt, on ne fait pas
 `git pull` : on joue [PRA § 4](doc/PRA.md#4--forgejo-est-mort-et-jai-besoin-du-dépôt).
 
@@ -129,8 +131,11 @@ Le jour où Forgejo est mort et qu'on a besoin du dépôt, on ne fait pas
 - [ ] **Jouer le PRA « nœud perdu » et reporter le RTO** —
       [doc/PRA-exercice.md](doc/PRA-exercice.md). Tant que ce n'est pas fait, le
       RTO du PRA est vide, et c'est volontaire.
-- [ ] Supprimer la clé de déploiement GitHub une fois la bascule faite
-      ([runbook § 8](doc/RUNBOOK.md#8-la-boucle-assumée)).
+- [ ] Basculer le remote de la VM vers Forgejo une fois le dépôt migré : clé
+      publique déclarée en lecture seule, `ssh -T -p 2222`, puis
+      `git remote set-url` ([runbook § 8](doc/RUNBOOK.md#8-la-boucle-assumée)).
+      Rien à retirer côté GitHub — le clone d'amorçage s'y fait en HTTPS, sans
+      clé.
 - [ ] **Répliquer les vzdump hors du nœud** — moitié manquante de la décision
       de sauvegarder le registre : le vzdump en est le seul support, et il
       disparaît avec le nœud ([pourquoi](doc/RUNBOOK.md#le-cas-des-artefacts)).

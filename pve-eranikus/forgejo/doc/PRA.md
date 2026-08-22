@@ -430,7 +430,7 @@ Pas de clone local sous la main ? Le miroir GitHub en donne un, et le poste a
 `git` :
 
 ```bash
-git clone https://github.com/<org>/homelab_proxmox.git && cd homelab_proxmox
+git clone https://github.com/jbwittner/homelab_proxmox.git && cd homelab_proxmox
 ```
 
 ```bash
@@ -443,13 +443,13 @@ sudo bash /tmp/init.sh
 # précisément ce qu'on reconstruit.
 sudo mkdir -p /opt/homelab
 sudo chown admin:admin /opt/homelab
-git clone https://github.com/<org>/homelab_proxmox.git /opt/homelab
+git clone https://github.com/jbwittner/homelab_proxmox.git /opt/homelab
 ```
 
 `init.sh` a produit au passage une **nouvelle** paire de clés de déploiement,
 propre à cette machine — elle est neuve, donc inconnue de Forgejo. Elle se
 déclare en lecture seule une fois l'instance remontée
-([runbook § 4](RUNBOOK.md#le-dépôt-par-clé-de-déploiement-en-lecture-seule)), et
+([runbook § 4](RUNBOOK.md#plus-tard--basculer-le-remote-vers-forgejo)), et
 seulement si l'on veut repasser le clone en SSH. Ce n'est pas sur le chemin
 critique de la reprise.
 
@@ -625,7 +625,7 @@ git log --oneline -5          # vérifier qu'il est à jour de ce qu'on croit
 S'il n'y en a pas sous la main, le miroir GitHub en fournit un :
 
 ```bash
-git clone https://github.com/<org>/homelab_proxmox.git
+git clone https://github.com/jbwittner/homelab_proxmox.git
 ```
 
 ### Remonter la pile ailleurs, sans Forgejo
