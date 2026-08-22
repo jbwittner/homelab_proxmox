@@ -90,7 +90,8 @@ qm set 300 --scsi2 data:200,backup=0
 qm set 300 --ide2 local-lvm:cloudinit
 qm set 300 --boot order=scsi0
 qm set 300 --ciuser admin
-qm set 300 --sshkeys /root/.ssh/forgejo-admin.pub
+# Les clés du nœud, pas un fichier dédié : voir « Les clés SSH » ci-dessous.
+qm set 300 --sshkeys /root/.ssh/authorized_keys
 qm set 300 --ipconfig0 ip=192.168.1.56/24,gw=192.168.1.254
 qm set 300 --nameserver 192.168.1.254
 qm set 300 --ciupgrade 0
@@ -204,6 +205,35 @@ D'où le contrôle `paquets` de `fj-check.py`, qui vérifie que c'est bien un
   [KO ] paquets      /srv/packages N'EST PAS UN POINT DE MONTAGE — les artefacts
                      vont sur le disque des dépôts (mount /srv/packages)
 ```
+
+### Les clés SSH
+
+`--sshkeys /root/.ssh/authorized_keys` — **le fichier du nœud, pas une clé
+publique dédiée.** C'est une décision de reprise avant d'être une commodité : le
+jour où l'on recrée cette VM sur un nœud de repli, `authorized_keys` est là par
+construction, puisqu'il a fallu s'y connecter en SSH pour taper la commande. Un
+`/root/.ssh/forgejo-admin.pub` serait un fichier de plus à avoir pensé à
+recopier, découvert absent au pire moment.
+
+**Ça n'élargit l'accès à personne.** Qui a root sur le nœud peut déjà monter le
+disque de la VM, ouvrir sa console avec `qm terminal` ou la détruire. Lui donner
+en plus un accès SSH ne lui accorde rien qu'il n'ait déjà.
+
+Deux réserves, à connaître :
+
+- **Les préfixes d'options sont recopiés tels quels.** Une ligne
+  `from="192.168.1.0/24",no-pty ssh-ed25519 …` du nœud arrive intacte dans la
+  VM, où la restriction n'a pas le même sens. Relire le fichier avant :
+
+  ```bash
+  grep -c '^ssh-' /root/.ssh/authorized_keys      # combien de clés partent
+  grep -v '^ssh-' /root/.ssh/authorized_keys      # celles qui portent des options
+  ```
+
+- **Ce n'est pas une synchronisation.** cloud-init pose ces clés au premier
+  démarrage ; une clé ajoutée au nœud ensuite n'arrive pas toute seule dans la
+  VM. Elle s'ajoute à la main, ou par un `qm set --sshkeys` suivi d'un
+  redémarrage — ce qui, sur une source de vérité, se décide.
 
 ### L'adresse `192.168.1.56`
 

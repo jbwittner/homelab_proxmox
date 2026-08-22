@@ -294,7 +294,10 @@ qm set 300 --scsi2 data:200,backup=0
 qm set 300 --ide2 local-lvm:cloudinit
 qm set 300 --boot order=scsi0
 qm set 300 --ciuser admin
-qm set 300 --sshkeys /root/.ssh/forgejo-admin.pub
+# authorized_keys DU NŒUD : il est forcément là, puisqu'il a fallu s'y
+# connecter pour taper ceci. Un fichier de clé dédié serait une dépendance de
+# plus à avoir recopiée sur le nœud de repli.
+qm set 300 --sshkeys /root/.ssh/authorized_keys
 qm set 300 --ipconfig0 ip=192.168.1.56/24,gw=192.168.1.254
 qm set 300 --nameserver 192.168.1.254
 qm set 300 --ciupgrade 0
